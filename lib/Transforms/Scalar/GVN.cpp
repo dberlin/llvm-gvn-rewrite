@@ -2363,7 +2363,7 @@ void GVN::performCongruenceFinding(Value *V, Value *E) {
     }
     // Now mark the users as touched
     for (Value::use_iterator UI = V->use_begin(), UE = V->use_end();
-	 UI != UE; ) {
+	 UI != UE; ++UI) {
       Instruction *User = cast<Instruction>(*UI);
       touchedInstructions.insert(User);
     }
