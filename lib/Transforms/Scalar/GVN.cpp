@@ -50,6 +50,7 @@
 #include <algorithm>
 #include <list>
 
+
 using namespace llvm;
 using namespace PatternMatch;
 
@@ -505,10 +506,18 @@ void ValueTable::verifyRemoved(const Value *V) const {
 //===----------------------------------------------------------------------===//
 
 namespace {
-  enum {
-    InitialClass = 0
-  };
   class GVN : public FunctionPass {
+    static uint32_t nextCongruenceNum;    
+    struct CongruenceClass {
+      uint32_t id;
+      //TODO(dannyb) Replace this list
+      Value* leader;
+      Value* expression;
+      std::list<Value*> members;
+      CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0) {};
+      
+    };
+    CongruenceClass *InitialClass;
     bool NoLoads;
     MemoryDependenceAnalysis *MD;
     DominatorTree *DT;
@@ -520,61 +529,61 @@ namespace {
     DenseSet<std::pair<BasicBlock*, BasicBlock*> > reachableEdges;
     DenseSet<Instruction*> touchedInstructions;
     DenseSet<BasicBlock*> touchedBlocks;    
-    //TODO(dannyb) Replace this list
-    //TODO(dannyb) The uint32_t ones can be vectors
-    DenseMap<uint32_t, std::list<Value*> > congruenceClassMembers;
-    DenseMap<uint32_t, Value*> congruenceClassLeader;
-    DenseMap<uint32_t, Value*> congruenceClassExpression;
-    DenseMap<Value*, uint32_t> congruenceClass;
 
-struct ComparingMapInfo {
-  static inline Value* getEmptyKey() {
-    intptr_t Val = -1;
-    Val <<= PointerLikeTypeTraits<Value*>::NumLowBitsAvailable;
-    return reinterpret_cast<Value*>(Val);
-  }
-  static inline Value* getTombstoneKey() {
-    intptr_t Val = -2;
-    Val <<= PointerLikeTypeTraits<Value*>::NumLowBitsAvailable;
-    return reinterpret_cast<Value*>(Val);
-  }
-  static unsigned getHashValue(const Value *V) {
-    if (isa<Instruction>(V)) {
-      const Instruction *I = cast<Instruction>(V);
-      return hash_combine(I->getOpcode(), I->getType(),
-			  I->getNumOperands());
-    } else {
-      return (unsigned((uintptr_t)V) >> 4) ^
-           (unsigned((uintptr_t)V) >> 9);
-    }
-  }
-  static bool isEqual(const Value *LHS, const Value *RHS) {
-    if (LHS == RHS) 
-      return true; 
-    if (LHS->getValueID() == RHS->getValueID()) {
-      if (isa<Instruction>(LHS)) {
-	const Instruction *LHSI = cast<Instruction>(LHS);
-	const Instruction *RHSI = cast<Instruction>(RHS);
-	if (LHSI->getNumOperands() == RHSI->getNumOperands()
-	    && LHSI->getType() == RHSI->getType()
-	    && LHSI->getOpcode() == RHSI->getOpcode()) {
-	  for (unsigned i = 0, e = LHSI->getNumOperands();
-	       i != e; ++i) {
-	    if (LHSI->getOperand(i) != RHSI->getOperand(i))
-	      return false;
-	  }
-	  return true;
+
+    DenseMap<Value*, CongruenceClass*> congruenceClass;
+    
+    struct ComparingMapInfo {
+      static inline Value* getEmptyKey() {
+	intptr_t Val = -1;
+	Val <<= PointerLikeTypeTraits<Value*>::NumLowBitsAvailable;
+	return reinterpret_cast<Value*>(Val);
+      }
+      static inline Value* getTombstoneKey() {
+	intptr_t Val = -2;
+	Val <<= PointerLikeTypeTraits<Value*>::NumLowBitsAvailable;
+	return reinterpret_cast<Value*>(Val);
+      }
+      static unsigned getHashValue(const Value *V) {
+	if (isa<Instruction>(V)) {
+	  const Instruction *I = cast<Instruction>(V);
+	  return hash_combine(I->getOpcode(), I->getType(),
+			      I->getNumOperands());
+	} else {
+	  return (unsigned((uintptr_t)V) >> 4) ^
+	    (unsigned((uintptr_t)V) >> 9);
 	}
-      } 
-    }
-    return false;
-  }
-};
-
-    typedef DenseMap<Value*, uint32_t, ComparingMapInfo> ValueClassMap;
+      }
+      static bool isEqual(const Value *LHS, const Value *RHS) {
+	if (LHS == RHS) 
+	  return true; 
+	if (LHS == getTombstoneKey() || RHS == getTombstoneKey()
+	    || LHS == getEmptyKey() || RHS == getEmptyKey())
+	  return false;
+	
+	if (LHS->getValueID() == RHS->getValueID()) {
+	  if (isa<Instruction>(LHS)) {
+	    const Instruction *LHSI = cast<Instruction>(LHS);
+	    const Instruction *RHSI = cast<Instruction>(RHS);
+	    if (LHSI->getNumOperands() == RHSI->getNumOperands()
+		&& LHSI->getType() == RHSI->getType()
+		&& LHSI->getOpcode() == RHSI->getOpcode()) {
+	      for (unsigned i = 0, e = LHSI->getNumOperands();
+		   i != e; ++i) {
+		if (LHSI->getOperand(i) != RHSI->getOperand(i))
+		  return false;
+	      }
+	      return true;
+	    }
+	  } 
+	}
+	return false;
+      }
+    };
+    
+    typedef DenseMap<Value*, CongruenceClass*, ComparingMapInfo> ValueClassMap;
     ValueClassMap valueToClass;
     DenseSet<Value*> changedValues;
-    uint32_t nextCongruenceNum;
     ValueTable VN;
 
     
@@ -2308,22 +2317,23 @@ bool GVN::processInstruction(Instruction *I) {
 /// performCongruenceFinding - Perform congruence finding on a given value numbering expression
 void GVN::performCongruenceFinding(Value *V, Value *E) {
   // This is guaranteed to return something, since it will at least find INITIAL
-  unsigned VClass = congruenceClass[V];
+  CongruenceClass *VClass = congruenceClass[V];
   //TODO(dannyb): Double check algorithm where we are ignoring copy check of "if e is a variable"
-  unsigned EClass;
+  CongruenceClass *EClass;
   ValueClassMap::iterator VTCI = valueToClass.find(E);
 
   // If it's not in the value table, create a new congruence class
   if (VTCI == valueToClass.end()) {
-    uint32_t ClassNum = ++nextCongruenceNum;
-    congruenceClassMembers[ClassNum].push_back(V);
-    congruenceClassExpression[ClassNum] = E;
-    valueToClass[E] = ClassNum;
+    CongruenceClass *NewClass = new CongruenceClass;
+    // We should always be adding it below
+    // NewClass->members.push_back(V);
+    NewClass->expression = E;
+    valueToClass[E] = NewClass;
     if (isa<Constant>(E)) 
-      congruenceClassLeader[ClassNum] = E;
+      NewClass->leader = E;
     else
-      congruenceClassLeader[ClassNum] = V;
-    EClass = ClassNum;
+      NewClass->leader = V;
+    EClass = NewClass;
   } else {
     EClass = VTCI->second;
   }
@@ -2333,18 +2343,17 @@ void GVN::performCongruenceFinding(Value *V, Value *E) {
     if (WasInChanged)
       changedValues.erase(DI);
     if (VClass != EClass) {
-      std::list<Value*> &VClassMembers = congruenceClassMembers[VClass];
-      VClassMembers.remove(V);
-      congruenceClassMembers[EClass].push_back(V);
+      VClass->members.remove(V);
+      assert(std::find(EClass->members.begin(), EClass->members.end(), V) == EClass->members.end() && "Tried to add something to members twice!");
+      EClass->members.push_back(V);
+      congruenceClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
-      if (VClassMembers.empty() && VClass != InitialClass) {
-	valueToClass.erase(congruenceClassExpression[VClass]);
-	congruenceClassLeader.erase(VClass);
-	congruenceClassExpression.erase(VClass);
-      } else if (congruenceClassLeader[VClass] == V) {
-	std::list<Value*> &Members = congruenceClassMembers[VClass];
-	congruenceClassLeader[VClass] = Members.front();
-	for (std::list<Value*>::iterator LI = Members.begin(), LE = Members.end();
+      if (VClass->members.empty() && VClass != InitialClass) {
+	valueToClass.erase(VClass->expression);	
+	delete VClass;
+      } else if (VClass->leader == V) {
+	VClass->leader = VClass->members.front();
+	for (std::list<Value*>::iterator LI = VClass->members.begin(), LE = VClass->members.end();
 	     LI != LE; ++LI) {
 	  if (Instruction *I = dyn_cast<Instruction>(*LI))
 	    touchedInstructions.insert(I);
@@ -2405,6 +2414,8 @@ void GVN::propagateChangeInEdge(BasicBlock *Dest) {
     }
   }
 }
+uint32_t GVN::nextCongruenceNum = 0;
+
 /// runOnFunction - This is the main transformation entry point for a function.
 bool GVN::runOnFunction(Function& F) {
   nextCongruenceNum = 2;
@@ -2432,13 +2443,11 @@ bool GVN::runOnFunction(Function& F) {
       InitialValues.push_back(BI);
     }
   }
+  InitialClass = new CongruenceClass();
   for (std::list<Value*>::iterator LI = InitialValues.begin(), LE = InitialValues.end();
        LI != LE; ++LI)
     congruenceClass[*LI] = InitialClass;
-  congruenceClassMembers[InitialClass].swap(InitialValues);      
-  congruenceClassLeader[InitialClass] = 0;
-  congruenceClassExpression[InitialClass] = 0;
-  
+  InitialClass->members.swap(InitialValues);
   
   if (!NoLoads)
     MD = &getAnalysis<MemoryDependenceAnalysis>();
@@ -2467,6 +2476,13 @@ bool GVN::runOnFunction(Function& F) {
         }
       }
   }
+  for (ValueClassMap::iterator VCI = valueToClass.begin(), VCIE = valueToClass.end();
+       VCI != VCIE; ++VCI) {
+    delete VCI->second;
+    VCI->second = NULL;
+  }
+  delete InitialClass;
+  
   return true;
   // bool Changed = false;
   // bool ShouldContinue = true;
