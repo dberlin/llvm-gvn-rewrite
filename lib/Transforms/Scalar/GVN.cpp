@@ -35,8 +35,10 @@
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/Hashing.h"
+#include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Allocator.h"
@@ -44,6 +46,10 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/IRBuilder.h"
 #include "llvm/Support/PatternMatch.h"
+
+#include <algorithm>
+#include <list>
+
 using namespace llvm;
 using namespace PatternMatch;
 
@@ -58,6 +64,7 @@ STATISTIC(NumPRELoad,   "Number of loads PRE'd");
 static cl::opt<bool> EnablePRE("enable-pre",
                                cl::init(true), cl::Hidden);
 static cl::opt<bool> EnableLoadPRE("enable-load-pre", cl::init(true));
+
 
 // Maximum allowed recursion depth.
 static cl::opt<uint32_t>
@@ -454,7 +461,8 @@ uint32_t ValueTable::lookup_or_add(Value *V) {
 /// the value has not yet been numbered.
 uint32_t ValueTable::lookup(Value *V) const {
   DenseMap<Value*, uint32_t>::const_iterator VI = valueNumbering.find(V);
-  assert(VI != valueNumbering.end() && "Value not numbered?");
+  if (VI == valueNumbering.end())
+    return 0;
   return VI->second;
 }
 
@@ -497,15 +505,78 @@ void ValueTable::verifyRemoved(const Value *V) const {
 //===----------------------------------------------------------------------===//
 
 namespace {
-
+  enum {
+    InitialClass = 0
+  };
   class GVN : public FunctionPass {
     bool NoLoads;
     MemoryDependenceAnalysis *MD;
     DominatorTree *DT;
     const TargetData *TD;
     const TargetLibraryInfo *TLI;
+    DenseMap<BasicBlock*, uint32_t> rpoNumbers;
+    std::vector<BasicBlock*> rpoToBlock;
+    DenseSet<BasicBlock*> reachableBlocks;
+    DenseSet<std::pair<BasicBlock*, BasicBlock*> > reachableEdges;
+    DenseSet<Instruction*> touchedInstructions;
+    DenseSet<BasicBlock*> touchedBlocks;    
+    //TODO(dannyb) Replace this list
+    //TODO(dannyb) The uint32_t ones can be vectors
+    DenseMap<uint32_t, std::list<Value*> > congruenceClassMembers;
+    DenseMap<uint32_t, Value*> congruenceClassLeader;
+    DenseMap<uint32_t, Value*> congruenceClassExpression;
+    DenseMap<Value*, uint32_t> congruenceClass;
 
+struct ComparingMapInfo {
+  static inline Value* getEmptyKey() {
+    intptr_t Val = -1;
+    Val <<= PointerLikeTypeTraits<Value*>::NumLowBitsAvailable;
+    return reinterpret_cast<Value*>(Val);
+  }
+  static inline Value* getTombstoneKey() {
+    intptr_t Val = -2;
+    Val <<= PointerLikeTypeTraits<Value*>::NumLowBitsAvailable;
+    return reinterpret_cast<Value*>(Val);
+  }
+  static unsigned getHashValue(const Value *V) {
+    if (isa<Instruction>(V)) {
+      const Instruction *I = cast<Instruction>(V);
+      return hash_combine(I->getOpcode(), I->getType(),
+			  I->getNumOperands());
+    } else {
+      return (unsigned((uintptr_t)V) >> 4) ^
+           (unsigned((uintptr_t)V) >> 9);
+    }
+  }
+  static bool isEqual(const Value *LHS, const Value *RHS) {
+    if (LHS == RHS) 
+      return true; 
+    if (LHS->getValueID() == RHS->getValueID()) {
+      if (isa<Instruction>(LHS)) {
+	const Instruction *LHSI = cast<Instruction>(LHS);
+	const Instruction *RHSI = cast<Instruction>(RHS);
+	if (LHSI->getNumOperands() == RHSI->getNumOperands()
+	    && LHSI->getType() == RHSI->getType()
+	    && LHSI->getOpcode() == RHSI->getOpcode()) {
+	  for (unsigned i = 0, e = LHSI->getNumOperands();
+	       i != e; ++i) {
+	    if (LHSI->getOperand(i) != RHSI->getOperand(i))
+	      return false;
+	  }
+	  return true;
+	}
+      } 
+    }
+    return false;
+  }
+};
+
+    typedef DenseMap<Value*, uint32_t, ComparingMapInfo> ValueClassMap;
+    ValueClassMap valueToClass;
+    DenseSet<Value*> changedValues;
+    uint32_t nextCongruenceNum;
     ValueTable VN;
+
     
     /// LeaderTable - A mapping from value numbers to lists of Value*'s that
     /// have that value number.  Use findLeader to query it.
@@ -539,6 +610,9 @@ namespace {
     AliasAnalysis *getAliasAnalysis() const { return VN.getAliasAnalysis(); }
     MemoryDependenceAnalysis &getMemDep() const { return *MD; }
   private:
+    void performCongruenceFinding(Value*, Value*);
+    void processOutgoingEdges(TerminatorInst* TI);
+    void propagateChangeInEdge(BasicBlock *);
     /// addToLeaderTable - Push a new Value to the LeaderTable onto the list for
     /// its value number.
     void addToLeaderTable(uint32_t N, Value *V, BasicBlock *BB) {
@@ -2231,8 +2305,141 @@ bool GVN::processInstruction(Instruction *I) {
   return true;
 }
 
+/// performCongruenceFinding - Perform congruence finding on a given value numbering expression
+void GVN::performCongruenceFinding(Value *V, Value *E) {
+  // This is guaranteed to return something, since it will at least find INITIAL
+  unsigned VClass = congruenceClass[V];
+  //TODO(dannyb): Double check algorithm where we are ignoring copy check of "if e is a variable"
+  unsigned EClass;
+  ValueClassMap::iterator VTCI = valueToClass.find(E);
+
+  // If it's not in the value table, create a new congruence class
+  if (VTCI == valueToClass.end()) {
+    uint32_t ClassNum = ++nextCongruenceNum;
+    congruenceClassMembers[ClassNum].push_back(V);
+    congruenceClassExpression[ClassNum] = E;
+    valueToClass[E] = ClassNum;
+    if (isa<Constant>(E)) 
+      congruenceClassLeader[ClassNum] = E;
+    else
+      congruenceClassLeader[ClassNum] = V;
+    EClass = ClassNum;
+  } else {
+    EClass = VTCI->second;
+  }
+  DenseSet<Value*>::iterator DI = changedValues.find(V);
+  bool WasInChanged = DI != changedValues.end();
+  if (VClass != EClass || WasInChanged) {
+    if (WasInChanged)
+      changedValues.erase(DI);
+    if (VClass != EClass) {
+      std::list<Value*> &VClassMembers = congruenceClassMembers[VClass];
+      VClassMembers.remove(V);
+      congruenceClassMembers[EClass].push_back(V);
+      // See if we destroyed the class or need to swap leaders
+      if (VClassMembers.empty() && VClass != InitialClass) {
+	valueToClass.erase(congruenceClassExpression[VClass]);
+	congruenceClassLeader.erase(VClass);
+	congruenceClassExpression.erase(VClass);
+      } else if (congruenceClassLeader[VClass] == V) {
+	std::list<Value*> &Members = congruenceClassMembers[VClass];
+	congruenceClassLeader[VClass] = Members.front();
+	for (std::list<Value*>::iterator LI = Members.begin(), LE = Members.end();
+	     LI != LE; ++LI) {
+	  if (Instruction *I = dyn_cast<Instruction>(*LI))
+	    touchedInstructions.insert(I);
+	  changedValues.insert(*LI);
+	}
+      }
+    }
+    // Now mark the users as touched
+    for (Value::use_iterator UI = V->use_begin(), UE = V->use_end();
+	 UI != UE; ) {
+      Instruction *User = cast<Instruction>(*UI);
+      touchedInstructions.insert(User);
+    }
+  }
+}
+
+//  processOutgoingEdges - Process the outgoing edges of a block for reachability.
+void GVN::processOutgoingEdges(TerminatorInst *TI) {
+  for (unsigned i = 0, e = TI->getNumSuccessors(); i != e; ++i) {
+    BasicBlock *B = TI->getSuccessor(i); 
+    //TODO(reachability)
+    bool Reachable = true;
+    // Check if the Edge was reachable before
+    if (Reachable && reachableEdges.insert(std::make_pair(TI->getParent(), B)).second) {
+    // If this block wasn't reachable before, all instructions are touched
+      if (reachableBlocks.insert(B).second) {
+        //TODO(check this)
+        if (touchedBlocks.insert(B).second) {
+          for (BasicBlock::iterator BI = B->begin(), BE = B->end();
+               BI != BE; ++BI)
+            touchedInstructions.insert(BI);
+        }
+      } else {
+        // We've made an edge reachable to an existing block, which may impact predicates.
+        // Otherwise, only mark the phi nodes as touched
+        BasicBlock::iterator BI = B->begin();
+        while (isa<PHINode>(BI)) {
+          touchedInstructions.insert(BI);
+          ++BI;
+        }
+        // Propagate the change downstream.
+        propagateChangeInEdge(B);
+      }
+    }
+    //TODO(predication)
+  }
+}
+
+// Propagate a change in predicate reachability
+void GVN::propagateChangeInEdge(BasicBlock *Dest) {
+ //TODO: Speed this up
+  for (unsigned i = rpoNumbers[Dest], e = rpoNumbers.size(); i != e; ++i) {
+    BasicBlock *B = rpoToBlock[i];
+    if (touchedBlocks.insert(B).second) {
+      for (BasicBlock::iterator BI = B->begin(), BE = B->end();
+           BI != BE; ++BI)
+        touchedInstructions.insert(BI);
+    }
+  }
+}
 /// runOnFunction - This is the main transformation entry point for a function.
 bool GVN::runOnFunction(Function& F) {
+  nextCongruenceNum = 2;
+  // Initialize our rpo numbers so we can detect backwards edges
+  uint32_t rpoNumber = 0;
+  rpoToBlock.resize(std::distance(F.begin(), F.end()) + 1);
+  ReversePostOrderTraversal<Function*> rpoT(&F);
+  for (ReversePostOrderTraversal<Function*>::rpo_iterator RI = rpoT.begin(),
+       RE = rpoT.end(); RI != RE; ++RI)
+    {
+      rpoToBlock[rpoNumber] = *RI;
+      rpoNumbers[*RI] = rpoNumber++;
+    }
+  BasicBlock &EntryBlock = F.getEntryBlock();
+  // Initialize the touched instructions to include the entry block
+  for (BasicBlock::iterator BI = EntryBlock.begin(), BE = EntryBlock.end();
+       BI != BE; ++BI)
+    touchedInstructions.insert(BI);
+  reachableBlocks.insert(&F.getEntryBlock());
+
+  // Init the INITIAL class
+  std::list<Value*> InitialValues;
+  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI)  {
+    for (BasicBlock::iterator BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
+      InitialValues.push_back(BI);
+    }
+  }
+  for (std::list<Value*>::iterator LI = InitialValues.begin(), LE = InitialValues.end();
+       LI != LE; ++LI)
+    congruenceClass[*LI] = InitialClass;
+  congruenceClassMembers[InitialClass].swap(InitialValues);      
+  congruenceClassLeader[InitialClass] = 0;
+  congruenceClassExpression[InitialClass] = 0;
+  
+  
   if (!NoLoads)
     MD = &getAnalysis<MemoryDependenceAnalysis>();
   DT = &getAnalysis<DominatorTree>();
@@ -2242,45 +2449,64 @@ bool GVN::runOnFunction(Function& F) {
   VN.setMemDep(MD);
   VN.setDomTree(DT);
 
-  bool Changed = false;
-  bool ShouldContinue = true;
+  while (!touchedInstructions.empty()) {
+    //TODOWe should just sort the damn touchedinstructions and touchedblocks into RPO order after every iteration
+    ReversePostOrderTraversal<Function*> rpoT(&F);
+    for (ReversePostOrderTraversal<Function*>::rpo_iterator RI = rpoT.begin(),
+           RE = rpoT.end(); RI != RE; ++RI)
+      //TODO(Predication)
+      for (BasicBlock::iterator BI = (*RI)->begin(), BE = (*RI)->end(); BI != BE; ++BI) {
+        DenseSet<Instruction*>::iterator DI = touchedInstructions.find(BI);
+        if (DI != touchedInstructions.end()) {
+          touchedInstructions.erase(DI);
+          if (!BI->isTerminator()) {
+            performCongruenceFinding(BI, BI);
+          } else {
+            processOutgoingEdges(dyn_cast<TerminatorInst>(BI));
+          }
+        }
+      }
+  }
+  return true;
+  // bool Changed = false;
+  // bool ShouldContinue = true;
 
-  // Merge unconditional branches, allowing PRE to catch more
-  // optimization opportunities.
-  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ) {
-    BasicBlock *BB = FI++;
+  // // Merge unconditional branches, allowing PRE to catch more
+  // // optimization opportunities.
+  // for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ) {
+  //   BasicBlock *BB = FI++;
     
-    bool removedBlock = MergeBlockIntoPredecessor(BB, this);
-    if (removedBlock) ++NumGVNBlocks;
+  //   bool removedBlock = MergeBlockIntoPredecessor(BB, this);
+  //   if (removedBlock) ++NumGVNBlocks;
 
-    Changed |= removedBlock;
-  }
+  //   Changed |= removedBlock;
+  // }
 
-  unsigned Iteration = 0;
-  while (ShouldContinue) {
-    DEBUG(dbgs() << "GVN iteration: " << Iteration << "\n");
-    ShouldContinue = iterateOnFunction(F);
-    if (splitCriticalEdges())
-      ShouldContinue = true;
-    Changed |= ShouldContinue;
-    ++Iteration;
-  }
+  // unsigned Iteration = 0;
+  // while (ShouldContinue) {
+  //   DEBUG(dbgs() << "GVN iteration: " << Iteration << "\n");
+  //   ShouldContinue = iterateOnFunction(F);
+  //   if (splitCriticalEdges())
+  //     ShouldContinue = true;
+  //   Changed |= ShouldContinue;
+  //   ++Iteration;
+  // }
 
-  if (EnablePRE) {
-    bool PREChanged = true;
-    while (PREChanged) {
-      PREChanged = performPRE(F);
-      Changed |= PREChanged;
-    }
-  }
-  // FIXME: Should perform GVN again after PRE does something.  PRE can move
-  // computations into blocks where they become fully redundant.  Note that
-  // we can't do this until PRE's critical edge splitting updates memdep.
-  // Actually, when this happens, we should just fully integrate PRE into GVN.
+  // if (EnablePRE) {
+  //   bool PREChanged = true;
+  //   while (PREChanged) {
+  //     PREChanged = performPRE(F);
+  //     Changed |= PREChanged;
+  //   }
+  // }
+  // // FIXME: Should perform GVN again after PRE does something.  PRE can move
+  // // computations into blocks where they become fully redundant.  Note that
+  // // we can't do this until PRE's critical edge splitting updates memdep.
+  // // Actually, when this happens, we should just fully integrate PRE into GVN.
 
-  cleanupGlobalSets();
+  // cleanupGlobalSets();
 
-  return Changed;
+  // return Changed;
 }
 
 
@@ -2524,9 +2750,9 @@ bool GVN::iterateOnFunction(Function &F) {
   bool Changed = false;
 #if 0
   // Needed for value numbering with phi construction to work.
-  ReversePostOrderTraversal<Function*> RPOT(&F);
-  for (ReversePostOrderTraversal<Function*>::rpo_iterator RI = RPOT.begin(),
-       RE = RPOT.end(); RI != RE; ++RI)
+  ReversePostOrderTraversal<Function*> rpoT(&F);
+  for (ReversePostOrderTraversal<Function*>::rpo_iterator RI = rpoT.begin(),
+       RE = rpoT.end(); RI != RE; ++RI)
     Changed |= processBlock(*RI);
 #else
   for (df_iterator<DomTreeNode*> DI = df_begin(DT->getRootNode()),
