@@ -61,6 +61,9 @@ STATISTIC(NumGVNBlocks, "Number of blocks merged");
 STATISTIC(NumGVNSimpl,  "Number of instructions simplified");
 STATISTIC(NumGVNEqProp, "Number of equalities propagated");
 STATISTIC(NumPRELoad,   "Number of loads PRE'd");
+STATISTIC(NumGVNPhisEqual, "Number of equivalent PHI");
+STATISTIC(NumGVNPhisAllSame, "Number of PHIs whos arguments are all the same");
+STATISTIC(NumGVNBinOpsSimplified, "Number of binary operations simplified");
 
 static cl::opt<bool> EnablePRE("enable-pre",
                                cl::init(true), cl::Hidden);
@@ -81,12 +84,17 @@ MaxRecurseDepth("max-recurse-depth", cl::Hidden, cl::init(1000), cl::ZeroOrMore,
 /// two values.
 namespace {
   struct Expression {
+    bool isConstant;
     uint32_t opcode;
     Type *type;
+    //Unionize
     SmallVector<Value*, 4> varargs;
     SmallVector<uint32_t, 4> intargs;
+    BasicBlock *bb; // Only filled in for phi nodes
+    Value* constantValue; // Only filled in if isConstant == true
 
-    Expression(uint32_t o = ~2U) : opcode(o) { }
+    Expression(bool constant, uint32_t o = ~2U) : isConstant(constant), opcode(o), constantValue(0) {};
+
 
     bool operator==(const Expression &other) const {
       if (opcode != other.opcode)
@@ -95,10 +103,20 @@ namespace {
         return true;
       if (type != other.type)
         return false;
-      if (varargs != other.varargs)
-        return false;
-      if (intargs != other.intargs)
-        return false;
+if (isConstant != other.isConstant)
+  return false;
+      if (!isConstant) {
+        if (varargs != other.varargs)
+          return false;
+        if (intargs != other.intargs)
+          return false;
+        if (bb != other.bb)
+          return false;
+      } else {
+if (constantValue != other.constantValue)
+  return false;
+    }
+
       return true;
     }
 
@@ -163,43 +181,6 @@ namespace {
 // };
 // }
 
-//===----------------------------------------------------------------------===//
-//                     ValueTable Internal Functions
-//===----------------------------------------------------------------------===//
-
-Expression ValueTable::create_expression(Instruction *I) {
-  // Expression e;
-  // e.type = I->getType();
-  // e.opcode = I->getOpcode();
-  // for (Instruction::op_iterator OI = I->op_begin(), OE = I->op_end();
-  //      OI != OE; ++OI)
-  //   e.varargs.push_back(lookup_or_add(*OI));
-  // if (I->isCommutative()) {
-  //   // Ensure that commutative instructions that only differ by a permutation
-  //   // of their operands get the same value number by sorting the operand value
-  //   // numbers.  Since all commutative instructions have two operands it is more
-  //   // efficient to sort by hand rather than using, say, std::sort.
-  //   assert(I->getNumOperands() == 2 && "Unsupported commutative instruction!");
-  //   if (e.varargs[0] > e.varargs[1])
-  //     std::swap(e.varargs[0], e.varargs[1]);
-  // }
-  
-  // if (CmpInst *C = dyn_cast<CmpInst>(I)) {
-  //   // Sort the operand value numbers so x<y and y>x get the same value number.
-  //   CmpInst::Predicate Predicate = C->getPredicate();
-  //   if (e.varargs[0] > e.varargs[1]) {
-  //     std::swap(e.varargs[0], e.varargs[1]);
-  //     Predicate = CmpInst::getSwappedPredicate(Predicate);
-  //   }
-  //   e.opcode = (C->getOpcode() << 8) | Predicate;
-  // } else if (InsertValueInst *E = dyn_cast<InsertValueInst>(I)) {
-  //   for (InsertValueInst::idx_iterator II = E->idx_begin(), IE = E->idx_end();
-  //        II != IE; ++II)
-  //     e.varargs.push_back(*II);
-  // }
-  
-  // return e;
-}
 
 Expression ValueTable::create_cmp_expression(unsigned Opcode,
                                              CmpInst::Predicate Predicate,
@@ -529,7 +510,8 @@ namespace {
     DominatorTree *DT;
     const TargetData *TD;
     const TargetLibraryInfo *TLI;
-    DenseMap<BasicBlock*, uint32_t> rpoNumbers;
+    DenseMap<BasicBlock*, uint32_t> rpoBlockNumbers;
+    DenseMap<Instruction*, uint32_t> rpoInstructionNumbers;
     std::vector<BasicBlock*> rpoToBlock;
     DenseSet<BasicBlock*> reachableBlocks;
     DenseSet<std::pair<BasicBlock*, BasicBlock*> > reachableEdges;
@@ -567,9 +549,7 @@ namespace {
     typedef DenseMap<Expression*, CongruenceClass*, ComparingExpressionInfo> ExpressionClassMap;
     ExpressionClassMap expressionToClass;
     DenseSet<Value*> changedValues;
-    ValueTable VN;
 
-    
     /// LeaderTable - A mapping from value numbers to lists of Value*'s that
     /// have that value number.  Use findLeader to query it.
     struct LeaderTableEntry {
@@ -579,8 +559,13 @@ namespace {
     };
     DenseMap<uint32_t, LeaderTableEntry> LeaderTable;
     BumpPtrAllocator TableAllocator;
+    ValueTable VN;
     
     SmallVector<Instruction*, 8> InstrsToErase;
+    Expression *createExpression(Instruction*);
+    Expression *createConstantExpression(Constant *);
+    Expression *uniquifyExpression(Expression *E);
+
   public:
     static char ID; // Pass identification, replacement for typeid
     explicit GVN(bool noloads = false)
@@ -593,7 +578,6 @@ namespace {
     /// markInstructionForDeletion - This removes the specified instruction from
     /// our various maps and marks it for deletion.
     void markInstructionForDeletion(Instruction *I) {
-      VN.erase(I);
       InstrsToErase.push_back(I);
     }
     
@@ -603,6 +587,8 @@ namespace {
     MemoryDependenceAnalysis &getMemDep() const { return *MD; }
   private:
     Expression *performSymbolicEvaluation(Value*, BasicBlock*);
+    Expression *performSymbolicPHIEvaluation(Instruction*, BasicBlock*);
+
     void performCongruenceFinding(Value*, Expression*);
     void processOutgoingEdges(TerminatorInst* TI);
     void propagateChangeInEdge(BasicBlock*);
@@ -2298,15 +2284,15 @@ bool GVN::processInstruction(Instruction *I) {
   return true;
 }
 
-// TODO: inconsistent variable naming
-/// performSymbolicEvaluation - Substitute and symbolize the value before value numbering
-Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) 
-{
-  Expression *e = new Expression();
+Expression *GVN::createExpression(Instruction *I) {
   
-  Instruction *I = cast<Instruction>(V);
-  e->type = I->getType();
-  e->opcode = I->getOpcode();
+  Expression *E = new Expression(false);
+  E->type = I->getType();
+  E->opcode = I->getOpcode();
+  // The basic block only matters for PHI nodes
+  if (isa<PHINode>(I)) 
+    E->bb = I->getParent();
+
   for (Instruction::op_iterator OI = I->op_begin(), OE = I->op_end();
        OI != OE; ++OI) {
     Value *Operand = *OI;
@@ -2316,38 +2302,143 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B)
       if (CC != InitialClass)
         Operand = CC->leader;
     }
-    e->varargs.push_back(Operand);
+    E->varargs.push_back(Operand);
   }
-  
+  // Handle simplify
+  if (I->isBinaryOp()) {
+    Value *V = SimplifyBinOp(E->opcode, E->varargs[0], E->varargs[1], TD, TLI, DT);
+    Constant *C;
+    if (V && (C = dyn_cast<Constant>(V))) {
+      DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
+      NumGVNBinOpsSimplified++;
+      return createConstantExpression(C);
+    }
+  }
+    
   if (I->isCommutative()) {
     // Ensure that commutative instructions that only differ by a permutation
     // of their operands get the same value number by sorting the operand value
     // numbers.  Since all commutative instructions have two operands it is more
     // efficient to sort by hand rather than using, say, std::sort.
     assert(I->getNumOperands() == 2 && "Unsupported commutative instruction!");
-    if (e->varargs[0] > e->varargs[1])
-      std::swap(e->varargs[0], e->varargs[1]);
+    if (E->varargs[0] > E->varargs[1])
+      std::swap(E->varargs[0], E->varargs[1]);
   }
   
   if (CmpInst *C = dyn_cast<CmpInst>(I)) {
     // Sort the operand value numbers so x<y and y>x get the same value number.
     CmpInst::Predicate Predicate = C->getPredicate();
-    if (e->varargs[0] > e->varargs[1]) {
-      std::swap(e->varargs[0], e->varargs[1]);
+    if (E->varargs[0] > E->varargs[1]) {
+      std::swap(E->varargs[0], E->varargs[1]);
       Predicate = CmpInst::getSwappedPredicate(Predicate);
     }
-    e->opcode = (C->getOpcode() << 8) | Predicate;
-  } else if (InsertValueInst *E = dyn_cast<InsertValueInst>(I)) {
-    for (InsertValueInst::idx_iterator II = E->idx_begin(), IE = E->idx_end();
+    E->opcode = (C->getOpcode() << 8) | Predicate;
+  } else if (InsertValueInst *IVI = dyn_cast<InsertValueInst>(I)) {
+    for (InsertValueInst::idx_iterator II = IVI->idx_begin(), IE = IVI->idx_end();
          II != IE; ++II)
-      e->intargs.push_back(*II);
+      E->intargs.push_back(*II);
   }
-  std::pair<DenseMap<Expression*, Expression*>::iterator, bool> P = uniquedExpressions.insert(std::make_pair(e, e));
-  if (!P.second) {
-    delete e;
+  //TODO (constant handling)
+  return uniquifyExpression(E);
+}
+
+Expression *GVN::uniquifyExpression(Expression *E) {  
+  std::pair<DenseMap<Expression*, Expression*>::iterator, bool> P = uniquedExpressions.insert(std::make_pair(E, E));
+  if (!P.second && P.first->first != E) {
+    delete E;
     return P.first->first;
   } 
-  return e;
+  return E;
+}
+
+  
+Expression *GVN::createConstantExpression(Constant *C) {
+  Expression *E = new Expression(true);
+  E->type = C->getType();
+  E->opcode = C->getValueID();
+  E->constantValue = C;
+  return uniquifyExpression(E);
+}
+
+// performSymbolicPHIEvaluation - Evaluate PHI nodes symbolically, and create an expression result
+Expression *GVN::performSymbolicPHIEvaluation(Instruction *I, BasicBlock *B) {  
+  Expression *E = createExpression(I);
+  Value *AllSameValue = E->varargs[0];
+  //TODO (reachability)
+  for (unsigned i = 1, e = E->varargs.size(); i != e; ++i) {
+    if (E->varargs[i] != AllSameValue) {
+      AllSameValue = NULL;
+      break;
+    }
+  }
+  // 
+  if (AllSameValue) {
+    NumGVNPhisAllSame++;
+    DEBUG(dbgs() << "Simplified PHI node " << I << " to " << *AllSameValue << "\n");
+    return performSymbolicEvaluation(AllSameValue, B);
+  }
+  return uniquifyExpression(E);
+}
+
+
+/// performSymbolicEvaluation - Substitute and symbolize the value before value numbering
+Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
+  Expression *E = NULL;
+  if (Constant *C = dyn_cast<Constant>(V))
+    E = createConstantExpression(C);
+  else {
+    Instruction *I = cast<Instruction>(V);
+    switch (I->getOpcode()) {
+    case Instruction::PHI: 
+      E = performSymbolicPHIEvaluation(I, B);
+      break;
+      
+    case Instruction::Add:
+    case Instruction::FAdd:
+    case Instruction::Sub:
+    case Instruction::FSub:
+    case Instruction::Mul:
+    case Instruction::FMul:
+    case Instruction::UDiv:
+    case Instruction::SDiv:
+    case Instruction::FDiv:
+    case Instruction::URem:
+    case Instruction::SRem:
+    case Instruction::FRem:
+    case Instruction::Shl:
+    case Instruction::LShr:
+    case Instruction::AShr:
+    case Instruction::And:
+    case Instruction::Or :
+    case Instruction::Xor:
+    case Instruction::ICmp:
+    case Instruction::FCmp:
+    case Instruction::Trunc:
+    case Instruction::ZExt:
+    case Instruction::SExt:
+    case Instruction::FPToUI:
+    case Instruction::FPToSI:
+    case Instruction::UIToFP:
+    case Instruction::SIToFP:
+    case Instruction::FPTrunc:
+    case Instruction::FPExt:
+    case Instruction::PtrToInt:
+    case Instruction::IntToPtr:
+    case Instruction::BitCast:
+    case Instruction::Select:
+    case Instruction::ExtractElement:
+    case Instruction::InsertElement:
+    case Instruction::ShuffleVector:
+    case Instruction::InsertValue:
+    case Instruction::GetElementPtr:
+      E = createExpression(I);
+      break;
+    default:
+      return NULL;
+    }
+  }
+  
+  return E;
 }
 
 //   SmallVector<Value*, 4> Operands;
@@ -2393,10 +2484,9 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
     // NewClass->members.push_back(V);
     NewClass->expression = E;
     expressionToClass[E] = NewClass;
-    //TODO: Constants should always be leaders
-    // if (isa<Constant>(E->originalValue)) 
-    //   NewClass->leader = E->originalValue;
-    // else
+    if (E->isConstant)
+      NewClass->leader = E->constantValue;
+    else
       NewClass->leader = V;
     EClass = NewClass;
     
@@ -2448,7 +2538,7 @@ void GVN::processOutgoingEdges(TerminatorInst *TI) {
     if (Reachable && reachableEdges.insert(std::make_pair(TI->getParent(), B)).second) {
     // If this block wasn't reachable before, all instructions are touched
       if (reachableBlocks.insert(B).second) {
-	DEBUG(dbgs() << "Block " << (uintptr_t)B << " marked reachable\n");
+	DEBUG(dbgs() << "Block " << (void *)B << " marked reachable\n");
         //TODO(check this)
         if (touchedBlocks.insert(B).second) {
           for (BasicBlock::iterator BI = B->begin(), BE = B->end();
@@ -2456,7 +2546,7 @@ void GVN::processOutgoingEdges(TerminatorInst *TI) {
             touchedInstructions.insert(BI);
         }
       } else {
-	DEBUG(dbgs() << "Block " << (uintptr_t)B << " was reachable, but new edge to it found\n");
+	DEBUG(dbgs() << "Block " << (void *)B << " was reachable, but new edge to it found\n");
         // We've made an edge reachable to an existing block, which may impact predicates.
         // Otherwise, only mark the phi nodes as touched
         BasicBlock::iterator BI = B->begin();
@@ -2475,7 +2565,7 @@ void GVN::processOutgoingEdges(TerminatorInst *TI) {
 // Propagate a change in predicate reachability
 void GVN::propagateChangeInEdge(BasicBlock *Dest) {
  //TODO: Speed this up
-  for (unsigned i = rpoNumbers[Dest], e = rpoNumbers.size(); i != e; ++i) {
+  for (unsigned i = rpoBlockNumbers[Dest], e = rpoBlockNumbers.size(); i != e; ++i) {
     BasicBlock *B = rpoToBlock[i];
     if (touchedBlocks.insert(B).second) {
       for (BasicBlock::iterator BI = B->begin(), BE = B->end();
@@ -2494,15 +2584,18 @@ bool GVN::runOnFunction(Function& F) {
   unsigned NumBasicBlocks = std::distance(F.begin(), F.end());
   rpoToBlock.resize(NumBasicBlocks + 1);
   DEBUG(dbgs() << "Found " << NumBasicBlocks <<  " basic blocks\n");
-  
+  BasicBlock &EntryBlock = F.getEntryBlock();  
   ReversePostOrderTraversal<Function*> rpoT(&F);
   for (ReversePostOrderTraversal<Function*>::rpo_iterator RI = rpoT.begin(),
        RE = rpoT.end(); RI != RE; ++RI)
     {
       rpoToBlock[rpoNumber] = *RI;
-      rpoNumbers[*RI] = rpoNumber++;
+      rpoBlockNumbers[*RI] = rpoNumber++;
+      // TODO: Use two worklist method
+      // for (BasicBlock::iterator BI = EntryBlock.begin(), BE = EntryBlock.end();
+      //      BI != BE; ++BI)
+      //   rpoInstructionNumbers[BI] = rpoNumber++;
     }
-  BasicBlock &EntryBlock = F.getEntryBlock();
   // Initialize the touched instructions to include the entry block
   for (BasicBlock::iterator BI = EntryBlock.begin(), BE = EntryBlock.end();
        BI != BE; ++BI)
@@ -2538,34 +2631,54 @@ bool GVN::runOnFunction(Function& F) {
     //  and walknig both lists at the same time, processing whichever has the next number in order.
     ReversePostOrderTraversal<Function*> rpoT(&F);
     for (ReversePostOrderTraversal<Function*>::rpo_iterator RI = rpoT.begin(),
-           RE = rpoT.end(); RI != RE; ++RI)
+           RE = rpoT.end(); RI != RE; ++RI) {
       //TODO(Predication)
-      for (BasicBlock::iterator BI = (*RI)->begin(), BE = (*RI)->end(); BI != BE; ++BI) {
+      // Note that in this loop, the 
+      bool movedForward = false;
+      for (BasicBlock::iterator BI = (*RI)->begin(), BE = (*RI)->end(); BI != BE; !movedForward ? BI++ : BI) {
+	movedForward = false;
         DenseSet<Instruction*>::iterator DI = touchedInstructions.find(BI);
         if (DI != touchedInstructions.end()) {
-	  DEBUG(dbgs() << "Processing instruction " << *BI << "\n");
+	  DEBUG(dbgs() << "Processing instruction " << (void *)(Instruction *)BI << "\n");
           touchedInstructions.erase(DI);
-          if (!BI->isTerminator()) {
-  // If the instruction can be easily simplified then do so now in preference
-  // to value numbering it.  Value numbering often exposes redundancies, for
-  // example if it determines that %y is equal to %x then the instruction
-  // "%z = and i32 %x, %y" becomes "%z = and i32 %x, %x" which we now simplify.
-  // if (Value *V = SimplifyInstruction(I, TD, TLI, DT)) {
-  //   I->replaceAllUsesWith(V);
-  //   if (MD && V->getType()->isPointerTy())
-  //     MD->invalidateCachedPointerInfo(V);
-  //   markInstructionForDeletion(I);
-  //   ++NumGVNSimpl;
-  //   return true;
-  // }
+	  Instruction *I = BI++;
+	  movedForward = true;
+	  
+	  // If the instruction can be easily simplified then do so now in preference
+	  // to value numbering it.  Value numbering often exposes redundancies, for
+	  // example if it determines that %y is equal to %x then the instruction
+	  // "%z = and i32 %x, %y" becomes "%z = and i32 %x, %x" which we now simplify.
+	  if (1)
+	  if (Value *V = SimplifyInstruction(I, TD, TLI, DT)) {
+	    // Mark the uses as touched
+	    for (Value::use_iterator UI = I->use_begin(), UE = I->use_end();
+		 UI != UE; ++UI) {
+	      Instruction *User = cast<Instruction>(*UI);
+	      touchedInstructions.insert(User);
+	    }
 
-	    Expression *Symbolized = performSymbolicEvaluation(BI, *RI);
-            performCongruenceFinding(BI, Symbolized);
+	    I->replaceAllUsesWith(V);
+	    if (MD && V->getType()->isPointerTy())
+	      MD->invalidateCachedPointerInfo(V);
+	    DEBUG(dbgs() << "GVN removed: " << *I << '\n');
+	    if (MD) MD->removeInstruction(I);
+	    I->eraseFromParent();
+	    DEBUG(verifyRemoved(I));
+	    ++NumGVNSimpl;
+	    continue;
+	  }
+	  
+          if (!I->isTerminator()) {
+	    Expression *Symbolized = performSymbolicEvaluation(I, *RI);
+            if (!Symbolized)
+              continue;
+            performCongruenceFinding(I, Symbolized);
           } else {
-            processOutgoingEdges(dyn_cast<TerminatorInst>(BI));
+            processOutgoingEdges(dyn_cast<TerminatorInst>(I));
           }
         }
       }
+    }
   }
 
   // for (ValueClassMap::iterator VCI = expressionToClass.begin(), VCIE = valueToClass.end();
@@ -2581,7 +2694,8 @@ bool GVN::runOnFunction(Function& F) {
   
   congruenceClass.clear();
   expressionToClass.clear();
-  rpoNumbers.clear();
+  rpoBlockNumbers.clear();
+  rpoInstructionNumbers.clear();
   rpoToBlock.clear();
   reachableBlocks.clear();
   reachableEdges.clear();
