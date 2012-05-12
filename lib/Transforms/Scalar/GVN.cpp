@@ -261,40 +261,40 @@ namespace {
 	  CallInst* local_cdep = cast<CallInst>(local_dep.getInst());
 	  if (local_cdep != OE.callinst_) 
 	    return false;
-	}
-	// Non-local case.
-	const MemoryDependenceAnalysis::NonLocalDepInfo &deps =
-	  MD->getNonLocalCallDependency(CallSite(callinst_));
-	// FIXME: Move the checking logic to MemDep!
-	CallInst* cdep = 0;
-	
-	// Check to see if we have a single dominating call instruction that is
-	// identical to C.
-	for (unsigned i = 0, e = deps.size(); i != e; ++i) {
-	  const NonLocalDepEntry *I = &deps[i];
-	  if (I->getResult().isNonLocal())
-	    continue;
+	} else {
+	  // Non-local case.
+	  const MemoryDependenceAnalysis::NonLocalDepInfo &deps =
+	    MD->getNonLocalCallDependency(CallSite(callinst_));
+	  // FIXME: Move the checking logic to MemDep!
+	  CallInst* cdep = 0;
 	  
-	  // We don't handle non-definitions.  If we already have a call, reject
-	  // instruction dependencies.
-	  if (!I->getResult().isDef() || cdep != 0) {
+	  // Check to see if we have a single dominating call instruction that is
+	  // identical to C.
+	  for (unsigned i = 0, e = deps.size(); i != e; ++i) {
+	    const NonLocalDepEntry *I = &deps[i];
+	    if (I->getResult().isNonLocal())
+	      continue;
+	    
+	    // We don't handle non-definitions.  If we already have a call, reject
+	    // instruction dependencies.
+	    if (!I->getResult().isDef() || cdep != 0) {
+	      cdep = 0;
+	      break;
+	    }
+	    
+	    CallInst *NonLocalDepCall = dyn_cast<CallInst>(I->getResult().getInst());
+	    if (NonLocalDepCall && NonLocalDepCall == OE.callinst_){
+	      cdep = NonLocalDepCall;
+	      continue;
+	    }
+	    
 	    cdep = 0;
 	    break;
 	  }
-	  
-	  CallInst *NonLocalDepCall = dyn_cast<CallInst>(I->getResult().getInst());
-	  if (NonLocalDepCall && NonLocalDepCall == OE.callinst_){
-	    cdep = NonLocalDepCall;
-	    continue;
-	  }
-	  
-	  cdep = 0;
-	  break;
+	  if (!cdep)
+	    return false;
 	}
-	if (!cdep)
-	  return false;
       }
-      
       return true;      
     }
     
@@ -303,11 +303,22 @@ namespace {
                           hash_combine_range(varargs.begin(),
                                              varargs.end()));
     }
+    
+    virtual void print(raw_ostream &OS) {
+      OS << "{etype = " << etype_ << ", opcode = " << opcode_ << ", varargs = {";
+      for (unsigned i = 0, e = varargs.size(); i != e; ++i) {
+	OS << "[" << i << "] = " << varargs[i] << "  ";
+      }
+      OS << "}";
+      OS << " represents call at " << callinst_ << ", nomem = " << nomem_ << ", readonly = " << readonly_ << "}";
+    }
   };
   class LoadExpression: public BasicExpression {
   private:
     void operator=(const LoadExpression&); // Do not implement
     LoadExpression(const LoadExpression&); // Do not implement
+  protected:
+    LoadInst *loadinst_;
   public:
     
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -315,8 +326,9 @@ namespace {
     static inline bool classof(const Expression *EB) {
       return EB->getExpressionType() == ExpressionTypeLoad;
     }    
-    LoadExpression() {
+    LoadExpression(LoadInst *L) {
       etype_ = ExpressionTypeLoad;
+      loadinst_ = L;
     };
     
     virtual ~LoadExpression() {};
@@ -341,6 +353,8 @@ namespace {
   private:
     void operator=(const StoreExpression&); // Do not implement
     StoreExpression(const StoreExpression&); // Do not implement
+  protected:
+    StoreInst *storeinst_;
   public:
     
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -348,8 +362,9 @@ namespace {
     static inline bool classof(const Expression *EB) {
       return EB->getExpressionType() == ExpressionTypeStore;
     }    
-    StoreExpression() {
+    StoreExpression(StoreInst *S) {
       etype_ = ExpressionTypeStore;
+      storeinst_ = S;
     };
     
     virtual ~StoreExpression() {};
@@ -640,7 +655,6 @@ namespace {
     DenseMap<uint32_t, LeaderTableEntry> LeaderTable;
     BumpPtrAllocator TableAllocator;
     
-    SmallVector<Instruction*, 8> InstrsToErase;
     Expression *createExpression(Instruction*);
     void setBasicExpressionInfo(Instruction*, BasicExpression*);
     Expression *createPHIExpression(Instruction *);
@@ -659,18 +673,14 @@ namespace {
 
     bool runOnFunction(Function &F);
     
-    /// markInstructionForDeletion - This removes the specified instruction from
-    /// our various maps and marks it for deletion.
-    void markInstructionForDeletion(Instruction *I) {
-      InstrsToErase.push_back(I);
-    }
-    
     const TargetData *getTargetData() const { return TD; }
     DominatorTree &getDominatorTree() const { return *DT; }
     AliasAnalysis *getAliasAnalysis() const { return AA; }
     MemoryDependenceAnalysis &getMemDep() const { return *MD; }
   private:
     Expression *performSymbolicEvaluation(Value*, BasicBlock*);
+    Expression *performSymbolicLoadEvaluation(Instruction*, BasicBlock*);
+    Expression *performSymbolicStoreEvaluation(Instruction *, BasicBlock *);
     Expression *performSymbolicCallEvaluation(Instruction*, BasicBlock*);
     Expression *performSymbolicPHIEvaluation(Instruction*, BasicBlock*);
 
@@ -836,6 +846,7 @@ Expression *GVN::createExpression(Instruction *I) {
       std::swap(E->varargs[0], E->varargs[1]);
   }
   
+
   if (CmpInst *CI = dyn_cast<CmpInst>(I)) {
     // Sort the operand value numbers so x<y and y>x get the same value number.
     CmpInst::Predicate Predicate = CI->getPredicate();
@@ -844,6 +855,7 @@ Expression *GVN::createExpression(Instruction *I) {
       Predicate = CmpInst::getSwappedPredicate(Predicate);
     }
     E->setOpcode((CI->getOpcode() << 8) | Predicate);
+    // TODO: 10% of our time is spent in SimplifyCmpInst with pointer operands
     Value *V = SimplifyCmpInst(Predicate, E->varargs[0], E->varargs[1], TD, TLI, DT);
     Constant *C;
     if (V && (C = dyn_cast<Constant>(V))) {
@@ -889,20 +901,7 @@ Expression *GVN::uniquifyExpression(Expression *E) {
 
 Expression *GVN::createInsertValueExpression(InsertValueInst *I) {
   InsertValueExpression *E = new InsertValueExpression();
-  E->setType(I->getType());
-  E->setOpcode(I->getOpcode());
-
-  for (Instruction::op_iterator OI = I->op_begin(), OE = I->op_end();
-       OI != OE; ++OI) {
-    Value *Operand = *OI;
-    DenseMap<Value*, CongruenceClass*>::iterator VTCI = valueToClass.find(Operand);
-    if (VTCI != valueToClass.end()) {
-      CongruenceClass *CC = VTCI->second;
-      if (CC != InitialClass)
-        Operand = CC->leader;
-    }
-    E->varargs.push_back(Operand);
-  }
+  setBasicExpressionInfo(I, E);
   for (InsertValueInst::idx_iterator II = I->idx_begin(), IE = I->idx_end();
        II != IE; ++II)
     E->intargs.push_back(*II);
@@ -927,6 +926,28 @@ Expression *GVN::createCallExpression(CallInst *CI, bool nomem, bool readonly) {
   CallExpression *E = new CallExpression(CI, nomem, readonly);
   setBasicExpressionInfo(CI, E);
   return E;
+}
+
+Expression *GVN::performSymbolicStoreEvaluation(Instruction *I, BasicBlock *B) {
+  StoreInst *SI = cast<StoreInst>(I);
+  StoreExpression *E = new StoreExpression(SI);
+  // We only care about the pointer operand to the store for expression lookup.
+  // Two stores are the same 
+  E->setType(I->getType());
+  E->setOpcode(I->getOpcode());
+  
+  for (Instruction::op_iterator OI = I->op_begin(), OE = I->op_end();
+       OI != OE; ++OI) {
+    Value *Operand = *OI;
+    DenseMap<Value*, CongruenceClass*>::iterator VTCI = valueToClass.find(Operand);
+    if (VTCI != valueToClass.end()) {
+      CongruenceClass *CC = VTCI->second;
+      if (CC != InitialClass)
+        Operand = CC->leader;
+    }
+    E->varargs.push_back(Operand);
+  }
+
 }
 
 /// performSymbolicCallEvaluation - Evaluate read only and pure calls, and create an expression result
@@ -1101,12 +1122,12 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
     case Instruction::Call:
       E = performSymbolicCallEvaluation(I, B);
       break;
-    // case Instruction::Store:
-    //   E = performSymbolicStoreEvaluation(cast<StoreInst>(I, B));
-    //   break;
-    // case Instruction::Load:
-    //   E = performSymbolicLoadEvaluation(cast<LoadInst>(I, B));
-    //   break;
+    case Instruction::Store:
+      E = performSymbolicStoreEvaluation(I, B);
+      break;
+    case Instruction::Load:
+      E = performSymbolicLoadEvaluation(I, B);
+      break;
     case Instruction::Add:
     case Instruction::FAdd:
     case Instruction::Sub:
@@ -1150,7 +1171,8 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
       return NULL;
     }
   }
-  
+  if (!E)
+    return NULL;
   return uniquifyExpression(E);
 }
 
@@ -1187,9 +1209,10 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
   //TODO(dannyb): Double check algorithm where we are ignoring copy check of "if e is a variable"
   CongruenceClass *EClass;
 
-  // Expressions we can't symbolize are always in their own congruence class
+  // Expressions we can't symbolize are always in their own unique congruence class
   if (E == NULL) {
-    if (VClass->members.size() != 1) {
+    // We may have already made a unique class
+    if (VClass->members.size() != 1 || VClass->leader != V) {
       CongruenceClass *NewClass = new CongruenceClass();
       congruenceClass.push_back(NewClass);
       // We should always be adding it below
@@ -1199,6 +1222,8 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
       EClass = NewClass;
       DEBUG(dbgs() << "Created new congruence class for " << V << " due to NULL expression\n");
 
+    } else {
+      EClass = VClass;
     }
   } else {
     ExpressionClassMap::iterator VTCI = expressionToClass.find(E);
@@ -1237,7 +1262,8 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
       valueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
       if (VClass->members.empty() && VClass != InitialClass) {
-	expressionToClass.erase(VClass->expression);
+	if (VClass->expression)
+	  expressionToClass.erase(VClass->expression);
 	// delete VClass;
       } else if (VClass->leader == V) {
 	VClass->leader = *(VClass->members.begin());
@@ -1412,7 +1438,8 @@ bool GVN::runOnFunction(Function& F) {
 
     Changed |= removedBlock;
   }
-
+  uint32_t ICount = 0;
+  
   nextCongruenceNum = 2;
   // Initialize our rpo numbers so we can detect backwards edges
   uint32_t rpoBNumber = 0;
@@ -1428,12 +1455,16 @@ bool GVN::runOnFunction(Function& F) {
       uint32_t IStart = rpoINumber;
       rpoBlockNumbers[*RI] = rpoBNumber++;
       // TODO: Use two worklist method
-      // for (BasicBlock::iterator BI = EntryBlock.begin(), BE = EntryBlock.end();
-      // 	   BI != BE; ++BI)
+       for (BasicBlock::iterator BI = EntryBlock.begin(), BE = EntryBlock.end();
+	    BI != BE; ++BI)
+	 ++ICount;
+       
       // 	rpoInstructionNumbers[BI] = rpoINumber++;
       uint32_t IEnd = rpoINumber;
-      rpoInstructionStartEnd[*RI] = std::make_pair(IStart, IEnd);
+      // rpoInstructionStartEnd[*RI] = std::make_pair(IStart, IEnd);
     }
+  // Ensure we don't end up resizing the expressionToClass map, as that can be quite expensive
+  expressionToClass.resize(ICount);
   rpoToBlock.resize(rpoBNumber+1);
   for (Function::iterator BI = F.begin(), BE = F.end(); BI != BE; ++BI)
     rpoToBlock[rpoBlockNumbers[BI]] = BI;
