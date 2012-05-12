@@ -67,6 +67,7 @@ STATISTIC(NumPRELoad,   "Number of loads PRE'd");
 STATISTIC(NumGVNPhisEqual, "Number of equivalent PHI");
 STATISTIC(NumGVNPhisAllSame, "Number of PHIs whos arguments are all the same");
 STATISTIC(NumGVNBinOpsSimplified, "Number of binary operations simplified");
+STATISTIC(NumGVNCmpInsSimplified, "Number of comparison operations simplified");
 
 static cl::opt<bool> EnablePRE("enable-pre",
                                cl::init(true), cl::Hidden);
@@ -503,7 +504,7 @@ namespace {
 Expression ValueTable::create_cmp_expression(unsigned Opcode,
                                              CmpInst::Predicate Predicate,
                                              Value *LHS, Value *RHS) {
-  // assert((Opcode == Instruction::ICmp || Opcode == Instruction::FCmp) &&
+  // assert(((Opcode == Instruction::ICmp || Opcode == Instruction::FCmp) &&
   //        "Not a comparison!");
   // Expression e;
   // e.type = CmpInst::makeCmpResultType(LHS->getType());
@@ -910,9 +911,9 @@ namespace {
     AliasAnalysis *getAliasAnalysis() const { return VN.getAliasAnalysis(); }
     MemoryDependenceAnalysis &getMemDep() const { return *MD; }
   private:
-    Expression *performSymbolicEvaluation(Value*, BasicBlock*, int depth = 0);
+    Expression *performSymbolicEvaluation(Value*, BasicBlock*);
     Expression *performSymbolicCallEvaluation(Instruction*, BasicBlock*);
-    Expression *performSymbolicPHIEvaluation(Instruction*, BasicBlock*, int depth=0);
+    Expression *performSymbolicPHIEvaluation(Instruction*, BasicBlock*);
 
     void performCongruenceFinding(Value*, Expression*);
     void updateReachableEdge(BasicBlock*, BasicBlock*);
@@ -2675,7 +2676,7 @@ Expression *GVN::createExpression(Instruction *I) {
     Constant *C;
     if (V && (C = dyn_cast<Constant>(V))) {
       DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
-      NumGVNBinOpsSimplified++;
+      NumGVNCmpInsSimplified++;
       delete E;
       return createConstantExpression(C);
     }
@@ -2864,13 +2865,11 @@ Expression *GVN::performSymbolicCallEvaluation(Instruction *I, BasicBlock *B) {
 }
 
 // performSymbolicPHIEvaluation - Evaluate PHI nodes symbolically, and create an expression result
-Expression *GVN::performSymbolicPHIEvaluation(Instruction *I, BasicBlock *B, int depth) { 
-  assert(depth < 10 && "Appears to have infinite recursion");
+Expression *GVN::performSymbolicPHIEvaluation(Instruction *I, BasicBlock *B) { 
   PHIExpression *E = cast<PHIExpression>(createPHIExpression(I));
   E->setOpcode(I->getOpcode());
   if (E->varargs.empty()) {
     DEBUG(dbgs() << "Simplified PHI node " << I << " to undef" << "\n");
-    // assert(0);
     delete E;
     return createVariableExpression(UndefValue::get(I->getType()));
   }
@@ -2887,20 +2886,21 @@ Expression *GVN::performSymbolicPHIEvaluation(Instruction *I, BasicBlock *B, int
   if (AllSameValue) {
     NumGVNPhisAllSame++;
     DEBUG(dbgs() << "Simplified PHI node " << I << " to " << *AllSameValue << "\n");
-    // // It's possible to have mutually recursive phi nodes
-    // if (PHINode *PN = dyn_cast<PHINode>(AllSameValue)) {
-    //   delete E;
-    //   return createPHIExpression(PN);
-    // }
+    // It's possible to have mutually recursive phi nodes, especially in weird CFG's.
+    // This can cause infinite loops (even if you disable the recursion below, you will ping-pong between congruence classes)
+    // If a phi node evaluates to another phi node, just leave it alone
+    if (isa<PHINode>(AllSameValue))
+      return E;
+  
     delete E;
-    return performSymbolicEvaluation(AllSameValue, B, ++depth);
+    return performSymbolicEvaluation(AllSameValue, B);
   }
   return E;
 }
 
 
 /// performSymbolicEvaluation - Substitute and symbolize the value before value numbering
-Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B, int depth) {
+Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
   Expression *E = NULL;
   if (Constant *C = dyn_cast<Constant>(V))
     E = createConstantExpression(C);
@@ -2914,7 +2914,7 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B, int depth) {
       E = createInsertValueExpression(cast<InsertValueInst>(I));
       break;
     case Instruction::PHI: 
-      E = performSymbolicPHIEvaluation(I, B, depth++);
+      E = performSymbolicPHIEvaluation(I, B);
       break;
     case Instruction::Call:
       E = performSymbolicCallEvaluation(I, B);
@@ -3021,7 +3021,6 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
 
     EClass = NewClass;
     DEBUG(dbgs() << "Created new congruence class for " << V << " using expression " << *E << " at " << NewClass->id << "\n");
-    assert(uniquifyExpression(E) == E);
   } else {
     EClass = VTCI->second;
   }
@@ -3040,7 +3039,7 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
       valueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
       if (VClass->members.empty() && VClass != InitialClass) {
-	// expressionToClass.erase(VClass->expression);
+	expressionToClass.erase(VClass->expression);
 	// delete VClass;
       } else if (VClass->leader == V) {
 	VClass->leader = *(VClass->members.begin());
@@ -3071,26 +3070,23 @@ void GVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
     // If this block wasn't reachable before, all instructions are touched
     if (reachableBlocks.insert(To).second) {
       DEBUG(dbgs() << "Block " << getBlockName(To) << " marked reachable\n");
-      //TODO(check this)
       uint32_t rpoNum = rpoBlockNumbers[To];
-      if (!touchedBlocks[rpoNum]) {
-	touchedBlocks[rpoNum] = true;
-	for (BasicBlock::iterator BI = To->begin(), BE = To->end();
-	     BI != BE; ++BI)
-	  touchedInstructions.insert(BI);
-      }
-    } else {
-      DEBUG(dbgs() << "Block " << getBlockName(To) << " was reachable, but new edge to it found\n");
-      // We've made an edge reachable to an existing block, which may impact predicates.
-      // Otherwise, only mark the phi nodes as touched
-      BasicBlock::iterator BI = To->begin();
-      while (isa<PHINode>(BI)) {
+      touchedBlocks[rpoNum] = true;
+      for (BasicBlock::iterator BI = To->begin(), BE = To->end();
+	   BI != BE; ++BI)
 	touchedInstructions.insert(BI);
-	++BI;
-      }
-      // Propagate the change downstream.
-      propagateChangeInEdge(To);
     }
+  } else {
+    DEBUG(dbgs() << "Block " << getBlockName(To) << " was reachable, but new edge to it found\n");
+    // We've made an edge reachable to an existing block, which may impact predicates.
+    // Otherwise, only mark the phi nodes as touched
+    BasicBlock::iterator BI = To->begin();
+    while (isa<PHINode>(BI)) {
+      touchedInstructions.insert(BI);
+      ++BI;
+    }
+    // Propagate the change downstream.
+    propagateChangeInEdge(To);
   }
 }
 
@@ -3234,9 +3230,9 @@ bool GVN::runOnFunction(Function& F) {
       uint32_t IStart = rpoINumber;
       rpoBlockNumbers[*RI] = rpoBNumber++;
       // TODO: Use two worklist method
-      for (BasicBlock::iterator BI = EntryBlock.begin(), BE = EntryBlock.end();
-	   BI != BE; ++BI)
-	rpoInstructionNumbers[BI] = rpoINumber++;
+      // for (BasicBlock::iterator BI = EntryBlock.begin(), BE = EntryBlock.end();
+      // 	   BI != BE; ++BI)
+      // 	rpoInstructionNumbers[BI] = rpoINumber++;
       uint32_t IEnd = rpoINumber;
     }
   rpoToBlock.resize(rpoBNumber+1);
@@ -3294,7 +3290,7 @@ bool GVN::runOnFunction(Function& F) {
         DenseSet<Instruction*>::iterator DI = touchedInstructions.find(BI);
         if (DI != touchedInstructions.end()) {
 	  // DEBUG(dbgs() << "Processing instruction " << (void *)(Instruction *)BI << "\n");
-	  DEBUG(dbgs() << "Processing instruction " << BI << "\n");
+	  DEBUG(dbgs() << "Processing instruction " << *BI << "\n");
           touchedInstructions.erase(DI);
 	  if (!blockReachable) {
 	    DEBUG(dbgs() << "Skipping instruction " << BI  << " because block " << getBlockName(*RI) << " is unreachable\n");
