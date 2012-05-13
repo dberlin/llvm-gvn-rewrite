@@ -2082,7 +2082,7 @@ void Value::print(raw_ostream &ROS, AssemblyAnnotationWriter *AAW) const {
   if (const Instruction *I = dyn_cast<Instruction>(this)) {
     const Function *F = I->getParent() ? I->getParent()->getParent() : 0;
     SlotTracker SlotTable(F);
-    AssemblyWriter W(OS, SlotTable, getModuleFromVal(I), AAW);
+    AssemblyWriter W(OS, SlotTable, NULL, AAW);
     W.printInstruction(*I);
   } else if (const BasicBlock *BB = dyn_cast<BasicBlock>(this)) {
     SlotTracker SlotTable(BB->getParent());

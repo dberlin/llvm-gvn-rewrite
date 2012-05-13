@@ -1490,32 +1490,6 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
   return uniquifyExpression(E);
 }
 
-//   SmallVector<Value*, 4> Operands;
-//   if (Instruction *I = dyn_cast<Instruction>(V)) {
-//     for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i) {
-//       Value *Operand = I->getOperand(i);
-//       ValueClassMap::iterator VTCI = valueToClass.find(Operand);
-//       if (VTCI != valueToClass.end()) {
-//         ValueToClass *CC = VTCI->second;
-//         if (CC != InitialClass)
-//           Operand = CC->leader;
-//       }
-//       Operands.push_back(Operand);
-//     }
-//     std::sort(Operands.begin(), Operands.end());
-//     if (I->isBinaryOp()) {
-//       Value *SR = SimplifyBinOp(I->getOpcode(), Operands[0], Operands[1],
-//                                 TD, TLI, DT);
-//       if (SR)
-//         DEBUG(dbgs() << "Simplified " << V << " into " << SR << "\n");
-//       V = (SR ? SR : V);
-//     }
-//   }
-  
-	
-//   return V;
-// }
-
 /// performCongruenceFinding - Perform congruence finding on a given value numbering expression
 void GVN::performCongruenceFinding(Value *V, Expression *E) {
   // This is guaranteed to return something, since it will at least find INITIAL
@@ -1558,7 +1532,7 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
 	NewClass->leader = VE->getVariableValue();
       else if (MemoryExpression *ME = dyn_cast<MemoryExpression>(E)) {
 	if (ME->isStore())
-	  NewClass->leader = lookupOperandLeader(ME->getStoreInst()->getValueOperand());
+	  NewClass->leader = ME->getStoreInst()->getValueOperand();
 	else 
 	  NewClass->leader = V;
       } else
@@ -1702,10 +1676,11 @@ void GVN::propagateChangeInEdge(BasicBlock *Dest) {
   // We only have to touch blocks we post-dominate
   //
   // The algorithm states that you only need to touch blocks that are confluence nodes.
-  // I can't see why you would need to touch any nodes that aren't PHI
-  // nodes.  Because we don't use predicates, they are the ones whose value could have changed as a
-  // result of a new edge becoming live, and any changes to their
-  // value should propagate appropriately through the rest of the block.
+  // I can't see why you would need to touch any instructions that aren't PHI
+  // nodes.  Because we don't use predicates right now, they are the ones whose
+  // value could have changed as a result of a new edge becoming live, and any changes to their
+  // value should propagate appropriately through the rest of the
+  // block. 
   DEBUG(dbgs() << "Would have processed " << rpoBlockNumbers.size() - rpoBlockNumbers[Dest] << " blocks here\n");
   uint32_t blocksProcessed = 0;
   DomTreeNode *DTN = DT->getNode(Dest);
