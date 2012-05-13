@@ -87,10 +87,342 @@ MaxRecurseDepth("max-recurse-depth", cl::Hidden, cl::init(1000), cl::ZeroOrMore,
 /// as an efficient mechanism to determine the expression-wise equivalence of
 /// two values.
 namespace {
+
+  MemoryDependenceAnalysis *MD;
+  const TargetData *TD;
+
+/// CanCoerceMustAliasedValueToLoad - Return true if
+/// CoerceAvailableValueToLoadType will succeed.
+static bool CanCoerceMustAliasedValueToLoad(Value *StoredVal,
+                                            Type *LoadTy,
+                                            const TargetData &TD) {
+  // If the loaded or stored value is an first class array or struct, don't try
+  // to transform them.  We need to be able to bitcast to integer.
+  if (LoadTy->isStructTy() || LoadTy->isArrayTy() ||
+      StoredVal->getType()->isStructTy() ||
+      StoredVal->getType()->isArrayTy())
+    return false;
+  
+  // The store has to be at least as big as the load.
+  if (TD.getTypeSizeInBits(StoredVal->getType()) <
+        TD.getTypeSizeInBits(LoadTy))
+    return false;
+  
+  return true;
+}
+
+/// CoerceAvailableValueToLoadType - If we saw a store of a value to memory, and
+/// then a load from a must-aliased pointer of a different type, try to coerce
+/// the stored value.  LoadedTy is the type of the load we want to replace and
+/// InsertPt is the place to insert new instructions.
+///
+/// If we can't do it, return null.
+static Value *CoerceAvailableValueToLoadType(Value *StoredVal, 
+                                             Type *LoadedTy,
+                                             Instruction *InsertPt,
+                                             const TargetData &TD) {
+  if (!CanCoerceMustAliasedValueToLoad(StoredVal, LoadedTy, TD))
+    return 0;
+  
+  // If this is already the right type, just return it.
+  Type *StoredValTy = StoredVal->getType();
+  
+  uint64_t StoreSize = TD.getTypeSizeInBits(StoredValTy);
+  uint64_t LoadSize = TD.getTypeSizeInBits(LoadedTy);
+  
+  // If the store and reload are the same size, we can always reuse it.
+  if (StoreSize == LoadSize) {
+    // Pointer to Pointer -> use bitcast.
+    if (StoredValTy->isPointerTy() && LoadedTy->isPointerTy())
+      return new BitCastInst(StoredVal, LoadedTy, "", InsertPt);
+    
+    // Convert source pointers to integers, which can be bitcast.
+    if (StoredValTy->isPointerTy()) {
+      StoredValTy = TD.getIntPtrType(StoredValTy->getContext());
+      StoredVal = new PtrToIntInst(StoredVal, StoredValTy, "", InsertPt);
+    }
+    
+    Type *TypeToCastTo = LoadedTy;
+    if (TypeToCastTo->isPointerTy())
+      TypeToCastTo = TD.getIntPtrType(StoredValTy->getContext());
+    
+    if (StoredValTy != TypeToCastTo)
+      StoredVal = new BitCastInst(StoredVal, TypeToCastTo, "", InsertPt);
+    
+    // Cast to pointer if the load needs a pointer type.
+    if (LoadedTy->isPointerTy())
+      StoredVal = new IntToPtrInst(StoredVal, LoadedTy, "", InsertPt);
+    
+    return StoredVal;
+  }
+  
+  // If the loaded value is smaller than the available value, then we can
+  // extract out a piece from it.  If the available value is too small, then we
+  // can't do anything.
+  assert(StoreSize >= LoadSize && "CanCoerceMustAliasedValueToLoad fail");
+  
+  // Convert source pointers to integers, which can be manipulated.
+  if (StoredValTy->isPointerTy()) {
+    StoredValTy = TD.getIntPtrType(StoredValTy->getContext());
+    StoredVal = new PtrToIntInst(StoredVal, StoredValTy, "", InsertPt);
+  }
+  
+  // Convert vectors and fp to integer, which can be manipulated.
+  if (!StoredValTy->isIntegerTy()) {
+    StoredValTy = IntegerType::get(StoredValTy->getContext(), StoreSize);
+    StoredVal = new BitCastInst(StoredVal, StoredValTy, "", InsertPt);
+  }
+  
+  // If this is a big-endian system, we need to shift the value down to the low
+  // bits so that a truncate will work.
+  if (TD.isBigEndian()) {
+    Constant *Val = ConstantInt::get(StoredVal->getType(), StoreSize-LoadSize);
+    StoredVal = BinaryOperator::CreateLShr(StoredVal, Val, "tmp", InsertPt);
+  }
+  
+  // Truncate the integer to the right size now.
+  Type *NewIntTy = IntegerType::get(StoredValTy->getContext(), LoadSize);
+  StoredVal = new TruncInst(StoredVal, NewIntTy, "trunc", InsertPt);
+  
+  if (LoadedTy == NewIntTy)
+    return StoredVal;
+  
+  // If the result is a pointer, inttoptr.
+  if (LoadedTy->isPointerTy())
+    return new IntToPtrInst(StoredVal, LoadedTy, "inttoptr", InsertPt);
+  
+  // Otherwise, bitcast.
+  return new BitCastInst(StoredVal, LoadedTy, "bitcast", InsertPt);
+}
+
+/// AnalyzeLoadFromClobberingWrite - This function is called when we have a
+/// memdep query of a load that ends up being a clobbering memory write (store,
+/// memset, memcpy, memmove).  This means that the write *may* provide bits used
+/// by the load but we can't be sure because the pointers don't mustalias.
+///
+/// Check this case to see if there is anything more we can do before we give
+/// up.  This returns -1 if we have to give up, or a byte number in the stored
+/// value of the piece that feeds the load.
+static int AnalyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
+                                          Value *WritePtr,
+                                          uint64_t WriteSizeInBits,
+                                          const TargetData &TD) {
+  // If the loaded or stored value is a first class array or struct, don't try
+  // to transform them.  We need to be able to bitcast to integer.
+  if (LoadTy->isStructTy() || LoadTy->isArrayTy())
+    return -1;
+  
+  int64_t StoreOffset = 0, LoadOffset = 0;
+  Value *StoreBase = GetPointerBaseWithConstantOffset(WritePtr, StoreOffset,TD);
+  Value *LoadBase = GetPointerBaseWithConstantOffset(LoadPtr, LoadOffset, TD);
+  if (StoreBase != LoadBase)
+    return -1;
+  
+  // If the load and store are to the exact same address, they should have been
+  // a must alias.  AA must have gotten confused.
+  // FIXME: Study to see if/when this happens.  One case is forwarding a memset
+  // to a load from the base of the memset.
+#if 0
+  if (LoadOffset == StoreOffset) {
+    dbgs() << "STORE/LOAD DEP WITH COMMON POINTER MISSED:\n"
+    << "Base       = " << *StoreBase << "\n"
+    << "Store Ptr  = " << *WritePtr << "\n"
+    << "Store Offs = " << StoreOffset << "\n"
+    << "Load Ptr   = " << *LoadPtr << "\n";
+    abort();
+  }
+#endif
+  
+  // If the load and store don't overlap at all, the store doesn't provide
+  // anything to the load.  In this case, they really don't alias at all, AA
+  // must have gotten confused.
+  uint64_t LoadSize = TD.getTypeSizeInBits(LoadTy);
+  
+  if ((WriteSizeInBits & 7) | (LoadSize & 7))
+    return -1;
+  uint64_t StoreSize = WriteSizeInBits >> 3;  // Convert to bytes.
+  LoadSize >>= 3;
+  
+  
+  bool isAAFailure = false;
+  if (StoreOffset < LoadOffset)
+    isAAFailure = StoreOffset+int64_t(StoreSize) <= LoadOffset;
+  else
+    isAAFailure = LoadOffset+int64_t(LoadSize) <= StoreOffset;
+
+  if (isAAFailure) {
+#if 0
+    dbgs() << "STORE LOAD DEP WITH COMMON BASE:\n"
+    << "Base       = " << *StoreBase << "\n"
+    << "Store Ptr  = " << *WritePtr << "\n"
+    << "Store Offs = " << StoreOffset << "\n"
+    << "Load Ptr   = " << *LoadPtr << "\n";
+    abort();
+#endif
+    return -1;
+  }
+  
+  // If the Load isn't completely contained within the stored bits, we don't
+  // have all the bits to feed it.  We could do something crazy in the future
+  // (issue a smaller load then merge the bits in) but this seems unlikely to be
+  // valuable.
+  if (StoreOffset > LoadOffset ||
+      StoreOffset+StoreSize < LoadOffset+LoadSize)
+    return -1;
+  
+  // Okay, we can do this transformation.  Return the number of bytes into the
+  // store that the load is.
+  return LoadOffset-StoreOffset;
+}  
+
+/// AnalyzeLoadFromClobberingStore - This function is called when we have a
+/// memdep query of a load that ends up being a clobbering store.
+static int AnalyzeLoadFromClobberingStore(Type *LoadTy, Value *LoadPtr,
+                                          StoreInst *DepSI,
+                                          const TargetData &TD) {
+  // Cannot handle reading from store of first-class aggregate yet.
+  if (DepSI->getValueOperand()->getType()->isStructTy() ||
+      DepSI->getValueOperand()->getType()->isArrayTy())
+    return -1;
+
+  Value *StorePtr = DepSI->getPointerOperand();
+  uint64_t StoreSize =TD.getTypeSizeInBits(DepSI->getValueOperand()->getType());
+  return AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr,
+                                        StorePtr, StoreSize, TD);
+}
+
+/// AnalyzeLoadFromClobberingLoad - This function is called when we have a
+/// memdep query of a load that ends up being clobbered by another load.  See if
+/// the other load can feed into the second load.
+static int AnalyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
+                                         LoadInst *DepLI, const TargetData &TD){
+  // Cannot handle reading from store of first-class aggregate yet.
+  if (DepLI->getType()->isStructTy() || DepLI->getType()->isArrayTy())
+    return -1;
+  
+  Value *DepPtr = DepLI->getPointerOperand();
+  uint64_t DepSize = TD.getTypeSizeInBits(DepLI->getType());
+  int R = AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, DepSize, TD);
+  if (R != -1) return R;
+  
+  // If we have a load/load clobber an DepLI can be widened to cover this load,
+  // then we should widen it!
+  int64_t LoadOffs = 0;
+  const Value *LoadBase =
+    GetPointerBaseWithConstantOffset(LoadPtr, LoadOffs, TD);
+  unsigned LoadSize = TD.getTypeStoreSize(LoadTy);
+  
+  unsigned Size = MemoryDependenceAnalysis::
+    getLoadLoadClobberFullWidthSize(LoadBase, LoadOffs, LoadSize, DepLI, TD);
+  if (Size == 0) return -1;
+  
+  return AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, Size*8, TD);
+}
+                               
+
+/// GetStoreValueForLoad - This function is called when we have a
+/// memdep query of a load that ends up being a clobbering store.  This means
+/// that the store provides bits used by the load but we the pointers don't
+/// mustalias.  Check this case to see if there is anything more we can do
+/// before we give up.
+static Value *GetStoreValueForLoad(Value *SrcVal, unsigned Offset,
+                                   Type *LoadTy,
+                                   Instruction *InsertPt, const TargetData &TD){
+  LLVMContext &Ctx = SrcVal->getType()->getContext();
+  
+  uint64_t StoreSize = (TD.getTypeSizeInBits(SrcVal->getType()) + 7) / 8;
+  uint64_t LoadSize = (TD.getTypeSizeInBits(LoadTy) + 7) / 8;
+  
+  IRBuilder<> Builder(InsertPt->getParent(), InsertPt);
+  
+  // Compute which bits of the stored value are being used by the load.  Convert
+  // to an integer type to start with.
+  if (SrcVal->getType()->isPointerTy())
+    SrcVal = Builder.CreatePtrToInt(SrcVal, TD.getIntPtrType(Ctx));
+  if (!SrcVal->getType()->isIntegerTy())
+    SrcVal = Builder.CreateBitCast(SrcVal, IntegerType::get(Ctx, StoreSize*8));
+  
+  // Shift the bits to the least significant depending on endianness.
+  unsigned ShiftAmt;
+  if (TD.isLittleEndian())
+    ShiftAmt = Offset*8;
+  else
+    ShiftAmt = (StoreSize-LoadSize-Offset)*8;
+  
+  if (ShiftAmt)
+    SrcVal = Builder.CreateLShr(SrcVal, ShiftAmt);
+  
+  if (LoadSize != StoreSize)
+    SrcVal = Builder.CreateTrunc(SrcVal, IntegerType::get(Ctx, LoadSize*8));
+  
+  return CoerceAvailableValueToLoadType(SrcVal, LoadTy, InsertPt, TD);
+}
+
+/// GetLoadValueForLoad - This function is called when we have a
+/// memdep query of a load that ends up being a clobbering load.  This means
+/// that the load *may* provide bits used by the load but we can't be sure
+/// because the pointers don't mustalias.  Check this case to see if there is
+/// anything more we can do before we give up.
+static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
+                                  Type *LoadTy, Instruction *InsertPt,
+                                  const TargetData &TD) {
+  // If Offset+LoadTy exceeds the size of SrcVal, then we must be wanting to
+  // widen SrcVal out to a larger load.
+  unsigned SrcValSize = TD.getTypeStoreSize(SrcVal->getType());
+  unsigned LoadSize = TD.getTypeStoreSize(LoadTy);
+  if (Offset+LoadSize > SrcValSize) {
+    assert(SrcVal->isSimple() && "Cannot widen volatile/atomic load!");
+    assert(SrcVal->getType()->isIntegerTy() && "Can't widen non-integer load");
+    // If we have a load/load clobber an DepLI can be widened to cover this
+    // load, then we should widen it to the next power of 2 size big enough!
+    unsigned NewLoadSize = Offset+LoadSize;
+    if (!isPowerOf2_32(NewLoadSize))
+      NewLoadSize = NextPowerOf2(NewLoadSize);
+
+    Value *PtrVal = SrcVal->getPointerOperand();
+    
+    // Insert the new load after the old load.  This ensures that subsequent
+    // memdep queries will find the new load.  We can't easily remove the old
+    // load completely because it is already in the value numbering table.
+    IRBuilder<> Builder(SrcVal->getParent(), ++BasicBlock::iterator(SrcVal));
+    Type *DestPTy = 
+      IntegerType::get(LoadTy->getContext(), NewLoadSize*8);
+    DestPTy = PointerType::get(DestPTy, 
+                       cast<PointerType>(PtrVal->getType())->getAddressSpace());
+    Builder.SetCurrentDebugLocation(SrcVal->getDebugLoc());
+    PtrVal = Builder.CreateBitCast(PtrVal, DestPTy);
+    LoadInst *NewLoad = Builder.CreateLoad(PtrVal);
+    NewLoad->takeName(SrcVal);
+    NewLoad->setAlignment(SrcVal->getAlignment());
+
+    DEBUG(dbgs() << "GVN WIDENED LOAD: " << *SrcVal << "\n");
+    DEBUG(dbgs() << "TO: " << *NewLoad << "\n");
+    
+    // Replace uses of the original load with the wider load.  On a big endian
+    // system, we need to shift down to get the relevant bits.
+    Value *RV = NewLoad;
+    if (TD.isBigEndian())
+      RV = Builder.CreateLShr(RV,
+                    NewLoadSize*8-SrcVal->getType()->getPrimitiveSizeInBits());
+    RV = Builder.CreateTrunc(RV, SrcVal->getType());
+    SrcVal->replaceAllUsesWith(RV);
+    
+    // We would like to use gvn.markInstructionForDeletion here, but we can't
+    // because the load is already memoized into the leader map table that GVN
+    // tracks.  It is potentially possible to remove the load from the table,
+    // but then there all of the operations based on it would need to be
+    // rehashed.  Just leave the dead load around.
+    MD->removeInstruction(SrcVal);
+    SrcVal = NewLoad;
+  }
+  
+  return GetStoreValueForLoad(SrcVal, Offset, LoadTy, InsertPt, TD);
+}
+
+
   static std::string getBlockName(BasicBlock *B) {
     return DOTGraphTraits<const Function*>::getSimpleNodeLabel(B, NULL);
   }
-  MemoryDependenceAnalysis *MD;
 
   enum ExpressionType {
     ExpressionTypeBase,
@@ -101,8 +433,7 @@ namespace {
     ExpressionTypeCall,
     ExpressionTypeInsertValue,
     ExpressionTypePhi,
-    ExpressionTypeLoad,
-    ExpressionTypeStore,
+    ExpressionTypeMemory,
     ExpressionTypeBasicEnd
   };
   
@@ -117,10 +448,6 @@ namespace {
   public:
 
     uint32_t getOpcode() const {
-      return opcode_;
-    }
-
-    uint32_t getOpcode() {
       return opcode_;
     }
 
@@ -184,10 +511,8 @@ namespace {
     void setType(Type *T) {
       type_ = T;
     }
-    Type *getType() {
-      return type_;
-    }
-    const Type *getType() const {
+    
+    Type *getType() const {
       return type_;
     }
     
@@ -310,77 +635,136 @@ namespace {
 	OS << "[" << i << "] = " << varargs[i] << "  ";
       }
       OS << "}";
-      OS << " represents call at " << callinst_ << ", nomem = " << nomem_ << ", readonly = " << readonly_ << "}";
+      OS << " represents call at " << callinst_;
+      OS << ", nomem = " << nomem_ << ", readonly = " << readonly_ << "}";
     }
   };
-  class LoadExpression: public BasicExpression {
+  class MemoryExpression: public BasicExpression {
   private:
-    void operator=(const LoadExpression&); // Do not implement
-    LoadExpression(const LoadExpression&); // Do not implement
+    void operator=(const MemoryExpression&); // Do not implement
+    MemoryExpression(const MemoryExpression&); // Do not implement
   protected:
-    LoadInst *loadinst_;
+    bool isStore_;
+    union {
+      Instruction *inst;
+      LoadInst *loadinst;
+      StoreInst *storeinst;
+    } inst_;
+    
   public:
     
+    bool isStore() const {
+      return isStore_;
+    }
+    
+    LoadInst *getLoadInst() const {
+      assert (!isStore_ && "This is not a load memory expression");
+      return inst_.loadinst;
+    }
+    
+    StoreInst *getStoreInst() const {
+      assert (isStore_ && "This is not a store memory expression");
+      return inst_.storeinst;
+    }
+  
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const LoadExpression *) { return true; }
+    static inline bool classof(const MemoryExpression *) { return true; }
     static inline bool classof(const Expression *EB) {
-      return EB->getExpressionType() == ExpressionTypeLoad;
+      return EB->getExpressionType() == ExpressionTypeMemory;
     }    
-    LoadExpression(LoadInst *L) {
-      etype_ = ExpressionTypeLoad;
-      loadinst_ = L;
+    MemoryExpression(LoadInst *L) {
+      etype_ = ExpressionTypeMemory;
+      isStore_ = false;
+      inst_.loadinst = L;
+    };
+
+    MemoryExpression(StoreInst *S) {
+      etype_ = ExpressionTypeMemory;
+      isStore_ = true;
+      inst_.storeinst = S;
     };
     
-    virtual ~LoadExpression() {};
+    virtual ~MemoryExpression() {};
 
     virtual bool equals(const Expression &other) const {
-      const LoadExpression &OE = cast<LoadExpression>(other);
-      if (type_ != OE.type_)
-        return false;
+      const MemoryExpression &OE = cast<MemoryExpression>(other);
       if (varargs != OE.varargs)
 	return false;
-
+      
+      if (!isStore_) {
+	LoadInst *LI = inst_.loadinst;
+	Instruction *OI = OE.inst_.inst;
+	
+	if (LI != OI) {
+	  MemDepResult Dep = MD->getDependency(LI);
+	  if (Dep.getInst() != OI)
+	    return false;
+	  if (Dep.isClobber() && TD) {
+	    if (StoreInst *DepSI = dyn_cast<StoreInst>(Dep.getInst())) {
+	      int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
+							  varargs[0],
+							  DepSI, *TD);
+	      if (Offset == -1 || !CanCoerceMustAliasedValueToLoad(DepSI->getValueOperand(),
+								   LI->getType(),
+								   *TD))
+		return false;
+	      return true;
+	    }
+	    if (LoadInst *DepLI = dyn_cast<LoadInst>(Dep.getInst())) { 
+	      int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
+							 varargs[0],
+							 DepLI, *TD);
+	      if (Offset == -1 || !CanCoerceMustAliasedValueToLoad(DepLI,
+								   LI->getType(),
+								   *TD))
+		return false;
+	      return true;
+	    }
+	    return false;
+	  }
+	  if (!Dep.isDef()) {
+	    return false;
+	  }
+	   Instruction *DepInst = Dep.getInst();
+	   if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
+	     Value *StoredVal = DepSI->getValueOperand();
+	     
+	     // The store and load are to a must-aliased pointer, but they may not
+	     // actually have the same type.  See if we know how to reuse the stored
+	     // value (depending on its type).
+	     if (StoredVal->getType() != LI->getType()) {
+	       if (!TD || !CanCoerceMustAliasedValueToLoad(StoredVal, LI->getType(), *TD))
+		 return false;
+	     }
+	     return true;
+	   }
+	   if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInst)) {
+	     // The loads are of a must-aliased pointer, but they may not
+	     // actually have the same type.  See if we know how to reuse the stored
+	     // value (depending on its type).
+	     if (DepLI->getType() != LI->getType()) {
+	       if (!TD || !CanCoerceMustAliasedValueToLoad(DepLI, LI->getType(), *TD))
+		 return false;
+	     }
+	     return true;
+	   }
+	   // Non-local case
+	   return false;
+	}
+	return true;
+      } else {
+	// Two stores are the same if they store the same value to the same place.
+	// TODO: Use lookup to valueize and store value of store
+	if (OE.isStore_ && OE.inst_.storeinst->getValueOperand() == inst_.storeinst->getValueOperand())
+	  return true;
+	return false;
+      }
+						      
       return true;      
     }
     
     virtual hash_code getHashValue() const {
-      return hash_combine(etype_, opcode_, type_,
-                          hash_combine_range(varargs.begin(),
-                                             varargs.end()));
-    }
-  };
-  class StoreExpression: public BasicExpression {
-  private:
-    void operator=(const StoreExpression&); // Do not implement
-    StoreExpression(const StoreExpression&); // Do not implement
-  protected:
-    StoreInst *storeinst_;
-  public:
-    
-    /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const StoreExpression *) { return true; }
-    static inline bool classof(const Expression *EB) {
-      return EB->getExpressionType() == ExpressionTypeStore;
-    }    
-    StoreExpression(StoreInst *S) {
-      etype_ = ExpressionTypeStore;
-      storeinst_ = S;
-    };
-    
-    virtual ~StoreExpression() {};
-
-    virtual bool equals(const Expression &other) const {
-      const StoreExpression &OE = cast<StoreExpression>(other);
-      if (type_ != OE.type_)
-        return false;
-      if (varargs != OE.varargs)
-	return false;
-
-      return true;      
-    }
-    
-    virtual hash_code getHashValue() const {
-      return hash_combine(etype_, opcode_, type_,
+      return hash_combine(etype_, opcode_,
                           hash_combine_range(varargs.begin(),
                                              varargs.end()));
     }
@@ -445,12 +829,10 @@ namespace {
     static inline bool classof(const Expression *EB) {
       return EB->getExpressionType() == ExpressionTypePhi;
     }
-    const BasicBlock *getBB() const {
+    BasicBlock *getBB() const {
       return bb_;
     }
-    BasicBlock *getBB() {
-      return bb_;
-    }
+    
     void setBB(BasicBlock *bb) {
       bb_ = bb;
     }
@@ -502,10 +884,8 @@ namespace {
     static inline bool classof(const Expression *EB) {
       return EB->getExpressionType() == ExpressionTypeVariable;
     }
-    const Value *getVariableValue() const {
-      return variableValue_;
-    }
-    Value *getVariableValue() {
+
+    Value *getVariableValue() const {
       return variableValue_;
     }
     void setVariableValue(Constant *V) {
@@ -526,6 +906,10 @@ namespace {
       return hash_combine(etype_, variableValue_->getType(), variableValue_);
     }
 
+    virtual void print(raw_ostream &OS) {
+      OS << "{etype = " << etype_ << ", opcode = " << opcode_ << ", variable = " << variableValue_ << " }";
+    }
+
     private:
     void operator=(const VariableExpression&); // Do not implement
     VariableExpression(const VariableExpression&); // Do not implement
@@ -542,12 +926,10 @@ namespace {
     static inline bool classof(const Expression *EB) {
       return EB->getExpressionType() == ExpressionTypeConstant;
     }
-    const Constant *getConstantValue() const {
+    Constant *getConstantValue() const {
       return constantValue_;
     }
-    Constant *getConstantValue() {
-      return constantValue_;
-    }
+
     void setConstantValue(Constant *V) {
       constantValue_ = V;
     }  
@@ -600,7 +982,6 @@ namespace {
     AliasAnalysis *AA;
     PostDominatorTree *PDT;
     DominatorTree *DT;
-    const TargetData *TD;
     const TargetLibraryInfo *TLI;
     DenseMap<BasicBlock*, uint32_t> rpoBlockNumbers;
     DenseMap<Instruction*, uint32_t> rpoInstructionNumbers;
@@ -609,6 +990,7 @@ namespace {
     DenseSet<BasicBlock*> reachableBlocks;
     DenseSet<std::pair<BasicBlock*, BasicBlock*> > reachableEdges;
     DenseSet<Instruction*> touchedInstructions;
+    DenseMap<Instruction*, uint32_t> processedCount;
     // Tested: SparseBitVector, DenseSet, etc. vector<bool> is 3 times as fast
     std::vector<bool> touchedBlocks;
     std::vector<CongruenceClass*> congruenceClass;
@@ -655,14 +1037,18 @@ namespace {
     DenseMap<uint32_t, LeaderTableEntry> LeaderTable;
     BumpPtrAllocator TableAllocator;
     
+    Value *lookupOperandLeader(Value*);
+    
     Expression *createExpression(Instruction*);
     void setBasicExpressionInfo(Instruction*, BasicExpression*);
-    Expression *createPHIExpression(Instruction *);
-    Expression *createVariableExpression(Value *);
-    Expression *createConstantExpression(Constant *);
+    Expression *createPHIExpression(Instruction*);
+    Expression *createVariableExpression(Value*);
+    Expression *createConstantExpression(Constant*);
+    Expression *createMemoryExpression(StoreInst*);
+    Expression *createMemoryExpression(LoadInst*);
     Expression *createCallExpression(CallInst*, bool, bool);
-    Expression *createInsertValueExpression(InsertValueInst *);
-    Expression *uniquifyExpression(Expression *E);
+    Expression *createInsertValueExpression(InsertValueInst*);
+    Expression *uniquifyExpression(Expression*);
 
   public:
     static char ID; // Pass identification, replacement for typeid
@@ -680,7 +1066,7 @@ namespace {
   private:
     Expression *performSymbolicEvaluation(Value*, BasicBlock*);
     Expression *performSymbolicLoadEvaluation(Instruction*, BasicBlock*);
-    Expression *performSymbolicStoreEvaluation(Instruction *, BasicBlock *);
+    Expression *performSymbolicStoreEvaluation(Instruction*, BasicBlock*);
     Expression *performSymbolicCallEvaluation(Instruction*, BasicBlock*);
     Expression *performSymbolicPHIEvaluation(Instruction*, BasicBlock*);
 
@@ -751,15 +1137,8 @@ namespace {
 
     // Helper fuctions
     // FIXME: eliminate or document these better
-    bool processLoad(LoadInst *L);
-    bool processInstruction(Instruction *I);
-    bool processNonLocalLoad(LoadInst *L);
-    bool processBlock(BasicBlock *BB);
     void dump(DenseMap<uint32_t, Value*> &d);
-    bool iterateOnFunction(Function &F);
-    bool performPRE(Function &F);
     Value *findLeader(BasicBlock *BB, uint32_t num);
-    void cleanupGlobalSets();
     void verifyRemoved(const Instruction *I) const;
     bool splitCriticalEdges();
     unsigned replaceAllDominatedUsesWith(Value *From, Value *To,
@@ -803,14 +1182,12 @@ Expression *GVN::createPHIExpression(Instruction *I) {
       DEBUG(dbgs() << "Skipping unreachable block " << getBlockName(B) << " in PHI node " << *PN << "\n");
       continue;
     }
-    Value *Operand = I->getOperand(i);
-    DenseMap<Value*, CongruenceClass*>::iterator VTCI = valueToClass.find(Operand);
-    if (VTCI != valueToClass.end()) {
-      CongruenceClass *CC = VTCI->second;
-      if (CC != InitialClass)
-        Operand = CC->leader;
+    if (I->getOperand(i) != I) {
+      Value *Operand = lookupOperandLeader(I->getOperand(i));
+      E->varargs.push_back(Operand);
+    } else {    
+      E->varargs.push_back(I->getOperand(i));
     }
-    E->varargs.push_back(Operand);
   }
   return E;
 }
@@ -821,13 +1198,7 @@ void GVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E) {
   
   for (Instruction::op_iterator OI = I->op_begin(), OE = I->op_end();
        OI != OE; ++OI) {
-    Value *Operand = *OI;
-    DenseMap<Value*, CongruenceClass*>::iterator VTCI = valueToClass.find(Operand);
-    if (VTCI != valueToClass.end()) {
-      CongruenceClass *CC = VTCI->second;
-      if (CC != InitialClass)
-        Operand = CC->leader;
-    }
+    Value *Operand = lookupOperandLeader(*OI);
     E->varargs.push_back(Operand);
   }
 }
@@ -856,6 +1227,10 @@ Expression *GVN::createExpression(Instruction *I) {
     }
     E->setOpcode((CI->getOpcode() << 8) | Predicate);
     // TODO: 10% of our time is spent in SimplifyCmpInst with pointer operands
+    //TODO: Since we noop bitcasts, we may need to check types before
+    //simplifying, so that we don't end up simplifying based on a wrong
+    //type assumption.
+
     Value *V = SimplifyCmpInst(Predicate, E->varargs[0], E->varargs[1], TD, TLI, DT);
     Constant *C;
     if (V && (C = dyn_cast<Constant>(V))) {
@@ -868,6 +1243,9 @@ Expression *GVN::createExpression(Instruction *I) {
 
   // Handle simplifying
   if (I->isBinaryOp()) {
+    //TODO: Since we noop bitcasts, we may need to check types before
+    //simplifying, so that we don't end up simplifying based on a
+    //wrong type assumption
     Value *V = SimplifyBinOp(E->getOpcode(), E->varargs[0], E->varargs[1], TD, TLI, DT);
     Constant *C;
     if (V && (C = dyn_cast<Constant>(V))) {
@@ -877,6 +1255,9 @@ Expression *GVN::createExpression(Instruction *I) {
       return createConstantExpression(C);
     }
   } else if (isa<GetElementPtrInst>(I)) {
+    //TODO: Since we noop bitcasts, we may need to check types before
+    //simplifying, so that we don't end up simplifying based on a
+    //wrong type assumption
     Value *V = SimplifyGEPInst(E->varargs, TD, TLI, DT);
     Constant *C;
     if (V && (C = dyn_cast<Constant>(V))) {
@@ -928,26 +1309,51 @@ Expression *GVN::createCallExpression(CallInst *CI, bool nomem, bool readonly) {
   return E;
 }
 
+//lookupOperandLeader -- See if we have a congruence class and leader for this operand, and if so, return it.
+// Otherwise, return the original operand
+Value *GVN::lookupOperandLeader(Value *V) {
+  DenseMap<Value*, CongruenceClass*>::iterator VTCI = valueToClass.find(V);
+  if (VTCI != valueToClass.end()) {
+    CongruenceClass *CC = VTCI->second;
+    if (CC != InitialClass)
+      return CC->leader;
+  }
+  return V;
+}
+
+
+Expression *GVN::createMemoryExpression(LoadInst *LI) {
+  MemoryExpression *E = new MemoryExpression(LI);
+  E->setType(LI->getType());
+  // Need opcodes to match on loads and store
+  E->setOpcode(0);
+  Value *Operand = lookupOperandLeader(LI->getPointerOperand());  
+  E->varargs.push_back(Operand);
+  return E;
+}
+
+Expression *GVN::createMemoryExpression(StoreInst *SI) {
+  MemoryExpression *E = new MemoryExpression(SI);
+  E->setType(SI->getType());
+  // Need opcodes to match on loads and store
+  E->setOpcode(0);
+  Value *Operand = lookupOperandLeader(SI->getPointerOperand());  
+  E->varargs.push_back(Operand);
+  return E;
+}
+
 Expression *GVN::performSymbolicStoreEvaluation(Instruction *I, BasicBlock *B) {
   StoreInst *SI = cast<StoreInst>(I);
-  StoreExpression *E = new StoreExpression(SI);
-  // We only care about the pointer operand to the store for expression lookup.
-  // Two stores are the same 
-  E->setType(I->getType());
-  E->setOpcode(I->getOpcode());
-  
-  for (Instruction::op_iterator OI = I->op_begin(), OE = I->op_end();
-       OI != OE; ++OI) {
-    Value *Operand = *OI;
-    DenseMap<Value*, CongruenceClass*>::iterator VTCI = valueToClass.find(Operand);
-    if (VTCI != valueToClass.end()) {
-      CongruenceClass *CC = VTCI->second;
-      if (CC != InitialClass)
-        Operand = CC->leader;
-    }
-    E->varargs.push_back(Operand);
-  }
+  Expression *E = createMemoryExpression(SI);
+  return E;
+}
 
+Expression *GVN::performSymbolicLoadEvaluation(Instruction *I, BasicBlock *B) {
+  LoadInst *LI = cast<LoadInst>(I);
+  if (!LI->isSimple())
+    return NULL;
+  Expression *E = createMemoryExpression(LI);
+  return E;
 }
 
 /// performSymbolicCallEvaluation - Evaluate read only and pure calls, and create an expression result
@@ -961,110 +1367,6 @@ Expression *GVN::performSymbolicCallEvaluation(Instruction *I, BasicBlock *B) {
   } else {
     return NULL;
   }
-  //   uint32_t& e = expressionNumbering[exp];
-  //   if (!e) e = nextValueNumber++;
-  //   valueNumbering[C] = e;
-  //   return e;
-  // } else if (AA->onlyReadsMemory(C)) {
-  //   Expression exp = create_expression(C);
-  //   uint32_t& e = expressionNumbering[exp];
-  //   if (!e) {
-  //     e = nextValueNumber++;
-  //     valueNumbering[C] = e;
-  //     return e;
-  //   }
-  //   if (!MD) {
-  //     e = nextValueNumber++;
-  //     valueNumbering[C] = e;
-  //     return e;
-  //   }
-
-  //   MemDepResult local_dep = MD->getDependency(C);
-
-  //   if (!local_dep.isDef() && !local_dep.isNonLocal()) {
-  //     valueNumbering[C] =  nextValueNumber;
-  //     return nextValueNumber++;
-  //   }
-
-  //   if (local_dep.isDef()) {
-  //     CallInst* local_cdep = cast<CallInst>(local_dep.getInst());
-
-  //     if (local_cdep->getNumArgOperands() != C->getNumArgOperands()) {
-  //       valueNumbering[C] = nextValueNumber;
-  //       return nextValueNumber++;
-  //     }
-
-  //     for (unsigned i = 0, e = C->getNumArgOperands(); i < e; ++i) {
-  //       uint32_t c_vn = lookup_or_add(C->getArgOperand(i));
-  //       uint32_t cd_vn = lookup_or_add(local_cdep->getArgOperand(i));
-  //       if (c_vn != cd_vn) {
-  //         valueNumbering[C] = nextValueNumber;
-  //         return nextValueNumber++;
-  //       }
-  //     }
-
-  //     uint32_t v = lookup_or_add(local_cdep);
-  //     valueNumbering[C] = v;
-  //     return v;
-  //   }
-
-  //   // Non-local case.
-  //   const MemoryDependenceAnalysis::NonLocalDepInfo &deps =
-  //     MD->getNonLocalCallDependency(CallSite(C));
-  //   // FIXME: Move the checking logic to MemDep!
-  //   CallInst* cdep = 0;
-
-  //   // Check to see if we have a single dominating call instruction that is
-  //   // identical to C.
-  //   for (unsigned i = 0, e = deps.size(); i != e; ++i) {
-  //     const NonLocalDepEntry *I = &deps[i];
-  //     if (I->getResult().isNonLocal())
-  //       continue;
-
-  //     // We don't handle non-definitions.  If we already have a call, reject
-  //     // instruction dependencies.
-  //     if (!I->getResult().isDef() || cdep != 0) {
-  //       cdep = 0;
-  //       break;
-  //     }
-
-  //     CallInst *NonLocalDepCall = dyn_cast<CallInst>(I->getResult().getInst());
-  //     // FIXME: All duplicated with non-local case.
-  //     if (NonLocalDepCall && DT->properlyDominates(I->getBB(), C->getParent())){
-  //       cdep = NonLocalDepCall;
-  //       continue;
-  //     }
-
-  //     cdep = 0;
-  //     break;
-  //   }
-
-  //   if (!cdep) {
-  //     valueNumbering[C] = nextValueNumber;
-  //     return nextValueNumber++;
-  //   }
-
-  //   if (cdep->getNumArgOperands() != C->getNumArgOperands()) {
-  //     valueNumbering[C] = nextValueNumber;
-  //     return nextValueNumber++;
-  //   }
-  //   for (unsigned i = 0, e = C->getNumArgOperands(); i < e; ++i) {
-  //     uint32_t c_vn = lookup_or_add(C->getArgOperand(i));
-  //     uint32_t cd_vn = lookup_or_add(cdep->getArgOperand(i));
-  //     if (c_vn != cd_vn) {
-  //       valueNumbering[C] = nextValueNumber;
-  //       return nextValueNumber++;
-  //     }
-  //   }
-
-  //   uint32_t v = lookup_or_add(cdep);
-  //   valueNumbering[C] = v;
-  //   return v;
-
-  // } else {
-  //   valueNumbering[C] = nextValueNumber;
-  //   return nextValueNumber++;
-  // }
 }
 
 // performSymbolicPHIEvaluation - Evaluate PHI nodes symbolically, and create an expression result
@@ -1110,6 +1412,7 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
   else if (isa<Argument>(V) || isa<GlobalVariable>(V)) {
     E = createVariableExpression(V);
   } else {
+    //TODO: memory intrinsics
     Instruction *I = cast<Instruction>(V);
     switch (I->getOpcode()) {
       //TODO: extractvalue
@@ -1128,6 +1431,18 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
     case Instruction::Load:
       E = performSymbolicLoadEvaluation(I, B);
       break;
+    case Instruction::BitCast: {
+      //Pointer bitcasts are noops, we can just make them out of whole cloth if we need to. 
+      if (I->getType()->isPointerTy()){
+	if (Instruction *I0 = dyn_cast<Instruction>(I->getOperand(0)))
+	  return performSymbolicEvaluation(I0, I0->getParent());
+	else 
+	  return performSymbolicEvaluation(I->getOperand(0), B);
+      }
+      E = createExpression(I);
+    }
+      break;
+      
     case Instruction::Add:
     case Instruction::FAdd:
     case Instruction::Sub:
@@ -1159,7 +1474,6 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
     case Instruction::FPExt:
     case Instruction::PtrToInt:
     case Instruction::IntToPtr:
-    case Instruction::BitCast:
     case Instruction::Select:
     case Instruction::ExtractElement:
     case Instruction::InsertElement:
@@ -1236,15 +1550,28 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
       // NewClass->members.push_back(V);
       NewClass->expression = E;
       expressionToClass[E] = NewClass;
+
+      // Constants and variables should always be made the leader
       if (ConstantExpression *CE = dyn_cast<ConstantExpression>(E))
         NewClass->leader = CE->getConstantValue();
-      else
+      else if (VariableExpression *VE = dyn_cast<VariableExpression>(E))
+	NewClass->leader = VE->getVariableValue();
+      else if (MemoryExpression *ME = dyn_cast<MemoryExpression>(E)) {
+	if (ME->isStore())
+	  NewClass->leader = lookupOperandLeader(ME->getStoreInst()->getValueOperand());
+	else 
+	  NewClass->leader = V;
+      } else
         NewClass->leader = V;
       
       EClass = NewClass;
       DEBUG(dbgs() << "Created new congruence class for " << V << " using expression " << *E << " at " << NewClass->id << "\n");
     } else {
       EClass = VTCI->second;
+      MemoryExpression *ME = dyn_cast<MemoryExpression>(E);
+      MemoryExpression *ClassME;
+      if (ME && EClass->expression && (ClassME = dyn_cast<MemoryExpression>(EClass->expression))) {
+      }	
     }
   }
   DenseSet<Value*>::iterator DI = changedValues.find(V);
@@ -1428,6 +1755,8 @@ uint32_t GVN::nextCongruenceNum = 0;
 /// runOnFunction - This is the main transformation entry point for a function.
 bool GVN::runOnFunction(Function& F) {
   bool Changed;
+  DEBUG(dbgs() << "Starting GVN on new function " << F.getName() << "\n");
+  
   // Merge unconditional branches, allowing PRE to catch more
   // optimization opportunities.
   for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ) {
@@ -1553,6 +1882,12 @@ bool GVN::runOnFunction(Function& F) {
 	    DEBUG(verifyRemoved(I));
 	    ++NumGVNSimpl;
 	    continue;
+	  }
+	  if (processedCount.count(I) == 0) {
+	    processedCount.insert(std::make_pair(I, 1));
+	  } else {
+	    processedCount[I] += 1;
+	    assert(processedCount[I] < 100 && "Seem to have processed the same instruction a lot");
 	  }
 	  
           if (!I->isTerminator()) {
