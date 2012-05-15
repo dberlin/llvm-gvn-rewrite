@@ -41,6 +41,7 @@
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/PostOrderIterator.h"
+#include "llvm/ADT/ScopedHashTable.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SparseBitVector.h"
 #include "llvm/ADT/Statistic.h"
@@ -49,6 +50,9 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/IRBuilder.h"
 #include "llvm/Support/PatternMatch.h"
+#include "llvm/Support/RecyclingAllocator.h"
+#include "llvm/Transforms/Utils/Local.h"
+
 
 #include <algorithm>
 #include <list>
@@ -419,7 +423,8 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
   return GetStoreValueForLoad(SrcVal, Offset, LoadTy, InsertPt, TD);
 }
 
-
+  BumpPtrAllocator expressionAllocator;
+  
   static std::string getBlockName(BasicBlock *B) {
     return DOTGraphTraits<const Function*>::getSimpleNodeLabel(B, NULL);
   }
@@ -487,6 +492,14 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     virtual void print(raw_ostream &OS) {
       OS << "{etype = " << etype_ << ", opcode = " << opcode_ << " }";
     }
+    void *operator new(size_t s) {
+      return expressionAllocator.Allocate<Expression>();
+    }
+    // Since this is a bump ptr allocated structure, deletes do nothing but call the destructors.
+    void operator delete(void *p) {
+      expressionAllocator.Deallocate(p);
+    }
+    
   };
   inline raw_ostream &operator <<(raw_ostream &OS, Expression &E) {
     E.print(OS);
@@ -546,6 +559,10 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
                           hash_combine_range(varargs.begin(),
                                              varargs.end()));
     }
+    void *operator new(size_t s) {
+      return expressionAllocator.Allocate<BasicExpression>();
+    }
+
   };
   class CallExpression: public BasicExpression {
   private:
@@ -638,6 +655,11 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
       OS << " represents call at " << callinst_;
       OS << ", nomem = " << nomem_ << ", readonly = " << readonly_ << "}";
     }
+
+    void *operator new(size_t s) {
+      return expressionAllocator.Allocate<CallExpression>();
+    }
+
   };
   class MemoryExpression: public BasicExpression {
   private:
@@ -690,7 +712,6 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
       const MemoryExpression &OE = cast<MemoryExpression>(other);
       if (varargs != OE.varargs)
 	return false;
-      
       if (!isStore_) {
 	LoadInst *LI = inst_.loadinst;
 	Instruction *OI = OE.inst_.inst;
@@ -720,6 +741,7 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
 		return false;
 	      return true;
 	    }
+	    // TODO: MemIntrinsic case
 	    return false;
 	  }
 	  if (!Dep.isDef()) {
@@ -748,7 +770,8 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
 	     }
 	     return true;
 	   }
-	   // Non-local case
+	   //TODO: Non-local case
+	   // We should mark the non-local ones so we can try to PRE them later
 	   return false;
 	}
 	return true;
@@ -768,6 +791,10 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
                           hash_combine_range(varargs.begin(),
                                              varargs.end()));
     }
+    void *operator new(size_t s) {
+      return expressionAllocator.Allocate<MemoryExpression>();
+    }
+
   };
 
   class InsertValueExpression: public BasicExpression {
@@ -819,10 +846,17 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
       }
       OS << "}  }";
     }
+    void *operator new(size_t s) {
+      return expressionAllocator.Allocate<InsertValueExpression>();
+    }
+
   };
     
   class PHIExpression : public BasicExpression {
   public:
+    void *operator new(size_t s) {
+      return expressionAllocator.Allocate<PHIExpression>();
+    }
 
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
     static inline bool classof(const PHIExpression *) { return true; }
@@ -874,6 +908,7 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     void operator=(const PHIExpression&); // Do not implement
     PHIExpression(const PHIExpression&); // Do not implement
     BasicBlock *bb_;
+
     
   };
   class VariableExpression : public Expression {
@@ -909,6 +944,9 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     virtual void print(raw_ostream &OS) {
       OS << "{etype = " << etype_ << ", opcode = " << opcode_ << ", variable = " << variableValue_ << " }";
     }
+    void *operator new(size_t s) {
+      return expressionAllocator.Allocate<VariableExpression>();
+    }
 
     private:
     void operator=(const VariableExpression&); // Do not implement
@@ -917,7 +955,6 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     Value* variableValue_; 
     
   };
-
   class ConstantExpression : public Expression {
     public:
 
@@ -947,6 +984,9 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     virtual hash_code getHashValue() const {
       return hash_combine(etype_, constantValue_->getType(), constantValue_);
     }
+    void *operator new(size_t s) {
+      return expressionAllocator.Allocate<ConstantExpression>();
+    }
 
     private:
     void operator=(const ConstantExpression&); // Do not implement
@@ -965,18 +1005,20 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
 namespace {
   class GVN : public FunctionPass {
 
-
     static uint32_t nextCongruenceNum;    
     struct CongruenceClass {
       uint32_t id;
-      //TODO(dannyb) Replace this list
       Value* leader;
-      Expression* constantLeader;
       Expression* expression;
       std::set<Value*> members;
       CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0) {};
       
     };
+    typedef RecyclingAllocator<BumpPtrAllocator,
+			       ScopedHashTableVal<CongruenceClass*, Value*> > AllocatorTy;
+    typedef ScopedHashTable<CongruenceClass*, Value*,  DenseMapInfo<CongruenceClass*>,
+			    AllocatorTy> ScopedHTType;
+    typedef ScopedHTType::ScopeTy ScopeType;
     CongruenceClass *InitialClass;
     bool NoLoads;
     AliasAnalysis *AA;
@@ -995,7 +1037,9 @@ namespace {
     std::vector<bool> touchedBlocks;
     std::vector<CongruenceClass*> congruenceClass;
     DenseMap<Value*, CongruenceClass*> valueToClass;
-    DenseMap<Expression*,  bool> uniquedExpressions;
+    DenseMap<BasicBlock*, ScopeType*> ScopeMap;
+    ScopedHTType availableTable;
+    std::vector<Instruction*> instrsToErase;
     
     struct ComparingExpressionInfo {
       static inline Expression* getEmptyKey() {
@@ -1025,7 +1069,10 @@ namespace {
     
     typedef DenseMap<Expression*, CongruenceClass*, ComparingExpressionInfo> ExpressionClassMap;
     ExpressionClassMap expressionToClass;
+    DenseSet<Expression*, ComparingExpressionInfo> uniquedExpressions;
+    DenseSet<Expression*> expressionToDelete;
     DenseSet<Value*> changedValues;
+    
 
     /// LeaderTable - A mapping from value numbers to lists of Value*'s that
     /// have that value number.  Use findLeader to query it.
@@ -1038,7 +1085,7 @@ namespace {
     BumpPtrAllocator TableAllocator;
     
     Value *lookupOperandLeader(Value*);
-    
+    // expression handling
     Expression *createExpression(Instruction*);
     void setBasicExpressionInfo(Instruction*, BasicExpression*);
     Expression *createPHIExpression(Instruction*);
@@ -1064,16 +1111,29 @@ namespace {
     AliasAnalysis *getAliasAnalysis() const { return AA; }
     MemoryDependenceAnalysis &getMemDep() const { return *MD; }
   private:
+    void ReplaceInstruction(Instruction*, Value*);
+    // Symbolic evaluation
     Expression *performSymbolicEvaluation(Value*, BasicBlock*);
     Expression *performSymbolicLoadEvaluation(Instruction*, BasicBlock*);
     Expression *performSymbolicStoreEvaluation(Instruction*, BasicBlock*);
     Expression *performSymbolicCallEvaluation(Instruction*, BasicBlock*);
     Expression *performSymbolicPHIEvaluation(Instruction*, BasicBlock*);
-
+    // Congruence findin
     void performCongruenceFinding(Value*, Expression*);
+    // Predicate and reachability handling
     void updateReachableEdge(BasicBlock*, BasicBlock*);
     void processOutgoingEdges(TerminatorInst* TI);
     void propagateChangeInEdge(BasicBlock*);
+
+    // Dominator based replacement handling
+    void EnterScope(BasicBlock*);
+    void ExitScope(BasicBlock*);
+    bool ProcessBlock(BasicBlock*);
+    void ProcessTerminatorInst(TerminatorInst *TI);
+    void ExitScopeIfDone(DomTreeNode*, DenseMap<DomTreeNode*, unsigned>&,
+			 DenseMap<DomTreeNode*, DomTreeNode*> &);
+    void EraseDeadBlocks(Function &, std::vector<BasicBlock*> &);
+    
     /// addToLeaderTable - Push a new Value to the LeaderTable onto the list for
     /// its value number.
     void addToLeaderTable(uint32_t N, Value *V, BasicBlock *BB) {
@@ -1161,6 +1221,34 @@ INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfo)
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_END(GVN, "gvn", "Global Value Numbering", false, false)
 
+// findLeader - In order to find a leader for a given value number at a 
+// specific basic block, we first obtain the list of all Values for that number,
+// and then scan the list to find one whose block dominates the block in 
+// question.  This is fast because dominator tree queries consist of only
+// a few comparisons of DFS numbers.
+Value *GVN::findLeader(BasicBlock *BB, uint32_t num) {
+  LeaderTableEntry Vals = LeaderTable[num];
+  if (!Vals.Val) return 0;
+  
+  Value *Val = 0;
+  if (DT->dominates(Vals.BB, BB)) {
+    Val = Vals.Val;
+    if (isa<Constant>(Val)) return Val;
+  }
+  
+  LeaderTableEntry* Next = Vals.Next;
+  while (Next) {
+    if (DT->dominates(Next->BB, BB)) {
+      if (isa<Constant>(Next->Val)) return Next->Val;
+      if (!Val) Val = Next->Val;
+    }
+    
+    Next = Next->Next;
+  }
+
+  return Val;
+}
+
 void GVN::dump(DenseMap<uint32_t, Value*>& d) {
   errs() << "{\n";
   for (DenseMap<uint32_t, Value*>::iterator I = d.begin(),
@@ -1229,16 +1317,20 @@ Expression *GVN::createExpression(Instruction *I) {
     // TODO: 10% of our time is spent in SimplifyCmpInst with pointer operands
     //TODO: Since we noop bitcasts, we may need to check types before
     //simplifying, so that we don't end up simplifying based on a wrong
-    //type assumption.
+    //type assumption. We should clean this up so we can use constants of the wrong type
+    
 
-    Value *V = SimplifyCmpInst(Predicate, E->varargs[0], E->varargs[1], TD, TLI, DT);
-    Constant *C;
-    if (V && (C = dyn_cast<Constant>(V))) {
-      DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
-      NumGVNCmpInsSimplified++;
-      delete E;
-      return createConstantExpression(C);
+    if (E->varargs[0]->getType() == E->varargs[1]->getType()) {  
+      Value *V = SimplifyCmpInst(Predicate, E->varargs[0], E->varargs[1], TD, TLI, DT);
+      Constant *C;
+      if (V && (C = dyn_cast<Constant>(V))) {
+	DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
+	NumGVNCmpInsSimplified++;
+	delete E;
+	return createConstantExpression(C);
+      }
     }
+    
   }
 
   // Handle simplifying
@@ -1272,10 +1364,10 @@ Expression *GVN::createExpression(Instruction *I) {
 }
 
 Expression *GVN::uniquifyExpression(Expression *E) {  
-  std::pair<DenseMap<Expression*, bool>::iterator, bool> P = uniquedExpressions.insert(std::make_pair(E, true));
-  if (!P.second && P.first->first != E) {
+  std::pair<DenseSet<Expression *, ComparingExpressionInfo>::iterator, bool> P = uniquedExpressions.insert(E);
+  if (!P.second && *(P.first) != E) {
     delete E;
-    return P.first->first;
+    return *(P.first);
   } 
   return E;
 }
@@ -1487,7 +1579,11 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
   }
   if (!E)
     return NULL;
-  return uniquifyExpression(E);
+  expressionToDelete.insert(E);
+
+  if (isa<ConstantExpression>(E) || isa<VariableExpression>(E))
+    E = uniquifyExpression(E);
+  return E;
 }
 
 /// performCongruenceFinding - Perform congruence finding on a given value numbering expression
@@ -1628,7 +1724,7 @@ void GVN::processOutgoingEdges(TerminatorInst *TI) {
       Expression *E = createExpression(I);
       if (ConstantExpression *CE = dyn_cast<ConstantExpression>(E)) {
 	CondEvaluated = CE->getConstantValue();
-      } 
+      }
       delete E;
     } else if (isa<ConstantInt>(Cond)) {
       CondEvaluated = Cond;
@@ -1725,10 +1821,190 @@ void GVN::propagateChangeInEdge(BasicBlock *Dest) {
     }
   }
 }
+
+void GVN::EnterScope(BasicBlock *BB) {
+  DEBUG(dbgs() << "Entering: " << BB->getName() << '\n');
+  ScopeType *Scope = new ScopeType(availableTable);
+  ScopeMap[BB] = Scope;
+}
+
+void GVN::ExitScope(BasicBlock *BB) {
+  DEBUG(dbgs() << "Exiting: " << BB->getName() << '\n');
+  DenseMap<BasicBlock*, ScopeType*>::iterator SI = ScopeMap.find(BB);
+  assert(SI != ScopeMap.end());
+  ScopeMap.erase(SI);
+  delete SI->second;
+}
+
+// ExitScopeIfDone - Destroy scope for the BB that corresponds to the given
+/// dominator tree node if its a leaf or all of its children are done. Walk
+/// up the dominator tree to destroy ancestors which are now done.
+void GVN::ExitScopeIfDone(DomTreeNode *Node,
+			  DenseMap<DomTreeNode*, unsigned> &OpenChildren,
+			  DenseMap<DomTreeNode*, DomTreeNode*> &ParentMap) {
+  if (OpenChildren[Node])
+    return;
+
+  // Pop scope.
+  ExitScope(Node->getBlock());
+
+  // Now traverse upwards to pop ancestors whose offsprings are all done.
+  while (DomTreeNode *Parent = ParentMap[Node]) {
+    unsigned Left = --OpenChildren[Parent];
+    if (Left != 0)
+      break;
+    ExitScope(Parent->getBlock());
+    Node = Parent;
+  }
+}
+
+void GVN::ProcessTerminatorInst(TerminatorInst *TI){
+  BranchInst *BR = dyn_cast<BranchInst>(TI);
+  if (BR && BR->isConditional()) {
+    Value *Cond = BR->getCondition();
+    // See if it was already simplified for us. This should be the normal cases for ones we can remove
+    if (isa<Constant>(Cond)) {
+      return;
+    }
+    // Otherwise
+    CongruenceClass *CondClass = valueToClass[Cond];
+    if (CondClass && CondClass->expression) {
+      assert (!isa<ConstantExpression>(CondClass->expression) && "Should have been folded already");
+    }
+  }  
+}
+
+void GVN::ReplaceInstruction(Instruction *I, Value *V){	
+
+  if (V->getType() != I->getType()) {
+    Instruction *insertPlace = I;
+    if (isa<PHINode>(I))
+      insertPlace = I->getParent()->getFirstNonPHI();
+    V = CoerceAvailableValueToLoadType(V, I->getType(), insertPlace, *TD);
+    assert(V && "Should have been able to coerce types!");
+  }
+  DEBUG(dbgs() << "Replacing " << *I << " with " << *V << "\n");
+  
+  I->replaceAllUsesWith(V);
+  instrsToErase.push_back(I);
+}
+
+bool GVN::ProcessBlock(BasicBlock *BB) {
+  bool Changed = false;
+  if (!reachableBlocks.count(BB)) {
+    DEBUG(dbgs() << "Skipping unreachable block " << getBlockName(BB) << " during elimination\n");
+    return false;
+  }
+  
+  for (BasicBlock::iterator II = BB->begin(), IE = BB->end();  II != IE; ) {
+    Instruction *I = &*II;
+    ++II;
+    // Terminator instructions are handled specially
+    if (I->isTerminator()) {
+      ProcessTerminatorInst(cast<TerminatorInst>(I));
+      continue;
+    }  else if (isa<StoreInst>(I)) {
+      continue;
+    } else if (isa<BitCastInst>(I)) {
+      continue;
+    } 
+    bool isLoad = isa<LoadInst>(I);
+    
+    if (I->use_empty()) {
+      instrsToErase.push_back(I);
+      continue;
+    }
+    
+    CongruenceClass *IClass = valueToClass[I];
+    if (IClass->expression) { 
+      if (Constant *C = dyn_cast<Constant>(IClass->leader)){
+	DEBUG(dbgs() << "Found constant replacement " << *C << " for " << *I << "\n");
+	ReplaceInstruction(I, C);
+	continue;
+      } else if (Argument *A = dyn_cast<Argument>(IClass->leader)) {
+	DEBUG(dbgs() << "Found argument replacement " << *A << " for " << *I << "\n");
+	ReplaceInstruction(I, A);
+	continue;
+      }
+    }
+    
+    // Skip instructions with singleton congruence classes
+    if (IClass->members.size() <= 1)
+      continue;
+    Value *Result = availableTable.lookup(IClass);
+    
+    if (Result){
+      if (Result != I) {
+	DEBUG(dbgs() << "Found replacement " << *Result << " for " << *I << "\n");
+	ReplaceInstruction(I, Result);
+      }
+    } else {
+      availableTable.insert(IClass, I);
+    }  
+  }
+  return Changed;
+}
+
+void GVN::EraseDeadBlocks(Function &F, std::vector<BasicBlock*>&BlocksToErase) {
+// Now that all instructions in the function are constant folded, erase dead
+  // blocks, because we can now use ConstantFoldTerminator to get rid of
+  // in-edges.
+  for (unsigned i = 0, e = BlocksToErase.size(); i != e; ++i) {
+    // If there are any PHI nodes in this successor, drop entries for BB now.
+    BasicBlock *DeadBB = BlocksToErase[i];
+    for (Value::use_iterator UI = DeadBB->use_begin(), UE = DeadBB->use_end();
+	 UI != UE; ) {
+      // Grab the user and then increment the iterator early, as the user
+      // will be deleted. Step past all adjacent uses from the same user.
+      Instruction *I = dyn_cast<Instruction>(*UI);
+      do { ++UI; } while (UI != UE && *UI == I);
+      
+      // Ignore blockaddress users; BasicBlock's dtor will handle them.
+      if (!I) continue;
+      
+      bool Folded = ConstantFoldTerminator(I->getParent());
+      if (!Folded) {
+	// The constant folder may not have been able to fold the terminator
+	// if this is a branch or switch on undef.  Fold it manually as a
+	// branch to the first successor.
+#ifndef NDEBUG
+	if (BranchInst *BI = dyn_cast<BranchInst>(I)) {
+	  assert(BI->isConditional() && isa<UndefValue>(BI->getCondition()) &&
+		 "Branch should be foldable!");
+	} else if (SwitchInst *SI = dyn_cast<SwitchInst>(I)) {
+	  assert(isa<UndefValue>(SI->getCondition()) && "Switch should fold");
+	} else {
+	  llvm_unreachable("Didn't fold away reference to block!");
+	}
+#endif
+	
+	// Make this an uncond branch to the first successor.
+	TerminatorInst *TI = I->getParent()->getTerminator();
+	BranchInst::Create(TI->getSuccessor(0), TI);
+	
+	// Remove entries in successor phi nodes to remove edges.
+	for (unsigned i = 1, e = TI->getNumSuccessors(); i != e; ++i)
+	  TI->getSuccessor(i)->removePredecessor(TI->getParent());
+	
+	// Remove the old terminator.
+	TI->eraseFromParent();
+      }
+    }
+    DEBUG(dbgs() << "Erased unreachable basic block " << getBlockName(DeadBB) << "\n");
+    // Finally, delete the basic block.
+    F.getBasicBlockList().erase(DeadBB);
+    
+  }
+}
 uint32_t GVN::nextCongruenceNum = 0;
 
 /// runOnFunction - This is the main transformation entry point for a function.
 bool GVN::runOnFunction(Function& F) {
+  DenseMap<DomTreeNode*, unsigned> OpenChildren;
+  DenseMap<DomTreeNode*, DomTreeNode*> ParentMap;
+  SmallVector<DomTreeNode*, 32> Scopes;
+  SmallVector<DomTreeNode*, 8> Worklist;
+
   bool Changed;
   DEBUG(dbgs() << "Starting GVN on new function " << F.getName() << "\n");
   
@@ -1876,20 +2152,69 @@ bool GVN::runOnFunction(Function& F) {
     }
   }
 
-  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
-    if (!reachableBlocks.count(FI)) {
-      DEBUG(dbgs() << "We believe block " << getBlockName(FI) << " is unreachable\n");
-    }
-  }
+  // Perform dominator based elimination.
 
-  valueToClass.clear();
-  for (unsigned i = 0 , e = congruenceClass.size(); i != e; ++i) {
-    delete congruenceClass[i];
-    congruenceClass[i] = NULL;
+  Worklist.push_back(DT->getRootNode());
+  do {
+    DomTreeNode *Node;
+    Node = Worklist.pop_back_val();
+    Scopes.push_back(Node);
+    const std::vector<DomTreeNode*> &Children = Node->getChildren();
+    unsigned NumChildren = Children.size();
+    OpenChildren[Node] = NumChildren;
+    for (unsigned i = 0; i != NumChildren; ++i) {
+      DomTreeNode *Child = Children[i];
+      ParentMap[Child] = Node;
+      Worklist.push_back(Child);
+    }
+  } while (!Worklist.empty());
+
+ for (unsigned i = 0, e = Scopes.size(); i != e; ++i) {
+    DomTreeNode *Node = Scopes[i];
+    BasicBlock *BB = Node->getBlock();
+    EnterScope(BB);
+    Changed |= ProcessBlock(BB);
+    // If it's a leaf node, it's done. Traverse upwards to pop ancestors.
+    ExitScopeIfDone(Node, OpenChildren, ParentMap);
+  }
+  for (unsigned i = 0, e = instrsToErase.size(); i != e; ++i) {
+    instrsToErase[i]->eraseFromParent();
+  }
+  std::vector<BasicBlock*> BlocksToErase;
+  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI){
+    if (!reachableBlocks.count(FI)) { 
+      DEBUG(dbgs() << "We believe block " << getBlockName(FI) << " is unreachable\n");
+      BlocksToErase.push_back(FI);
+    }	
+  }
+  if (BlocksToErase.size() != 0) {
+    Changed = true;
+    // Erase all dead blocks
+    EraseDeadBlocks(F, BlocksToErase);
+  }
+ 
+ ScopeMap.clear();
+ Scopes.clear();
+ valueToClass.clear();
+ for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
+   delete congruenceClass[i];
+   congruenceClass[i] = NULL;
+ }
+  
+  std::vector<Expression*> toDelete;
+  for (DenseSet<Expression*>::iterator I = expressionToDelete.begin(), E = expressionToDelete.end(); I != E; ++I) {
+    toDelete.push_back(*I);
+  }
+ 
+  for (unsigned i = 0, e = toDelete.size(); i != e; ++i) {
+    delete toDelete[i];
+    toDelete[i] = NULL;  
   }
   
   congruenceClass.clear();
   expressionToClass.clear();
+  expressionToDelete.clear();
+  uniquedExpressions.clear();
   rpoBlockNumbers.clear();
   rpoInstructionNumbers.clear();
   rpoInstructionStartEnd.clear();
@@ -1898,49 +2223,10 @@ bool GVN::runOnFunction(Function& F) {
   reachableEdges.clear();
   touchedInstructions.clear();
   touchedBlocks.clear();
-  std::vector<Expression*> toDelete;
- 
-  for (DenseMap<Expression*, bool>::iterator I = uniquedExpressions.begin(), E = uniquedExpressions.end(); I != E; ++I) {
-    toDelete.push_back(I->first);
-   
-  }
-  uniquedExpressions.clear();
-  for (unsigned i = 0, e = toDelete.size(); i != e; ++i) {
-    delete toDelete[i];
-    toDelete[i] = NULL;
-  }
-  
-  
-  return true;
-  // bool Changed = false;
-  // bool ShouldContinue = true;
-
-
-  // unsigned Iteration = 0;
-  // while (ShouldContinue) {
-  //   DEBUG(dbgs() << "GVN iteration: " << Iteration << "\n");
-  //   ShouldContinue = iterateOnFunction(F);
-  //   if (splitCriticalEdges())
-  //     ShouldContinue = true;
-  //   Changed |= ShouldContinue;
-  //   ++Iteration;
-  // }
-
-  // if (EnablePRE) {
-  //   bool PREChanged = true;
-  //   while (PREChanged) {
-  //     PREChanged = performPRE(F);
-  //     Changed |= PREChanged;
-  //   }
-  // }
-  // // FIXME: Should perform GVN again after PRE does something.  PRE can move
-  // // computations into blocks where they become fully redundant.  Note that
-  // // we can't do this until PRE's critical edge splitting updates memdep.
-  // // Actually, when this happens, we should just fully integrate PRE into GVN.
-
-  // cleanupGlobalSets();
-
-  // return Changed;
+  processedCount.clear();
+  expressionAllocator.Reset();
+  instrsToErase.clear();
+  return Changed;
 }
 
 
