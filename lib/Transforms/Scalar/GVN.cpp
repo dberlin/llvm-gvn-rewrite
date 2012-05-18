@@ -56,12 +56,12 @@
 
 #include <algorithm>
 #include <list>
-#include <set>
 
 using namespace llvm;
 using namespace PatternMatch;
 
-STATISTIC(NumGVNInstr,  "Number of instructions deleted");
+STATISTIC(NumGVNInstrDeleted,  "Number of instructions deleted");
+STATISTIC(NumGVNBlocksDeleted, "Number of blocks deleted");
 STATISTIC(NumGVNLoad,   "Number of loads deleted");
 STATISTIC(NumGVNPRE,    "Number of instructions PRE'd");
 STATISTIC(NumGVNBlocks, "Number of blocks merged");
@@ -91,9 +91,12 @@ MaxRecurseDepth("max-recurse-depth", cl::Hidden, cl::init(1000), cl::ZeroOrMore,
 /// as an efficient mechanism to determine the expression-wise equivalence of
 /// two values.
 namespace {
-
+  struct CongruenceClass;
   MemoryDependenceAnalysis *MD;
   const TargetData *TD;
+  AliasAnalysis *AA;
+  DenseSet<BasicBlock*> reachableBlocks;
+
 
 /// CanCoerceMustAliasedValueToLoad - Return true if
 /// CoerceAvailableValueToLoadType will succeed.
@@ -106,12 +109,12 @@ static bool CanCoerceMustAliasedValueToLoad(Value *StoredVal,
       StoredVal->getType()->isStructTy() ||
       StoredVal->getType()->isArrayTy())
     return false;
-  
+
   // The store has to be at least as big as the load.
   if (TD.getTypeSizeInBits(StoredVal->getType()) <
         TD.getTypeSizeInBits(LoadTy))
     return false;
-  
+
   return true;
 }
 
@@ -121,80 +124,80 @@ static bool CanCoerceMustAliasedValueToLoad(Value *StoredVal,
 /// InsertPt is the place to insert new instructions.
 ///
 /// If we can't do it, return null.
-static Value *CoerceAvailableValueToLoadType(Value *StoredVal, 
+static Value *CoerceAvailableValueToLoadType(Value *StoredVal,
                                              Type *LoadedTy,
                                              Instruction *InsertPt,
                                              const TargetData &TD) {
   if (!CanCoerceMustAliasedValueToLoad(StoredVal, LoadedTy, TD))
     return 0;
-  
+
   // If this is already the right type, just return it.
   Type *StoredValTy = StoredVal->getType();
-  
+
   uint64_t StoreSize = TD.getTypeSizeInBits(StoredValTy);
   uint64_t LoadSize = TD.getTypeSizeInBits(LoadedTy);
-  
+
   // If the store and reload are the same size, we can always reuse it.
   if (StoreSize == LoadSize) {
     // Pointer to Pointer -> use bitcast.
     if (StoredValTy->isPointerTy() && LoadedTy->isPointerTy())
       return new BitCastInst(StoredVal, LoadedTy, "", InsertPt);
-    
+
     // Convert source pointers to integers, which can be bitcast.
     if (StoredValTy->isPointerTy()) {
       StoredValTy = TD.getIntPtrType(StoredValTy->getContext());
       StoredVal = new PtrToIntInst(StoredVal, StoredValTy, "", InsertPt);
     }
-    
+
     Type *TypeToCastTo = LoadedTy;
     if (TypeToCastTo->isPointerTy())
       TypeToCastTo = TD.getIntPtrType(StoredValTy->getContext());
-    
+
     if (StoredValTy != TypeToCastTo)
       StoredVal = new BitCastInst(StoredVal, TypeToCastTo, "", InsertPt);
-    
+
     // Cast to pointer if the load needs a pointer type.
     if (LoadedTy->isPointerTy())
       StoredVal = new IntToPtrInst(StoredVal, LoadedTy, "", InsertPt);
-    
+
     return StoredVal;
   }
-  
+
   // If the loaded value is smaller than the available value, then we can
   // extract out a piece from it.  If the available value is too small, then we
   // can't do anything.
   assert(StoreSize >= LoadSize && "CanCoerceMustAliasedValueToLoad fail");
-  
+
   // Convert source pointers to integers, which can be manipulated.
   if (StoredValTy->isPointerTy()) {
     StoredValTy = TD.getIntPtrType(StoredValTy->getContext());
     StoredVal = new PtrToIntInst(StoredVal, StoredValTy, "", InsertPt);
   }
-  
+
   // Convert vectors and fp to integer, which can be manipulated.
   if (!StoredValTy->isIntegerTy()) {
     StoredValTy = IntegerType::get(StoredValTy->getContext(), StoreSize);
     StoredVal = new BitCastInst(StoredVal, StoredValTy, "", InsertPt);
   }
-  
+
   // If this is a big-endian system, we need to shift the value down to the low
   // bits so that a truncate will work.
   if (TD.isBigEndian()) {
     Constant *Val = ConstantInt::get(StoredVal->getType(), StoreSize-LoadSize);
     StoredVal = BinaryOperator::CreateLShr(StoredVal, Val, "tmp", InsertPt);
   }
-  
+
   // Truncate the integer to the right size now.
   Type *NewIntTy = IntegerType::get(StoredValTy->getContext(), LoadSize);
   StoredVal = new TruncInst(StoredVal, NewIntTy, "trunc", InsertPt);
-  
+
   if (LoadedTy == NewIntTy)
     return StoredVal;
-  
+
   // If the result is a pointer, inttoptr.
   if (LoadedTy->isPointerTy())
     return new IntToPtrInst(StoredVal, LoadedTy, "inttoptr", InsertPt);
-  
+
   // Otherwise, bitcast.
   return new BitCastInst(StoredVal, LoadedTy, "bitcast", InsertPt);
 }
@@ -215,13 +218,13 @@ static int AnalyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
   // to transform them.  We need to be able to bitcast to integer.
   if (LoadTy->isStructTy() || LoadTy->isArrayTy())
     return -1;
-  
+
   int64_t StoreOffset = 0, LoadOffset = 0;
   Value *StoreBase = GetPointerBaseWithConstantOffset(WritePtr, StoreOffset,TD);
   Value *LoadBase = GetPointerBaseWithConstantOffset(LoadPtr, LoadOffset, TD);
   if (StoreBase != LoadBase)
     return -1;
-  
+
   // If the load and store are to the exact same address, they should have been
   // a must alias.  AA must have gotten confused.
   // FIXME: Study to see if/when this happens.  One case is forwarding a memset
@@ -236,18 +239,18 @@ static int AnalyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
     abort();
   }
 #endif
-  
+
   // If the load and store don't overlap at all, the store doesn't provide
   // anything to the load.  In this case, they really don't alias at all, AA
   // must have gotten confused.
   uint64_t LoadSize = TD.getTypeSizeInBits(LoadTy);
-  
+
   if ((WriteSizeInBits & 7) | (LoadSize & 7))
     return -1;
   uint64_t StoreSize = WriteSizeInBits >> 3;  // Convert to bytes.
   LoadSize >>= 3;
-  
-  
+
+
   bool isAAFailure = false;
   if (StoreOffset < LoadOffset)
     isAAFailure = StoreOffset+int64_t(StoreSize) <= LoadOffset;
@@ -265,7 +268,7 @@ static int AnalyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
 #endif
     return -1;
   }
-  
+
   // If the Load isn't completely contained within the stored bits, we don't
   // have all the bits to feed it.  We could do something crazy in the future
   // (issue a smaller load then merge the bits in) but this seems unlikely to be
@@ -273,11 +276,11 @@ static int AnalyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
   if (StoreOffset > LoadOffset ||
       StoreOffset+StoreSize < LoadOffset+LoadSize)
     return -1;
-  
+
   // Okay, we can do this transformation.  Return the number of bytes into the
   // store that the load is.
   return LoadOffset-StoreOffset;
-}  
+}
 
 /// AnalyzeLoadFromClobberingStore - This function is called when we have a
 /// memdep query of a load that ends up being a clobbering store.
@@ -303,26 +306,26 @@ static int AnalyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
   // Cannot handle reading from store of first-class aggregate yet.
   if (DepLI->getType()->isStructTy() || DepLI->getType()->isArrayTy())
     return -1;
-  
+
   Value *DepPtr = DepLI->getPointerOperand();
   uint64_t DepSize = TD.getTypeSizeInBits(DepLI->getType());
   int R = AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, DepSize, TD);
   if (R != -1) return R;
-  
+
   // If we have a load/load clobber an DepLI can be widened to cover this load,
   // then we should widen it!
   int64_t LoadOffs = 0;
   const Value *LoadBase =
     GetPointerBaseWithConstantOffset(LoadPtr, LoadOffs, TD);
   unsigned LoadSize = TD.getTypeStoreSize(LoadTy);
-  
+
   unsigned Size = MemoryDependenceAnalysis::
     getLoadLoadClobberFullWidthSize(LoadBase, LoadOffs, LoadSize, DepLI, TD);
   if (Size == 0) return -1;
-  
+
   return AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, Size*8, TD);
 }
-                               
+
 
 /// GetStoreValueForLoad - This function is called when we have a
 /// memdep query of a load that ends up being a clobbering store.  This means
@@ -333,32 +336,32 @@ static Value *GetStoreValueForLoad(Value *SrcVal, unsigned Offset,
                                    Type *LoadTy,
                                    Instruction *InsertPt, const TargetData &TD){
   LLVMContext &Ctx = SrcVal->getType()->getContext();
-  
+
   uint64_t StoreSize = (TD.getTypeSizeInBits(SrcVal->getType()) + 7) / 8;
   uint64_t LoadSize = (TD.getTypeSizeInBits(LoadTy) + 7) / 8;
-  
+
   IRBuilder<> Builder(InsertPt->getParent(), InsertPt);
-  
+
   // Compute which bits of the stored value are being used by the load.  Convert
   // to an integer type to start with.
   if (SrcVal->getType()->isPointerTy())
     SrcVal = Builder.CreatePtrToInt(SrcVal, TD.getIntPtrType(Ctx));
   if (!SrcVal->getType()->isIntegerTy())
     SrcVal = Builder.CreateBitCast(SrcVal, IntegerType::get(Ctx, StoreSize*8));
-  
+
   // Shift the bits to the least significant depending on endianness.
   unsigned ShiftAmt;
   if (TD.isLittleEndian())
     ShiftAmt = Offset*8;
   else
     ShiftAmt = (StoreSize-LoadSize-Offset)*8;
-  
+
   if (ShiftAmt)
     SrcVal = Builder.CreateLShr(SrcVal, ShiftAmt);
-  
+
   if (LoadSize != StoreSize)
     SrcVal = Builder.CreateTrunc(SrcVal, IntegerType::get(Ctx, LoadSize*8));
-  
+
   return CoerceAvailableValueToLoadType(SrcVal, LoadTy, InsertPt, TD);
 }
 
@@ -384,14 +387,14 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
       NewLoadSize = NextPowerOf2(NewLoadSize);
 
     Value *PtrVal = SrcVal->getPointerOperand();
-    
+
     // Insert the new load after the old load.  This ensures that subsequent
     // memdep queries will find the new load.  We can't easily remove the old
     // load completely because it is already in the value numbering table.
     IRBuilder<> Builder(SrcVal->getParent(), ++BasicBlock::iterator(SrcVal));
-    Type *DestPTy = 
+    Type *DestPTy =
       IntegerType::get(LoadTy->getContext(), NewLoadSize*8);
-    DestPTy = PointerType::get(DestPTy, 
+    DestPTy = PointerType::get(DestPTy,
                        cast<PointerType>(PtrVal->getType())->getAddressSpace());
     Builder.SetCurrentDebugLocation(SrcVal->getDebugLoc());
     PtrVal = Builder.CreateBitCast(PtrVal, DestPTy);
@@ -401,7 +404,7 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
 
     DEBUG(dbgs() << "GVN WIDENED LOAD: " << *SrcVal << "\n");
     DEBUG(dbgs() << "TO: " << *NewLoad << "\n");
-    
+
     // Replace uses of the original load with the wider load.  On a big endian
     // system, we need to shift down to get the relevant bits.
     Value *RV = NewLoad;
@@ -410,7 +413,7 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
                     NewLoadSize*8-SrcVal->getType()->getPrimitiveSizeInBits());
     RV = Builder.CreateTrunc(RV, SrcVal->getType());
     SrcVal->replaceAllUsesWith(RV);
-    
+
     // We would like to use gvn.markInstructionForDeletion here, but we can't
     // because the load is already memoized into the leader map table that GVN
     // tracks.  It is potentially possible to remove the load from the table,
@@ -419,15 +422,29 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     MD->removeInstruction(SrcVal);
     SrcVal = NewLoad;
   }
-  
+
   return GetStoreValueForLoad(SrcVal, Offset, LoadTy, InsertPt, TD);
 }
 
-  BumpPtrAllocator expressionAllocator;
-  
+
   static std::string getBlockName(BasicBlock *B) {
     return DOTGraphTraits<const Function*>::getSimpleNodeLabel(B, NULL);
   }
+
+  class Expression;
+
+  static uint32_t nextCongruenceNum = 0;
+  struct CongruenceClass {
+    uint32_t id;
+    Value* leader;
+    Expression* expression;
+    DenseSet<Value*> members;
+    CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0) {};
+
+  };
+
+  DenseMap<Value*, CongruenceClass*> valueToClass;
+  BumpPtrAllocator expressionAllocator;
 
   enum ExpressionType {
     ExpressionTypeBase,
@@ -441,7 +458,7 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     ExpressionTypeMemory,
     ExpressionTypeBasicEnd
   };
-  
+
   class Expression {
   private:
     void operator=(const Expression&); // Do not implement
@@ -449,7 +466,7 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
   protected:
     ExpressionType etype_;
     uint32_t opcode_;
-      
+
   public:
 
     uint32_t getOpcode() const {
@@ -459,17 +476,17 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     void setOpcode(uint32_t opcode) {
       opcode_ = opcode;
     }
-    
+
     ExpressionType getExpressionType() const {
       return etype_;
     }
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
     static inline bool classof(const Expression *) { return true; }
-    
-   
+
+
     Expression(uint32_t o = ~2U) : etype_(ExpressionTypeBase), opcode_(o) {}
     Expression(ExpressionType etype, uint32_t o = ~2U): etype_(etype), opcode_(o) { }
-    
+
     virtual ~Expression() {};
 
     bool operator==(const Expression &other) const {
@@ -485,10 +502,14 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     virtual bool equals(const Expression &other) const {
       return true;
     }
-    
+    // Return true if this is equivalent to the other expression, including memory dependencies
+    virtual bool depequals(const Expression &other) const {
+      return true;
+    }
+
     virtual hash_code getHashValue() const {
       return hash_combine(etype_, opcode_);
-    }      
+    }
     virtual void print(raw_ostream &OS) {
       OS << "{etype = " << etype_ << ", opcode = " << opcode_ << " }";
     }
@@ -499,7 +520,7 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     void operator delete(void *p) {
       expressionAllocator.Deallocate(p);
     }
-    
+
   };
   inline raw_ostream &operator <<(raw_ostream &OS, Expression &E) {
     E.print(OS);
@@ -513,28 +534,28 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
   protected:
     Type *type_;
   public:
-    
+
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
     static inline bool classof(const BasicExpression *) { return true; }
     static inline bool classof(const Expression *EB) {
       ExpressionType et = EB->getExpressionType();
       return et > ExpressionTypeBasicStart && et < ExpressionTypeBasicEnd;
     }
-    
+
     void setType(Type *T) {
       type_ = T;
     }
-    
+
     Type *getType() const {
       return type_;
     }
-    
+
     SmallVector<Value*, 4> varargs;
 
     BasicExpression():type_(NULL)  {
       etype_ = ExpressionTypeBasic;
     };
-    
+
     virtual ~BasicExpression() {};
 
     virtual bool equals(const Expression &other) const {
@@ -544,7 +565,7 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
       if (varargs != OE.varargs)
 	return false;
 
-      return true;      
+      return true;
     }
     virtual void print(raw_ostream &OS) {
       OS << "{etype = " << etype_ << ", opcode = " << opcode_ << ", varargs = {";
@@ -573,27 +594,37 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     bool readonly_;
     CallInst *callinst_;
   public:
-    
+
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const CallExpression *) { return true; }
     static inline bool classof(const Expression *EB) {
       return EB->getExpressionType() == ExpressionTypeCall;
-    }    
+    }
     CallExpression(CallInst *CI, bool nomem = false, bool readonly = false) {
       etype_ = ExpressionTypeCall;
       callinst_ = CI;
       nomem_ = nomem;
       readonly_ = readonly;
     };
-    
+
     virtual ~CallExpression() {};
 
     virtual bool equals(const Expression &other) const {
+      // Two calls are never the same if we don't have memory dependence info
+      if (!MD)
+	return false;
       const CallExpression &OE = cast<CallExpression>(other);
       if (type_ != OE.type_)
         return false;
+      // Calls are unequal unless they have the same arguments
       if (varargs != OE.varargs)
 	return false;
+      return true;
+    }
+    virtual bool depequals (const Expression &other) const {
+      const CallExpression &OE = cast<CallExpression>(other);
+      // Given the same arguments, two calls are equal if the dependency checker says one is dependent
+      // on the other
       if (callinst_ != OE.callinst_) {
 	MemDepResult local_dep = MD->getDependency(callinst_);
 	if (!local_dep.isDef() && !local_dep.isNonLocal()) {
@@ -601,35 +632,48 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
 	}
 	if (local_dep.isDef()) {
 	  CallInst* local_cdep = cast<CallInst>(local_dep.getInst());
-	  if (local_cdep != OE.callinst_) 
+	  if (local_cdep != OE.callinst_)
 	    return false;
 	} else {
 	  // Non-local case.
 	  const MemoryDependenceAnalysis::NonLocalDepInfo &deps =
 	    MD->getNonLocalCallDependency(CallSite(callinst_));
-	  // FIXME: Move the checking logic to MemDep!
 	  CallInst* cdep = 0;
-	  
-	  // Check to see if we have a single dominating call instruction that is
-	  // identical to C.
+	  CongruenceClass *cclass = valueToClass[OE.callinst_];
+	  assert(cclass != NULL && "Somehow got a call instruction without a congruence class into the expressionToClass mapping");
+
+	  // Check to see if all non local dependencies are equal to
+	  // the other call or if all of them are in the same
+	  // congruence class as the other call instruction
 	  for (unsigned i = 0, e = deps.size(); i != e; ++i) {
 	    const NonLocalDepEntry *I = &deps[i];
 	    if (I->getResult().isNonLocal())
 	      continue;
-	    
-	    // We don't handle non-definitions.  If we already have a call, reject
-	    // instruction dependencies.
+
+	    // We don't handle non-definitions.  If we already have a
+	    // call, reject instruction dependencies.
 	    if (!I->getResult().isDef() || cdep != 0) {
 	      cdep = 0;
 	      break;
 	    }
-	    
+	    // We need to ensure that all dependencies are in the same
+	    // congruence class as the other call instruction
 	    CallInst *NonLocalDepCall = dyn_cast<CallInst>(I->getResult().getInst());
-	    if (NonLocalDepCall && NonLocalDepCall == OE.callinst_){
-	      cdep = NonLocalDepCall;
+	    if (NonLocalDepCall) {
+	      if (!cdep) {
+		if (NonLocalDepCall == OE.callinst_ || valueToClass[NonLocalDepCall] == cclass)
+		  cdep = NonLocalDepCall;
+		else
+		  break;
+	      } else {
+		CongruenceClass *NLDPClass = valueToClass[NonLocalDepCall];
+		if (cclass != NLDPClass) {
+		  cdep = 0;
+		  break;
+		}
+	      }
 	      continue;
 	    }
-	    
 	    cdep = 0;
 	    break;
 	  }
@@ -637,15 +681,15 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
 	    return false;
 	}
       }
-      return true;      
+      return true;
     }
-    
+
     virtual hash_code getHashValue() const {
       return hash_combine(etype_, opcode_, type_, nomem_, readonly_,
                           hash_combine_range(varargs.begin(),
                                              varargs.end()));
     }
-    
+
     virtual void print(raw_ostream &OS) {
       OS << "{etype = " << etype_ << ", opcode = " << opcode_ << ", varargs = {";
       for (unsigned i = 0, e = varargs.size(); i != e; ++i) {
@@ -672,28 +716,28 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
       LoadInst *loadinst;
       StoreInst *storeinst;
     } inst_;
-    
+
   public:
-    
+
     bool isStore() const {
       return isStore_;
     }
-    
+
     LoadInst *getLoadInst() const {
       assert (!isStore_ && "This is not a load memory expression");
       return inst_.loadinst;
     }
-    
+
     StoreInst *getStoreInst() const {
       assert (isStore_ && "This is not a store memory expression");
       return inst_.storeinst;
     }
-  
+
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
     static inline bool classof(const MemoryExpression *) { return true; }
     static inline bool classof(const Expression *EB) {
       return EB->getExpressionType() == ExpressionTypeMemory;
-    }    
+    }
     MemoryExpression(LoadInst *L) {
       etype_ = ExpressionTypeMemory;
       isStore_ = false;
@@ -705,19 +749,154 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
       isStore_ = true;
       inst_.storeinst = S;
     };
-    
+
     virtual ~MemoryExpression() {};
 
+    bool nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
+			const MemoryExpression &OE) const {
+      // We should mark the non-local ones so we can try to PRE them later
+      SmallVector<NonLocalDepResult, 64> Deps;
+      AliasAnalysis::Location Loc = AA->getLocation(LI);
+      MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
+      // If we had to process more than one hundred blocks to find the
+      // dependencies, this load isn't worth worrying about.  Optimizing
+      // it will be too expensive.
+      unsigned NumDeps = Deps.size();
+      if (NumDeps > 100)
+	return false;
+      if (NumDeps == 1 &&
+	  !Deps[0].getResult().isDef() && !Deps[0].getResult().isClobber()) {
+	DEBUG(
+	      dbgs() << "GVN: non-local load ";
+	      WriteAsOperand(dbgs(), LI);
+	      dbgs() << " has unknown dependencies\n";
+	      );
+	return false;
+      }
+      // Check to see if all of the other deps have the same congruence class
+      // as the load we are asking about, or we can reuse them.
+      CongruenceClass *OIClass = valueToClass[OE.inst_.loadinst];
+      if (!OIClass)
+	return false;
+      for (unsigned i = 0, e = NumDeps; i != e; ++i) {
+	BasicBlock *DepBB = Deps[i].getBB();
+
+	// We may have dependencies memdep has discovered but are in
+	// unreachable blocks. They don't matter (block reachability
+	// for things reaching this block should be completely
+	// calculated by the time we get here)
+	if (!reachableBlocks.count(DepBB))
+	  continue;
+	MemDepResult DepInfo = Deps[i].getResult();
+	if (!DepInfo.isDef() && !DepInfo.isClobber()) {
+	  return false;
+	}
+	// Make sure all dependencies are in the same congruence
+	// class
+	CongruenceClass *DepClass = valueToClass[DepInfo.getInst()];
+	// It could be an unreachable dependency MemDep doesn't know
+	// about.
+	// If this is the case, it will still have the InitialClass as
+	// its congruence class
+	if (DepClass != OIClass)
+	  return false;
+
+	if (DepInfo.isClobber()) {
+	  // The address being loaded in this non-local block may
+	  // not be the same as the pointer operand of the load
+	  // if PHI translation occurs.  Make sure to consider
+	  // the right address.
+	  Value *Address = Deps[i].getAddress();
+
+	  // If the dependence is to a store that writes to a
+	  // superset of the bits read by the load, we can
+	  // extract the bits we need for the load from the
+	  // stored value.
+	  if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInfo.getInst())) {
+	    if (TD && Address) {
+	      int Offset = AnalyzeLoadFromClobberingStore(LI->getType(), Address,
+							  DepSI, *TD);
+	      if (Offset == -1) {
+		return false;
+	      }
+	    }
+	  }
+
+	  // Check to see if we have something like this:
+	  //    load i32* P
+	  //    load i8* (P+1)
+	  // if we have this, we can replace the later with an
+	  // extraction from the former.
+	  if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInfo.getInst())) {
+	    // If this is a clobber and L is the first
+	    // instruction in its block, then we have the first
+	    // instruction in the entry block.
+	    if (DepLI != LI && Address && TD) {
+	      int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
+							 LI->getPointerOperand(),
+							 DepLI, *TD);
+
+	      if (Offset == -1) {
+		return false;
+	      }
+	    }
+	  }
+	}
+	// DepInfo.isDef() here
+	Instruction *DepInst = DepInfo.getInst();
+
+	if (StoreInst *S = dyn_cast<StoreInst>(DepInst)) {
+	  // Reject loads and stores that are to the same address
+	  // but are of different types if we have to.
+	  if (S->getValueOperand()->getType() != LI->getType()) {
+	    // If the stored value is larger or equal to the
+	    // loaded value, we can reuse it.
+	    if (TD == 0 || !CanCoerceMustAliasedValueToLoad(S->getValueOperand(),
+							    LI->getType(), *TD)) {
+	      return false;
+	    }
+	  }
+	  continue;
+	}
+
+	if (LoadInst *LD = dyn_cast<LoadInst>(DepInst)) {
+	  // If the types mismatch and we can't handle it, reject reuse of the load.
+	  if (LD->getType() != LI->getType()) {
+	    // If the stored value is larger or equal to the loaded value, we can
+	    // reuse it.
+	    if (TD == 0 || !CanCoerceMustAliasedValueToLoad(LD, LI->getType(),*TD)){
+	      return false;
+	    }
+	  }
+	  continue;
+	}
+	return false;
+      }
+      // If we got through all the dependencies, we are good to go
+      return true;
+    }
     virtual bool equals(const Expression &other) const {
+      // Two loads/stores are never the same if we don't have memory dependence info
+      if (!MD)
+	return false;
       const MemoryExpression &OE = cast<MemoryExpression>(other);
       if (varargs != OE.varargs)
 	return false;
+      return true;
+    }
+
+    virtual bool depequals(const Expression &other) const {
+      const MemoryExpression &OE = cast<MemoryExpression>(other);
       if (!isStore_) {
 	LoadInst *LI = inst_.loadinst;
 	Instruction *OI = OE.inst_.inst;
-	
+
 	if (LI != OI) {
 	  MemDepResult Dep = MD->getDependency(LI);
+	  if (Dep.isNonLocal()) {
+	    return 0;
+	    return nonLocalEquals(LI, Dep, OE);
+	  }
 	  if (Dep.getInst() != OI)
 	    return false;
 	  if (Dep.isClobber() && TD) {
@@ -731,7 +910,7 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
 		return false;
 	      return true;
 	    }
-	    if (LoadInst *DepLI = dyn_cast<LoadInst>(Dep.getInst())) { 
+	    if (LoadInst *DepLI = dyn_cast<LoadInst>(Dep.getInst())) {
 	      int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
 							 varargs[0],
 							 DepLI, *TD);
@@ -747,32 +926,31 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
 	  if (!Dep.isDef()) {
 	    return false;
 	  }
-	   Instruction *DepInst = Dep.getInst();
-	   if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
-	     Value *StoredVal = DepSI->getValueOperand();
-	     
-	     // The store and load are to a must-aliased pointer, but they may not
-	     // actually have the same type.  See if we know how to reuse the stored
-	     // value (depending on its type).
-	     if (StoredVal->getType() != LI->getType()) {
-	       if (!TD || !CanCoerceMustAliasedValueToLoad(StoredVal, LI->getType(), *TD))
-		 return false;
-	     }
-	     return true;
-	   }
-	   if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInst)) {
-	     // The loads are of a must-aliased pointer, but they may not
-	     // actually have the same type.  See if we know how to reuse the stored
-	     // value (depending on its type).
-	     if (DepLI->getType() != LI->getType()) {
-	       if (!TD || !CanCoerceMustAliasedValueToLoad(DepLI, LI->getType(), *TD))
-		 return false;
-	     }
-	     return true;
-	   }
-	   //TODO: Non-local case
-	   // We should mark the non-local ones so we can try to PRE them later
-	   return false;
+	  Instruction *DepInst = Dep.getInst();
+	  if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
+	    Value *StoredVal = DepSI->getValueOperand();
+
+	    // The store and load are to a must-aliased pointer, but they may not
+	    // actually have the same type.  See if we know how to reuse the stored
+	    // value (depending on its type).
+	    if (StoredVal->getType() != LI->getType()) {
+	      if (!TD || !CanCoerceMustAliasedValueToLoad(StoredVal, LI->getType(), *TD))
+		return false;
+	    }
+	    return true;
+	  }
+	  if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInst)) {
+	    // The loads are of a must-aliased pointer, but they may not
+	    // actually have the same type.  See if we know how to reuse the stored
+	    // value (depending on its type).
+	    if (DepLI->getType() != LI->getType()) {
+	      if (!TD || !CanCoerceMustAliasedValueToLoad(DepLI, LI->getType(), *TD))
+		return false;
+	    }
+	    return true;
+	  }
+	  //TODO: memintrisic case
+	  return false;
 	}
 	return true;
       } else {
@@ -782,10 +960,10 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
 	  return true;
 	return false;
       }
-						      
-      return true;      
+
+      return true;
     }
-    
+
     virtual hash_code getHashValue() const {
       return hash_combine(etype_, opcode_,
                           hash_combine_range(varargs.begin(),
@@ -802,19 +980,19 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     void operator=(const InsertValueExpression&); // Do not implement
     InsertValueExpression(const InsertValueExpression&); // Do not implement
   public:
-    
+
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
     static inline bool classof(const InsertValueExpression *) { return true; }
     static inline bool classof(const Expression *EB) {
       return EB->getExpressionType() == ExpressionTypeInsertValue;
     }
-    
+
     SmallVector<uint32_t, 4> intargs;
 
     InsertValueExpression() {
       etype_ = ExpressionTypeInsertValue;
     };
-    
+
     virtual ~InsertValueExpression() {};
 
     virtual bool equals(const Expression &other) const {
@@ -826,9 +1004,9 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
       if (intargs != OE.intargs)
 	return false;
 
-      return true;      
+      return true;
     }
-    
+
     virtual hash_code getHashValue() const {
       return hash_combine(etype_, opcode_, type_,
                           hash_combine_range(varargs.begin(),
@@ -851,7 +1029,7 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     }
 
   };
-    
+
   class PHIExpression : public BasicExpression {
   public:
     void *operator new(size_t s) {
@@ -866,14 +1044,14 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     BasicBlock *getBB() const {
       return bb_;
     }
-    
+
     void setBB(BasicBlock *bb) {
       bb_ = bb;
     }
-    
+
     virtual bool equals(const Expression &other) const {
       const PHIExpression &OE = cast<PHIExpression>(other);
-      if (bb_ != OE.bb_) 
+      if (bb_ != OE.bb_)
 	return false;
       if (type_ != OE.type_)
         return false;
@@ -881,13 +1059,13 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
 	return false;
       return true;
     }
-    
+
     PHIExpression():bb_(NULL) {
       etype_ = ExpressionTypePhi;
     }
-    
-      
-    PHIExpression(BasicBlock *bb):bb_(bb) { 
+
+
+    PHIExpression(BasicBlock *bb):bb_(bb) {
       etype_ = ExpressionTypePhi;
     }
 
@@ -909,7 +1087,7 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     PHIExpression(const PHIExpression&); // Do not implement
     BasicBlock *bb_;
 
-    
+
   };
   class VariableExpression : public Expression {
     public:
@@ -925,17 +1103,17 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     }
     void setVariableValue(Constant *V) {
       variableValue_ = V;
-    }  
+    }
     virtual bool equals(const Expression &other) const {
       const VariableExpression &OC = cast<VariableExpression>(other);
       if (variableValue_ != OC.variableValue_)
 	return false;
       return true;
     }
-    
+
     VariableExpression():Expression(ExpressionTypeVariable), variableValue_(NULL) { }
-    
-      
+
+
     VariableExpression(Value *variableValue):Expression(ExpressionTypeVariable), variableValue_(variableValue) { }
     virtual hash_code getHashValue() const {
       return hash_combine(etype_, variableValue_->getType(), variableValue_);
@@ -952,8 +1130,8 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     void operator=(const VariableExpression&); // Do not implement
     VariableExpression(const VariableExpression&); // Do not implement
 
-    Value* variableValue_; 
-    
+    Value* variableValue_;
+
   };
   class ConstantExpression : public Expression {
     public:
@@ -969,17 +1147,17 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
 
     void setConstantValue(Constant *V) {
       constantValue_ = V;
-    }  
+    }
     virtual bool equals(const Expression &other) const {
       const ConstantExpression &OC = cast<ConstantExpression>(other);
       if (constantValue_ != OC.constantValue_)
 	return false;
       return true;
     }
-    
+
     ConstantExpression():Expression(ExpressionTypeConstant), constantValue_(NULL) { }
-    
-      
+
+
     ConstantExpression(Constant *constantValue):Expression(ExpressionTypeConstant), constantValue_(constantValue) { }
     virtual hash_code getHashValue() const {
       return hash_combine(etype_, constantValue_->getType(), constantValue_);
@@ -992,9 +1170,11 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     void operator=(const ConstantExpression&); // Do not implement
     ConstantExpression(const ConstantExpression&); // Do not implement
 
-    Constant* constantValue_; 
-    
+    Constant* constantValue_;
+
   };
+
+
 
 }
 
@@ -1004,43 +1184,30 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
 
 namespace {
   class GVN : public FunctionPass {
-
-    static uint32_t nextCongruenceNum;    
-    struct CongruenceClass {
-      uint32_t id;
-      Value* leader;
-      Expression* expression;
-      std::set<Value*> members;
-      CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0) {};
-      
-    };
-    typedef RecyclingAllocator<BumpPtrAllocator,
+    CongruenceClass *InitialClass;
+typedef RecyclingAllocator<BumpPtrAllocator,
 			       ScopedHashTableVal<CongruenceClass*, Value*> > AllocatorTy;
     typedef ScopedHashTable<CongruenceClass*, Value*,  DenseMapInfo<CongruenceClass*>,
 			    AllocatorTy> ScopedHTType;
     typedef ScopedHTType::ScopeTy ScopeType;
-    CongruenceClass *InitialClass;
-    bool NoLoads;
-    AliasAnalysis *AA;
-    PostDominatorTree *PDT;
+    bool noLoads;
     DominatorTree *DT;
+    PostDominatorTree *PDT;
     const TargetLibraryInfo *TLI;
     DenseMap<BasicBlock*, uint32_t> rpoBlockNumbers;
     DenseMap<Instruction*, uint32_t> rpoInstructionNumbers;
     DenseMap<BasicBlock*, std::pair<uint32_t, uint32_t> > rpoInstructionStartEnd;
     std::vector<BasicBlock*> rpoToBlock;
-    DenseSet<BasicBlock*> reachableBlocks;
     DenseSet<std::pair<BasicBlock*, BasicBlock*> > reachableEdges;
     DenseSet<Instruction*> touchedInstructions;
     DenseMap<Instruction*, uint32_t> processedCount;
     // Tested: SparseBitVector, DenseSet, etc. vector<bool> is 3 times as fast
     std::vector<bool> touchedBlocks;
     std::vector<CongruenceClass*> congruenceClass;
-    DenseMap<Value*, CongruenceClass*> valueToClass;
     DenseMap<BasicBlock*, ScopeType*> ScopeMap;
     ScopedHTType availableTable;
     std::vector<Instruction*> instrsToErase;
-    
+
     struct ComparingExpressionInfo {
       static inline Expression* getEmptyKey() {
         intptr_t Val = -1;
@@ -1054,25 +1221,25 @@ namespace {
       }
       static unsigned getHashValue(const Expression *V) {
         return static_cast<unsigned>(V->getHashValue());
-	
-        
+
+
       }
       static bool isEqual(const Expression *LHS, const Expression *RHS) {
-        if (LHS == RHS) 
-          return true; 
+        if (LHS == RHS)
+          return true;
         if (LHS == getTombstoneKey() || RHS == getTombstoneKey()
             || LHS == getEmptyKey() || RHS == getEmptyKey())
           return false;
-        return (*LHS == *RHS);  
-      }  
+        return *LHS == *RHS && LHS->depequals(*RHS);
+      }
     };
-    
+
     typedef DenseMap<Expression*, CongruenceClass*, ComparingExpressionInfo> ExpressionClassMap;
     ExpressionClassMap expressionToClass;
     DenseSet<Expression*, ComparingExpressionInfo> uniquedExpressions;
     DenseSet<Expression*> expressionToDelete;
     DenseSet<Value*> changedValues;
-    
+
 
     /// LeaderTable - A mapping from value numbers to lists of Value*'s that
     /// have that value number.  Use findLeader to query it.
@@ -1081,9 +1248,9 @@ namespace {
       BasicBlock *BB;
       LeaderTableEntry *Next;
     };
-    DenseMap<uint32_t, LeaderTableEntry> LeaderTable;
-    BumpPtrAllocator TableAllocator;
-    
+    DenseMap<uint32_t, LeaderTableEntry> leaderTable;
+    BumpPtrAllocator tableAllocator;
+
     Value *lookupOperandLeader(Value*);
     // expression handling
     Expression *createExpression(Instruction*);
@@ -1100,18 +1267,18 @@ namespace {
   public:
     static char ID; // Pass identification, replacement for typeid
     explicit GVN(bool noloads = false)
-        : FunctionPass(ID), NoLoads(noloads) {
+      : FunctionPass(ID), noLoads(noloads) {
       initializeGVNPass(*PassRegistry::getPassRegistry());
     }
 
     bool runOnFunction(Function &F);
-    
+
     const TargetData *getTargetData() const { return TD; }
     DominatorTree &getDominatorTree() const { return *DT; }
     AliasAnalysis *getAliasAnalysis() const { return AA; }
     MemoryDependenceAnalysis &getMemDep() const { return *MD; }
   private:
-    void ReplaceInstruction(Instruction*, Value*);
+    void ReplaceInstruction(Instruction*, Value*, CongruenceClass*);
     // Symbolic evaluation
     Expression *performSymbolicEvaluation(Value*, BasicBlock*);
     Expression *performSymbolicLoadEvaluation(Instruction*, BasicBlock*);
@@ -1132,36 +1299,35 @@ namespace {
     void ProcessTerminatorInst(TerminatorInst *TI);
     void ExitScopeIfDone(DomTreeNode*, DenseMap<DomTreeNode*, unsigned>&,
 			 DenseMap<DomTreeNode*, DomTreeNode*> &);
-    void EraseDeadBlocks(Function &, std::vector<BasicBlock*> &);
-    
+
     /// addToLeaderTable - Push a new Value to the LeaderTable onto the list for
     /// its value number.
     void addToLeaderTable(uint32_t N, Value *V, BasicBlock *BB) {
-      LeaderTableEntry &Curr = LeaderTable[N];
+      LeaderTableEntry &Curr = leaderTable[N];
       if (!Curr.Val) {
         Curr.Val = V;
         Curr.BB = BB;
         return;
       }
-      
-      LeaderTableEntry *Node = TableAllocator.Allocate<LeaderTableEntry>();
+
+      LeaderTableEntry *Node = tableAllocator.Allocate<LeaderTableEntry>();
       Node->Val = V;
       Node->BB = BB;
       Node->Next = Curr.Next;
       Curr.Next = Node;
     }
-    
+
     /// removeFromLeaderTable - Scan the list of values corresponding to a given
     /// value number, and remove the given value if encountered.
     void removeFromLeaderTable(uint32_t N, Value *V, BasicBlock *BB) {
       LeaderTableEntry* Prev = 0;
-      LeaderTableEntry* Curr = &LeaderTable[N];
+      LeaderTableEntry* Curr = &leaderTable[N];
 
       while (Curr->Val != V || Curr->BB != BB) {
         Prev = Curr;
         Curr = Curr->Next;
       }
-      
+
       if (Prev) {
         Prev->Next = Curr->Next;
       } else {
@@ -1185,21 +1351,20 @@ namespace {
       AU.addRequired<DominatorTree>();
       AU.addRequired<PostDominatorTree>();
       AU.addRequired<TargetLibraryInfo>();
-      if (!NoLoads)
+      if (!noLoads)
         AU.addRequired<MemoryDependenceAnalysis>();
       AU.addRequired<AliasAnalysis>();
-      
+
       AU.addPreserved<PostDominatorTree>();
       AU.addPreserved<DominatorTree>();
       AU.addPreserved<AliasAnalysis>();
     }
-    
+
 
     // Helper fuctions
     // FIXME: eliminate or document these better
     void dump(DenseMap<uint32_t, Value*> &d);
     Value *findLeader(BasicBlock *BB, uint32_t num);
-    void verifyRemoved(const Instruction *I) const;
     bool splitCriticalEdges();
     unsigned replaceAllDominatedUsesWith(Value *From, Value *To,
                                          BasicBlock *Root);
@@ -1210,39 +1375,40 @@ namespace {
 }
 
 // createGVNPass - The public interface to this file...
-FunctionPass *llvm::createGVNPass(bool NoLoads) {
-  return new GVN(NoLoads);
+FunctionPass *llvm::createGVNPass(bool noLoads) {
+  return new GVN(noLoads);
 }
 
 INITIALIZE_PASS_BEGIN(GVN, "gvn", "Global Value Numbering", false, false)
 INITIALIZE_PASS_DEPENDENCY(MemoryDependenceAnalysis)
 INITIALIZE_PASS_DEPENDENCY(DominatorTree)
+INITIALIZE_PASS_DEPENDENCY(PostDominatorTree)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfo)
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_END(GVN, "gvn", "Global Value Numbering", false, false)
 
-// findLeader - In order to find a leader for a given value number at a 
+// findLeader - In order to find a leader for a given value number at a
 // specific basic block, we first obtain the list of all Values for that number,
-// and then scan the list to find one whose block dominates the block in 
+// and then scan the list to find one whose block dominates the block in
 // question.  This is fast because dominator tree queries consist of only
 // a few comparisons of DFS numbers.
 Value *GVN::findLeader(BasicBlock *BB, uint32_t num) {
-  LeaderTableEntry Vals = LeaderTable[num];
+  LeaderTableEntry Vals = leaderTable[num];
   if (!Vals.Val) return 0;
-  
+
   Value *Val = 0;
   if (DT->dominates(Vals.BB, BB)) {
     Val = Vals.Val;
     if (isa<Constant>(Val)) return Val;
   }
-  
+
   LeaderTableEntry* Next = Vals.Next;
   while (Next) {
     if (DT->dominates(Next->BB, BB)) {
       if (isa<Constant>(Next->Val)) return Next->Val;
       if (!Val) Val = Next->Val;
     }
-    
+
     Next = Next->Next;
   }
 
@@ -1273,7 +1439,7 @@ Expression *GVN::createPHIExpression(Instruction *I) {
     if (I->getOperand(i) != I) {
       Value *Operand = lookupOperandLeader(I->getOperand(i));
       E->varargs.push_back(Operand);
-    } else {    
+    } else {
       E->varargs.push_back(I->getOperand(i));
     }
   }
@@ -1283,7 +1449,7 @@ Expression *GVN::createPHIExpression(Instruction *I) {
 void GVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E) {
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
-  
+
   for (Instruction::op_iterator OI = I->op_begin(), OE = I->op_end();
        OI != OE; ++OI) {
     Value *Operand = lookupOperandLeader(*OI);
@@ -1294,7 +1460,7 @@ void GVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E) {
 Expression *GVN::createExpression(Instruction *I) {
   BasicExpression *E = new BasicExpression();
   setBasicExpressionInfo(I, E);
-    
+
   if (I->isCommutative()) {
     // Ensure that commutative instructions that only differ by a permutation
     // of their operands get the same value number by sorting the operand value
@@ -1304,7 +1470,7 @@ Expression *GVN::createExpression(Instruction *I) {
     if (E->varargs[0] > E->varargs[1])
       std::swap(E->varargs[0], E->varargs[1]);
   }
-  
+
 
   if (CmpInst *CI = dyn_cast<CmpInst>(I)) {
     // Sort the operand value numbers so x<y and y>x get the same value number.
@@ -1318,9 +1484,9 @@ Expression *GVN::createExpression(Instruction *I) {
     //TODO: Since we noop bitcasts, we may need to check types before
     //simplifying, so that we don't end up simplifying based on a wrong
     //type assumption. We should clean this up so we can use constants of the wrong type
-    
 
-    if (E->varargs[0]->getType() == E->varargs[1]->getType()) {  
+
+    if (E->varargs[0]->getType() == E->varargs[1]->getType()) {
       Value *V = SimplifyCmpInst(Predicate, E->varargs[0], E->varargs[1], TD, TLI, DT);
       Constant *C;
       if (V && (C = dyn_cast<Constant>(V))) {
@@ -1330,7 +1496,7 @@ Expression *GVN::createExpression(Instruction *I) {
 	return createConstantExpression(C);
       }
     }
-    
+
   }
 
   // Handle simplifying
@@ -1349,26 +1515,29 @@ Expression *GVN::createExpression(Instruction *I) {
   } else if (isa<GetElementPtrInst>(I)) {
     //TODO: Since we noop bitcasts, we may need to check types before
     //simplifying, so that we don't end up simplifying based on a
-    //wrong type assumption
-    Value *V = SimplifyGEPInst(E->varargs, TD, TLI, DT);
-    Constant *C;
-    if (V && (C = dyn_cast<Constant>(V))) {
-      DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
-      NumGVNBinOpsSimplified++;
-      delete E;
-      return createConstantExpression(C);
+    //wrong type assumption. We should clean this up so we can use
+    //constants of the wrong type.
+    if (E->varargs[0]->getType() == E->varargs[1]->getType()) {
+      Value *V = SimplifyGEPInst(E->varargs, TD, TLI, DT);
+      Constant *C;
+      if (V && (C = dyn_cast<Constant>(V))) {
+	DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
+	NumGVNBinOpsSimplified++;
+	delete E;
+	return createConstantExpression(C);
+      }
     }
   }
-  
+
   return E;
 }
 
-Expression *GVN::uniquifyExpression(Expression *E) {  
+Expression *GVN::uniquifyExpression(Expression *E) {
   std::pair<DenseSet<Expression *, ComparingExpressionInfo>::iterator, bool> P = uniquedExpressions.insert(E);
   if (!P.second && *(P.first) != E) {
     delete E;
     return *(P.first);
-  } 
+  }
   return E;
 }
 
@@ -1401,8 +1570,9 @@ Expression *GVN::createCallExpression(CallInst *CI, bool nomem, bool readonly) {
   return E;
 }
 
-//lookupOperandLeader -- See if we have a congruence class and leader for this operand, and if so, return it.
-// Otherwise, return the original operand
+//lookupOperandLeader -- See if we have a congruence class and leader
+// for this operand, and if so, return it. Otherwise, return the
+// original operand
 Value *GVN::lookupOperandLeader(Value *V) {
   DenseMap<Value*, CongruenceClass*>::iterator VTCI = valueToClass.find(V);
   if (VTCI != valueToClass.end()) {
@@ -1419,7 +1589,7 @@ Expression *GVN::createMemoryExpression(LoadInst *LI) {
   E->setType(LI->getType());
   // Need opcodes to match on loads and store
   E->setOpcode(0);
-  Value *Operand = lookupOperandLeader(LI->getPointerOperand());  
+  Value *Operand = lookupOperandLeader(LI->getPointerOperand());
   E->varargs.push_back(Operand);
   return E;
 }
@@ -1429,8 +1599,9 @@ Expression *GVN::createMemoryExpression(StoreInst *SI) {
   E->setType(SI->getType());
   // Need opcodes to match on loads and store
   E->setOpcode(0);
-  Value *Operand = lookupOperandLeader(SI->getPointerOperand());  
+  Value *Operand = lookupOperandLeader(SI->getPointerOperand());
   E->varargs.push_back(Operand);
+  // TODO: Set store value here!
   return E;
 }
 
@@ -1451,7 +1622,7 @@ Expression *GVN::performSymbolicLoadEvaluation(Instruction *I, BasicBlock *B) {
 /// performSymbolicCallEvaluation - Evaluate read only and pure calls, and create an expression result
 Expression *GVN::performSymbolicCallEvaluation(Instruction *I, BasicBlock *B) {
   CallInst *CI = cast<CallInst>(I);
-  
+
   if (AA->doesNotAccessMemory(CI)) {
     return createCallExpression(CI, true, false);
   } else if (AA->onlyReadsMemory(CI)) {
@@ -1462,7 +1633,7 @@ Expression *GVN::performSymbolicCallEvaluation(Instruction *I, BasicBlock *B) {
 }
 
 // performSymbolicPHIEvaluation - Evaluate PHI nodes symbolically, and create an expression result
-Expression *GVN::performSymbolicPHIEvaluation(Instruction *I, BasicBlock *B) { 
+Expression *GVN::performSymbolicPHIEvaluation(Instruction *I, BasicBlock *B) {
   PHIExpression *E = cast<PHIExpression>(createPHIExpression(I));
   E->setOpcode(I->getOpcode());
   if (E->varargs.empty()) {
@@ -1470,16 +1641,16 @@ Expression *GVN::performSymbolicPHIEvaluation(Instruction *I, BasicBlock *B) {
     delete E;
     return createVariableExpression(UndefValue::get(I->getType()));
   }
-  
+
   Value *AllSameValue = E->varargs[0];
-  
+
   for (unsigned i = 1, e = E->varargs.size(); i != e; ++i) {
     if (E->varargs[i] != AllSameValue) {
       AllSameValue = NULL;
       break;
     }
   }
-  // 
+  //
   if (AllSameValue) {
     // It's possible to have mutually recursive phi nodes, especially in weird CFG's.
     // This can cause infinite loops (even if you disable the recursion below, you will ping-pong between congruence classes)
@@ -1488,7 +1659,7 @@ Expression *GVN::performSymbolicPHIEvaluation(Instruction *I, BasicBlock *B) {
       return E;
     NumGVNPhisAllSame++;
     DEBUG(dbgs() << "Simplified PHI node " << I << " to " << *AllSameValue << "\n");
-  
+
     delete E;
     return performSymbolicEvaluation(AllSameValue, B);
   }
@@ -1511,30 +1682,39 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
     case Instruction::InsertValue:
       E = createInsertValueExpression(cast<InsertValueInst>(I));
       break;
-    case Instruction::PHI: 
+    case Instruction::PHI:
       E = performSymbolicPHIEvaluation(I, B);
       break;
     case Instruction::Call:
-      E = performSymbolicCallEvaluation(I, B);
+      if (noLoads)
+	E = NULL;
+      else
+	E = performSymbolicCallEvaluation(I, B);
       break;
     case Instruction::Store:
-      E = performSymbolicStoreEvaluation(I, B);
+      if (noLoads)
+	E = NULL;
+      else
+	E = performSymbolicStoreEvaluation(I, B);
       break;
     case Instruction::Load:
-      E = performSymbolicLoadEvaluation(I, B);
+      if (noLoads)
+	E = NULL;
+      else
+	E = performSymbolicLoadEvaluation(I, B);
       break;
     case Instruction::BitCast: {
-      //Pointer bitcasts are noops, we can just make them out of whole cloth if we need to. 
+      //Pointer bitcasts are noops, we can just make them out of whole cloth if we need to.
       if (I->getType()->isPointerTy()){
 	if (Instruction *I0 = dyn_cast<Instruction>(I->getOperand(0)))
 	  return performSymbolicEvaluation(I0, I0->getParent());
-	else 
+	else
 	  return performSymbolicEvaluation(I->getOperand(0), B);
       }
       E = createExpression(I);
     }
       break;
-      
+
     case Instruction::Add:
     case Instruction::FAdd:
     case Instruction::Sub:
@@ -1611,7 +1791,7 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
     }
   } else {
     ExpressionClassMap::iterator VTCI = expressionToClass.find(E);
-    
+
     // If it's not in the value table, create a new congruence class
     if (VTCI == expressionToClass.end()) {
       CongruenceClass *NewClass = new CongruenceClass();
@@ -1629,11 +1809,11 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
       else if (MemoryExpression *ME = dyn_cast<MemoryExpression>(E)) {
 	if (ME->isStore())
 	  NewClass->leader = ME->getStoreInst()->getValueOperand();
-	else 
+	else
 	  NewClass->leader = V;
       } else
         NewClass->leader = V;
-      
+
       EClass = NewClass;
       DEBUG(dbgs() << "Created new congruence class for " << V << " using expression " << *E << " at " << NewClass->id << "\n");
     } else {
@@ -1641,7 +1821,7 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
       MemoryExpression *ME = dyn_cast<MemoryExpression>(E);
       MemoryExpression *ClassME;
       if (ME && EClass->expression && (ClassME = dyn_cast<MemoryExpression>(EClass->expression))) {
-      }	
+      }
     }
   }
   DenseSet<Value*>::iterator DI = changedValues.find(V);
@@ -1664,7 +1844,8 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
 	// delete VClass;
       } else if (VClass->leader == V) {
 	VClass->leader = *(VClass->members.begin());
-	for (std::set<Value*>::iterator LI = VClass->members.begin(), LE = VClass->members.end();
+	for (DenseSet<Value*>::iterator LI = VClass->members.begin(),
+	       LE = VClass->members.end();
 	     LI != LE; ++LI) {
 	  if (Instruction *I = dyn_cast<Instruction>(*LI))
 	    touchedInstructions.insert(I);
@@ -1699,7 +1880,8 @@ void GVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
     }
   } else {
     DEBUG(dbgs() << "Block " << getBlockName(To) << " was reachable, but new edge to it found\n");
-    // We've made an edge reachable to an existing block, which may impact predicates.
+    // We've made an edge reachable to an existing block, which may
+    // impact predicates.
     // Otherwise, only mark the phi nodes as touched
     BasicBlock::iterator BI = To->begin();
     while (isa<PHINode>(BI)) {
@@ -1711,7 +1893,7 @@ void GVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
   }
 }
 
-  
+
 //  processOutgoingEdges - Process the outgoing edges of a block for reachability.
 void GVN::processOutgoingEdges(TerminatorInst *TI) {
   // Evaluate Reachability of terminator instruction
@@ -1743,25 +1925,25 @@ void GVN::processOutgoingEdges(TerminatorInst *TI) {
     } else {
       updateReachableEdge(TI->getParent(), TrueSucc);
       updateReachableEdge(TI->getParent(), FalseSucc);
-    }	  
-  } else {    
+    }
+  } else {
     for (unsigned i = 0, e = TI->getNumSuccessors(); i != e; ++i) {
-      BasicBlock *B = TI->getSuccessor(i); 
+      BasicBlock *B = TI->getSuccessor(i);
       updateReachableEdge(TI->getParent(), B);
       //TODO(predication)
     }
   }
-  
+
 }
 
 /// propagateChangeInEdge - Propagate a change in edge reachability
 // When we discover a new edge to an existing reachable block, that
-// can affect the value of blocks containing phi nodes downstream. 
+// can affect the value of blocks containing phi nodes downstream.
 //
 // However, it can *only* impact blocks that contain phi nodes, as
 // those are the only values that would be carried from multiple
-// incoming edges at once. 
-// 
+// incoming edges at once.
+//
 void GVN::propagateChangeInEdge(BasicBlock *Dest) {
   if (1) {
   // We have two options here.
@@ -1772,11 +1954,11 @@ void GVN::propagateChangeInEdge(BasicBlock *Dest) {
   // We only have to touch blocks we post-dominate
   //
   // The algorithm states that you only need to touch blocks that are confluence nodes.
-  // I can't see why you would need to touch any instructions that aren't PHI
+  // I also can't see why you would need to touch any instructions that aren't PHI
   // nodes.  Because we don't use predicates right now, they are the ones whose
-  // value could have changed as a result of a new edge becoming live, and any changes to their
-  // value should propagate appropriately through the rest of the
-  // block. 
+  // value could have changed as a result of a new edge becoming live,
+  // and any changes to their value should propagate appropriately
+  // through the rest of the block.
   DEBUG(dbgs() << "Would have processed " << rpoBlockNumbers.size() - rpoBlockNumbers[Dest] << " blocks here\n");
   uint32_t blocksProcessed = 0;
   DomTreeNode *DTN = DT->getNode(Dest);
@@ -1787,7 +1969,7 @@ void GVN::propagateChangeInEdge(BasicBlock *Dest) {
     blocksProcessed++;
     PDTN = PDTN->getIDom();
   }
-  
+
   DEBUG(dbgs() << "PDT now would have processed " << blocksProcessed << " blocks\n");
   blocksProcessed = 0;
   //TODO(dannyb): This differs slightly from the published algorithm, verify it
@@ -1803,8 +1985,8 @@ void GVN::propagateChangeInEdge(BasicBlock *Dest) {
 	   BI != BE; ++BI) {
 	if (!isa<PHINode>(BI))
 	  break;
-	touchedInstructions.insert(BI);    
-      }    
+	touchedInstructions.insert(BI);
+      }
       blocksProcessed++;
     }
   }
@@ -1862,7 +2044,8 @@ void GVN::ProcessTerminatorInst(TerminatorInst *TI){
   BranchInst *BR = dyn_cast<BranchInst>(TI);
   if (BR && BR->isConditional()) {
     Value *Cond = BR->getCondition();
-    // See if it was already simplified for us. This should be the normal cases for ones we can remove
+    // See if it was already simplified for us. This should be the
+    // normal cases for ones we can remove
     if (isa<Constant>(Cond)) {
       return;
     }
@@ -1871,11 +2054,10 @@ void GVN::ProcessTerminatorInst(TerminatorInst *TI){
     if (CondClass && CondClass->expression) {
       assert (!isa<ConstantExpression>(CondClass->expression) && "Should have been folded already");
     }
-  }  
+  }
 }
 
-void GVN::ReplaceInstruction(Instruction *I, Value *V){	
-
+void GVN::ReplaceInstruction(Instruction *I, Value *V, CongruenceClass *ReplClass) {
   if (V->getType() != I->getType()) {
     Instruction *insertPlace = I;
     if (isa<PHINode>(I))
@@ -1884,9 +2066,15 @@ void GVN::ReplaceInstruction(Instruction *I, Value *V){
     assert(V && "Should have been able to coerce types!");
   }
   DEBUG(dbgs() << "Replacing " << *I << " with " << *V << "\n");
-  
   I->replaceAllUsesWith(V);
+  // Remove the old instruction from the class member list, so the
+  // member size is correct for PRE.
+  ReplClass->members.erase(I);
+  // We save the actual erasing to avoid invalidating memory
+  // dependencies until we are done with everything.
   instrsToErase.push_back(I);
+  if (MD)
+    MD->removeInstruction(I);
 }
 
 bool GVN::ProcessBlock(BasicBlock *BB) {
@@ -1895,111 +2083,138 @@ bool GVN::ProcessBlock(BasicBlock *BB) {
     DEBUG(dbgs() << "Skipping unreachable block " << getBlockName(BB) << " during elimination\n");
     return false;
   }
-  
+
   for (BasicBlock::iterator II = BB->begin(), IE = BB->end();  II != IE; ) {
     Instruction *I = &*II;
     ++II;
-    // Terminator instructions are handled specially
+    // Terminators
     if (I->isTerminator()) {
       ProcessTerminatorInst(cast<TerminatorInst>(I));
       continue;
     }  else if (isa<StoreInst>(I)) {
+      // Eliminating stores is possible, but we'd rather not
       continue;
     } else if (isa<BitCastInst>(I)) {
       continue;
-    } 
+    }
+
     bool isLoad = isa<LoadInst>(I);
-    
+
     if (I->use_empty()) {
       instrsToErase.push_back(I);
       continue;
     }
-    
+
     CongruenceClass *IClass = valueToClass[I];
-    if (IClass->expression) { 
+    // We may not find a congruence class if it is, for example, a
+    // bitcast instruction we just inserted
+    if (!IClass)
+      continue;
+
+    if (IClass->expression) {
       if (Constant *C = dyn_cast<Constant>(IClass->leader)){
 	DEBUG(dbgs() << "Found constant replacement " << *C << " for " << *I << "\n");
-	ReplaceInstruction(I, C);
+	ReplaceInstruction(I, C, IClass);
 	continue;
       } else if (Argument *A = dyn_cast<Argument>(IClass->leader)) {
 	DEBUG(dbgs() << "Found argument replacement " << *A << " for " << *I << "\n");
-	ReplaceInstruction(I, A);
+	ReplaceInstruction(I, A, IClass);
 	continue;
       }
     }
-    
+
     // Skip instructions with singleton congruence classes
     if (IClass->members.size() <= 1)
       continue;
     Value *Result = availableTable.lookup(IClass);
-    
+
     if (Result){
       if (Result != I) {
 	DEBUG(dbgs() << "Found replacement " << *Result << " for " << *I << "\n");
-	ReplaceInstruction(I, Result);
+	LoadInst *LI;
+	if (I->getType() != Result->getType() && (LI = dyn_cast<LoadInst>(I))) {
+	  if (LoadInst *LIR = dyn_cast<LoadInst>(Result)) {
+	    int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
+						       LI->getPointerOperand(),
+						       LIR,
+						       *TD);
+	    assert(Offset != -1 && "Should have been able to coerce load");
+
+	    Result = GetLoadValueForLoad(LIR, Offset, LI->getType(), LI, *TD);
+
+	  } else if (StoreInst *SIR = dyn_cast<StoreInst>(Result)) {
+	    int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
+							LI->getPointerOperand(),
+							SIR, *TD);
+	    assert(Offset != -1 && "Should have been able to coerce store");
+	    Result = GetStoreValueForLoad(SIR->getValueOperand(), Offset, LI->getType(), LI, *TD);
+	  }
+	}
+	ReplaceInstruction(I, Result, IClass);
       }
     } else {
+      if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
+	MemDepResult local_dep = MD->getDependency(LI);
+	if (local_dep.isNonLocal()) {
+	  SmallVector<NonLocalDepResult, 64> Deps;
+	  AliasAnalysis::Location Loc = AA->getLocation(LI);
+	  MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
+	  //DEBUG(dbgs() << "INVESTIGATING NONLOCAL LOAD: "	  Alias
+	}
+      }
       availableTable.insert(IClass, I);
-    }  
+    }
   }
   return Changed;
 }
 
-void GVN::EraseDeadBlocks(Function &F, std::vector<BasicBlock*>&BlocksToErase) {
-// Now that all instructions in the function are constant folded, erase dead
-  // blocks, because we can now use ConstantFoldTerminator to get rid of
-  // in-edges.
-  for (unsigned i = 0, e = BlocksToErase.size(); i != e; ++i) {
-    // If there are any PHI nodes in this successor, drop entries for BB now.
-    BasicBlock *DeadBB = BlocksToErase[i];
-    for (Value::use_iterator UI = DeadBB->use_begin(), UE = DeadBB->use_end();
-	 UI != UE; ) {
-      // Grab the user and then increment the iterator early, as the user
-      // will be deleted. Step past all adjacent uses from the same user.
-      Instruction *I = dyn_cast<Instruction>(*UI);
-      do { ++UI; } while (UI != UE && *UI == I);
-      
-      // Ignore blockaddress users; BasicBlock's dtor will handle them.
-      if (!I) continue;
-      
-      bool Folded = ConstantFoldTerminator(I->getParent());
-      if (!Folded) {
-	// The constant folder may not have been able to fold the terminator
-	// if this is a branch or switch on undef.  Fold it manually as a
-	// branch to the first successor.
-#ifndef NDEBUG
-	if (BranchInst *BI = dyn_cast<BranchInst>(I)) {
-	  assert(BI->isConditional() && isa<UndefValue>(BI->getCondition()) &&
-		 "Branch should be foldable!");
-	} else if (SwitchInst *SI = dyn_cast<SwitchInst>(I)) {
-	  assert(isa<UndefValue>(SI->getCondition()) && "Switch should fold");
-	} else {
-	  llvm_unreachable("Didn't fold away reference to block!");
-	}
-#endif
-	
-	// Make this an uncond branch to the first successor.
-	TerminatorInst *TI = I->getParent()->getTerminator();
-	BranchInst::Create(TI->getSuccessor(0), TI);
-	
-	// Remove entries in successor phi nodes to remove edges.
-	for (unsigned i = 1, e = TI->getNumSuccessors(); i != e; ++i)
-	  TI->getSuccessor(i)->removePredecessor(TI->getParent());
-	
-	// Remove the old terminator.
-	TI->eraseFromParent();
-      }
+
+static void DeleteInstructionInBlock(BasicBlock *BB) {
+  DEBUG(dbgs() << "  BasicBlock Dead:" << *BB);
+  ++NumGVNBlocksDeleted;
+
+  // Check to see if there are non-terminating instructions to delete.
+  if (isa<TerminatorInst>(BB->begin()))
+    return;
+
+  // Delete the instructions backwards, as it has a reduced likelihood of having
+  // to update as many def-use and use-def chains.
+  Instruction *EndInst = BB->getTerminator(); // Last not to be deleted.
+  while (EndInst != BB->begin()) {
+    // Delete the next to last instruction.
+    BasicBlock::iterator I = EndInst;
+    Instruction *Inst = --I;
+    if (!Inst->use_empty())
+      Inst->replaceAllUsesWith(UndefValue::get(Inst->getType()));
+    if (isa<LandingPadInst>(Inst)) {
+      EndInst = Inst;
+      continue;
     }
-    DEBUG(dbgs() << "Erased unreachable basic block " << getBlockName(DeadBB) << "\n");
-    // Finally, delete the basic block.
-    F.getBasicBlockList().erase(DeadBB);
-    
+    BB->getInstList().erase(Inst);
+    ++NumGVNInstrDeleted;
   }
 }
-uint32_t GVN::nextCongruenceNum = 0;
+
+/// splitCriticalEdges - Split critical edges found during the previous
+/// iteration that may enable further optimization.
+bool GVN::splitCriticalEdges() {
+  if (toSplit.empty())
+    return false;
+  do {
+    std::pair<TerminatorInst*, unsigned> Edge = toSplit.pop_back_val();
+    SplitCriticalEdge(Edge.first, Edge.second, this);
+  } while (!toSplit.empty());
+  if (MD) MD->invalidateCachedPredecessors();
+  return true;
+}
+
+// uint32_t GVN::nextCongruenceNum = 0;
 
 /// runOnFunction - This is the main transformation entry point for a function.
 bool GVN::runOnFunction(Function& F) {
+  // Split all critical edges to ensure maximal removal
+  splitCriticalEdges();
+
   DenseMap<DomTreeNode*, unsigned> OpenChildren;
   DenseMap<DomTreeNode*, DomTreeNode*> ParentMap;
   SmallVector<DomTreeNode*, 32> Scopes;
@@ -2007,19 +2222,19 @@ bool GVN::runOnFunction(Function& F) {
 
   bool Changed;
   DEBUG(dbgs() << "Starting GVN on new function " << F.getName() << "\n");
-  
+
   // Merge unconditional branches, allowing PRE to catch more
   // optimization opportunities.
   for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ) {
     BasicBlock *BB = FI++;
-    
+
     bool removedBlock = MergeBlockIntoPredecessor(BB, this);
     if (removedBlock) ++NumGVNBlocks;
 
     Changed |= removedBlock;
   }
   uint32_t ICount = 0;
-  
+
   nextCongruenceNum = 2;
   // Initialize our rpo numbers so we can detect backwards edges
   uint32_t rpoBNumber = 0;
@@ -2027,7 +2242,7 @@ bool GVN::runOnFunction(Function& F) {
   unsigned NumBasicBlocks = F.size();
   rpoToBlock.resize(NumBasicBlocks + 1);
   DEBUG(dbgs() << "Found " << NumBasicBlocks <<  " basic blocks\n");
-  BasicBlock &EntryBlock = F.getEntryBlock();  
+  BasicBlock &EntryBlock = F.getEntryBlock();
   ReversePostOrderTraversal<Function*> rpoT(&F);
   for (ReversePostOrderTraversal<Function*>::rpo_iterator RI = rpoT.begin(),
        RE = rpoT.end(); RI != RE; ++RI)
@@ -2038,12 +2253,14 @@ bool GVN::runOnFunction(Function& F) {
        for (BasicBlock::iterator BI = EntryBlock.begin(), BE = EntryBlock.end();
 	    BI != BE; ++BI)
 	 ++ICount;
-       
+
       // 	rpoInstructionNumbers[BI] = rpoINumber++;
       uint32_t IEnd = rpoINumber;
       // rpoInstructionStartEnd[*RI] = std::make_pair(IStart, IEnd);
     }
-  // Ensure we don't end up resizing the expressionToClass map, as that can be quite expensive
+  // Ensure we don't end up resizing the expressionToClass map, as
+  // that can be quite expensive. At most, we have one expression per
+  // instruction.
   expressionToClass.resize(ICount);
   rpoToBlock.resize(rpoBNumber+1);
   for (Function::iterator BI = F.begin(), BE = F.end(); BI != BE; ++BI)
@@ -2061,26 +2278,35 @@ bool GVN::runOnFunction(Function& F) {
   reachableBlocks.insert(&F.getEntryBlock());
 
   // Init the INITIAL class
-  std::set<Value*> InitialValues;
+  DenseSet<Value*> InitialValues;
   for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI)  {
     for (BasicBlock::iterator BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
       InitialValues.insert(BI);
     }
   }
   InitialClass = new CongruenceClass();
-  for (std::set<Value*>::iterator LI = InitialValues.begin(), LE = InitialValues.end();
+  for (DenseSet<Value*>::iterator LI = InitialValues.begin(), LE = InitialValues.end();
        LI != LE; ++LI)
     valueToClass[*LI] = InitialClass;
   InitialClass->members.swap(InitialValues);
   congruenceClass.push_back(InitialClass);
-  if (!NoLoads)
-    MD = &getAnalysis<MemoryDependenceAnalysis>();
+  if (!noLoads)
+    {
+      MD = &getAnalysis<MemoryDependenceAnalysis>();
+      AA = &getAnalysis<AliasAnalysis>();
+    }
+  else
+    {
+      MD = NULL;
+      AA = NULL;
+    }
+
+
   DT = &getAnalysis<DominatorTree>();
   PDT = &getAnalysis<PostDominatorTree>();
 
   TD = getAnalysisIfAvailable<TargetData>();
   TLI = &getAnalysis<TargetLibraryInfo>();
-  AA = &getAnalysis<AliasAnalysis>();
 
   while (!touchedInstructions.empty()) {
     //TODO:We should just sort the damn touchedinstructions and touchedblocks into RPO order after every iteration
@@ -2105,7 +2331,7 @@ bool GVN::runOnFunction(Function& F) {
 	  }
 	  Instruction *I = BI++;
 	  movedForward = true;
-	  
+
 	  // If the instruction can be easily simplified then do so now in preference
 	  // to value numbering it.  Value numbering often exposes redundancies, for
 	  // example if it determines that %y is equal to %x then the instruction
@@ -2114,7 +2340,7 @@ bool GVN::runOnFunction(Function& F) {
 	  //TODO:This causes us to invalidate memdep for no good
 	  // reason.  The instructions *should* value number the same
 	  // either way, so i'd prefer to do the elimination as a
-	  // post-pass. 
+	  // post-pass.
 	  if (0)
 	  if (Value *V = SimplifyInstruction(I, TD, TLI, DT)) {
 	    // Mark the uses as touched
@@ -2130,7 +2356,6 @@ bool GVN::runOnFunction(Function& F) {
 	    DEBUG(dbgs() << "GVN removed: " << *I << '\n');
 	    if (MD) MD->removeInstruction(I);
 	    I->eraseFromParent();
-	    DEBUG(verifyRemoved(I));
 	    ++NumGVNSimpl;
 	    continue;
 	  }
@@ -2140,7 +2365,7 @@ bool GVN::runOnFunction(Function& F) {
 	    processedCount[I] += 1;
 	    assert(processedCount[I] < 100 && "Seem to have processed the same instruction a lot");
 	  }
-	  
+
           if (!I->isTerminator()) {
 	    Expression *Symbolized = performSymbolicEvaluation(I, *RI);
             performCongruenceFinding(I, Symbolized);
@@ -2180,19 +2405,17 @@ bool GVN::runOnFunction(Function& F) {
   for (unsigned i = 0, e = instrsToErase.size(); i != e; ++i) {
     instrsToErase[i]->eraseFromParent();
   }
-  std::vector<BasicBlock*> BlocksToErase;
   for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI){
-    if (!reachableBlocks.count(FI)) { 
-      DEBUG(dbgs() << "We believe block " << getBlockName(FI) << " is unreachable\n");
-      BlocksToErase.push_back(FI);
-    }	
+    BasicBlock *BB = FI;
+    if (!reachableBlocks.count(BB)) {
+      DEBUG(dbgs() << "We believe block " << getBlockName(BB) << " is unreachable\n");
+      DeleteInstructionInBlock(BB);
+      Changed = true;
+    }
   }
-  if (BlocksToErase.size() != 0) {
-    Changed = true;
-    // Erase all dead blocks
-    EraseDeadBlocks(F, BlocksToErase);
-  }
- 
+
+  //TODO: Perform PRE.
+
  ScopeMap.clear();
  Scopes.clear();
  valueToClass.clear();
@@ -2200,17 +2423,17 @@ bool GVN::runOnFunction(Function& F) {
    delete congruenceClass[i];
    congruenceClass[i] = NULL;
  }
-  
+
   std::vector<Expression*> toDelete;
   for (DenseSet<Expression*>::iterator I = expressionToDelete.begin(), E = expressionToDelete.end(); I != E; ++I) {
     toDelete.push_back(*I);
   }
- 
+
   for (unsigned i = 0, e = toDelete.size(); i != e; ++i) {
     delete toDelete[i];
-    toDelete[i] = NULL;  
+    toDelete[i] = NULL;
   }
-  
+
   congruenceClass.clear();
   expressionToClass.clear();
   expressionToDelete.clear();
@@ -2226,25 +2449,7 @@ bool GVN::runOnFunction(Function& F) {
   processedCount.clear();
   expressionAllocator.Reset();
   instrsToErase.clear();
+  leaderTable.clear();
+  tableAllocator.Reset();
   return Changed;
-}
-
-
-
-
-/// verifyRemoved - Verify that the specified instruction does not occur in our
-/// internal data structures.
-void GVN::verifyRemoved(const Instruction *Inst) const {
-  // Walk through the value number scope to make sure the instruction isn't
-  // ferreted away in it.
-  for (DenseMap<uint32_t, LeaderTableEntry>::const_iterator
-       I = LeaderTable.begin(), E = LeaderTable.end(); I != E; ++I) {
-    const LeaderTableEntry *Node = &I->second;
-    assert(Node->Val != Inst && "Inst still in value numbering scope!");
-    
-    while (Node->Next) {
-      Node = Node->Next;
-      assert(Node->Val != Inst && "Inst still in value numbering scope!");
-    }
-  }
 }
