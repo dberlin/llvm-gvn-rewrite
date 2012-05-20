@@ -98,6 +98,7 @@ namespace {
   DenseSet<BasicBlock*> reachableBlocks;
 
 
+
 /// CanCoerceMustAliasedValueToLoad - Return true if
 /// CoerceAvailableValueToLoadType will succeed.
 static bool CanCoerceMustAliasedValueToLoad(Value *StoredVal,
@@ -327,6 +328,51 @@ static int AnalyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
 }
 
 
+static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
+                                            MemIntrinsic *MI,
+                                            const TargetData &TD) {
+  // If the mem operation is a non-constant size, we can't handle it.
+  ConstantInt *SizeCst = dyn_cast<ConstantInt>(MI->getLength());
+  if (SizeCst == 0) return -1;
+  uint64_t MemSizeInBits = SizeCst->getZExtValue()*8;
+
+  // If this is memset, we just need to see if the offset is valid in the size
+  // of the memset..
+  if (MI->getIntrinsicID() == Intrinsic::memset)
+    return AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, MI->getDest(),
+                                          MemSizeInBits, TD);
+
+  // If we have a memcpy/memmove, the only case we can handle is if this is a
+  // copy from constant memory.  In that case, we can read directly from the
+  // constant memory.
+  MemTransferInst *MTI = cast<MemTransferInst>(MI);
+
+  Constant *Src = dyn_cast<Constant>(MTI->getSource());
+  if (Src == 0) return -1;
+
+  GlobalVariable *GV = dyn_cast<GlobalVariable>(GetUnderlyingObject(Src, &TD));
+  if (GV == 0 || !GV->isConstant()) return -1;
+
+  // See if the access is within the bounds of the transfer.
+  int Offset = AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr,
+                                              MI->getDest(), MemSizeInBits, TD);
+  if (Offset == -1)
+    return Offset;
+
+  // Otherwise, see if we can constant fold a load from the constant with the
+  // offset applied as appropriate.
+  Src = ConstantExpr::getBitCast(Src,
+                                 llvm::Type::getInt8PtrTy(Src->getContext()));
+  Constant *OffsetCst =
+    ConstantInt::get(Type::getInt64Ty(Src->getContext()), (unsigned)Offset);
+  Src = ConstantExpr::getGetElementPtr(Src, OffsetCst);
+  Src = ConstantExpr::getBitCast(Src, PointerType::getUnqual(LoadTy));
+  if (ConstantFoldLoadFromConstPtr(Src, &TD))
+    return Offset;
+  return -1;
+}
+
+
 /// GetStoreValueForLoad - This function is called when we have a
 /// memdep query of a load that ends up being a clobbering store.  This means
 /// that the store provides bits used by the load but we the pointers don't
@@ -372,7 +418,7 @@ static Value *GetStoreValueForLoad(Value *SrcVal, unsigned Offset,
 /// anything more we can do before we give up.
 static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
                                   Type *LoadTy, Instruction *InsertPt,
-                                  const TargetData &TD) {
+				  const TargetData &TD) {
   // If Offset+LoadTy exceeds the size of SrcVal, then we must be wanting to
   // widen SrcVal out to a larger load.
   unsigned SrcValSize = TD.getTypeStoreSize(SrcVal->getType());
@@ -426,6 +472,60 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
   return GetStoreValueForLoad(SrcVal, Offset, LoadTy, InsertPt, TD);
 }
 
+/// GetMemInstValueForLoad - This function is called when we have a
+/// memdep query of a load that ends up being a clobbering mem intrinsic.
+static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
+                                     Type *LoadTy, Instruction *InsertPt,
+                                     const TargetData &TD){
+  LLVMContext &Ctx = LoadTy->getContext();
+  uint64_t LoadSize = TD.getTypeSizeInBits(LoadTy)/8;
+
+  IRBuilder<> Builder(InsertPt->getParent(), InsertPt);
+
+  // We know that this method is only called when the mem transfer fully
+  // provides the bits for the load.
+  if (MemSetInst *MSI = dyn_cast<MemSetInst>(SrcInst)) {
+    // memset(P, 'x', 1234) -> splat('x'), even if x is a variable, and
+    // independently of what the offset is.
+    Value *Val = MSI->getValue();
+    if (LoadSize != 1)
+      Val = Builder.CreateZExt(Val, IntegerType::get(Ctx, LoadSize*8));
+
+    Value *OneElt = Val;
+
+    // Splat the value out to the right number of bits.
+    for (unsigned NumBytesSet = 1; NumBytesSet != LoadSize; ) {
+      // If we can double the number of bytes set, do it.
+      if (NumBytesSet*2 <= LoadSize) {
+        Value *ShVal = Builder.CreateShl(Val, NumBytesSet*8);
+        Val = Builder.CreateOr(Val, ShVal);
+        NumBytesSet <<= 1;
+        continue;
+      }
+
+      // Otherwise insert one byte at a time.
+      Value *ShVal = Builder.CreateShl(Val, 1*8);
+      Val = Builder.CreateOr(OneElt, ShVal);
+      ++NumBytesSet;
+    }
+
+    return CoerceAvailableValueToLoadType(Val, LoadTy, InsertPt, TD);
+  }
+
+  // Otherwise, this is a memcpy/memmove from a constant global.
+  MemTransferInst *MTI = cast<MemTransferInst>(SrcInst);
+  Constant *Src = cast<Constant>(MTI->getSource());
+
+  // Otherwise, see if we can constant fold a load from the constant with the
+  // offset applied as appropriate.
+  Src = ConstantExpr::getBitCast(Src,
+                                 llvm::Type::getInt8PtrTy(Src->getContext()));
+  Constant *OffsetCst =
+  ConstantInt::get(Type::getInt64Ty(Src->getContext()), (unsigned)Offset);
+  Src = ConstantExpr::getGetElementPtr(Src, OffsetCst);
+  Src = ConstantExpr::getBitCast(Src, PointerType::getUnqual(LoadTy));
+  return ConstantFoldLoadFromConstPtr(Src, &TD);
+}
 
   static std::string getBlockName(BasicBlock *B) {
     return DOTGraphTraits<const Function*>::getSimpleNodeLabel(B, NULL);
@@ -439,7 +539,8 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     Value* leader;
     Expression* expression;
     DenseSet<Value*> members;
-    CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0) {};
+    bool dead;
+    CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0), dead(false) {};
 
   };
 
@@ -1206,7 +1307,6 @@ typedef RecyclingAllocator<BumpPtrAllocator,
     std::vector<CongruenceClass*> congruenceClass;
     DenseMap<BasicBlock*, ScopeType*> ScopeMap;
     ScopedHTType availableTable;
-    std::vector<Instruction*> instrsToErase;
 
     struct ComparingExpressionInfo {
       static inline Expression* getEmptyKey() {
@@ -1236,6 +1336,8 @@ typedef RecyclingAllocator<BumpPtrAllocator,
 
     typedef DenseMap<Expression*, CongruenceClass*, ComparingExpressionInfo> ExpressionClassMap;
     ExpressionClassMap expressionToClass;
+    // We separate out the memory expressions to keep hashtable resizes from occurring as often.
+    ExpressionClassMap memoryExpressionToClass;
     DenseSet<Expression*, ComparingExpressionInfo> uniquedExpressions;
     DenseSet<Expression*> expressionToDelete;
     DenseSet<Value*> changedValues;
@@ -1291,6 +1393,8 @@ typedef RecyclingAllocator<BumpPtrAllocator,
     void updateReachableEdge(BasicBlock*, BasicBlock*);
     void processOutgoingEdges(TerminatorInst* TI);
     void propagateChangeInEdge(BasicBlock*);
+
+    bool processNonLocalLoad(LoadInst *);
 
     // Dominator based replacement handling
     void EnterScope(BasicBlock*);
@@ -1373,6 +1477,7 @@ typedef RecyclingAllocator<BumpPtrAllocator,
 
   char GVN::ID = 0;
 }
+
 
 // createGVNPass - The public interface to this file...
 FunctionPass *llvm::createGVNPass(bool noLoads) {
@@ -1790,16 +1895,19 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
       EClass = VClass;
     }
   } else {
-    ExpressionClassMap::iterator VTCI = expressionToClass.find(E);
+    ExpressionClassMap *lookupMap = isa<MemoryExpression>(E) ? &memoryExpressionToClass : &expressionToClass;
+    std::pair<ExpressionClassMap::iterator, bool> lookupResult =
+      lookupMap->insert(std::make_pair(E, (CongruenceClass*)NULL));
 
     // If it's not in the value table, create a new congruence class
-    if (VTCI == expressionToClass.end()) {
+    if (lookupResult.second) {
       CongruenceClass *NewClass = new CongruenceClass();
       congruenceClass.push_back(NewClass);
       // We should always be adding it below
       // NewClass->members.push_back(V);
       NewClass->expression = E;
-      expressionToClass[E] = NewClass;
+      ExpressionClassMap::iterator place = lookupResult.first;
+      place->second = NewClass;
 
       // Constants and variables should always be made the leader
       if (ConstantExpression *CE = dyn_cast<ConstantExpression>(E))
@@ -1817,11 +1925,8 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
       EClass = NewClass;
       DEBUG(dbgs() << "Created new congruence class for " << V << " using expression " << *E << " at " << NewClass->id << "\n");
     } else {
-      EClass = VTCI->second;
-      MemoryExpression *ME = dyn_cast<MemoryExpression>(E);
-      MemoryExpression *ClassME;
-      if (ME && EClass->expression && (ClassME = dyn_cast<MemoryExpression>(EClass->expression))) {
-      }
+      EClass = lookupResult.first->second;
+      assert (!EClass->dead && "We accidentally looked up a dead class");
     }
   }
   DenseSet<Value*>::iterator DI = changedValues.find(V);
@@ -1839,8 +1944,11 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
       valueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
       if (VClass->members.empty() && VClass != InitialClass) {
-	if (VClass->expression)
+	if (VClass->expression) {
+	  VClass->dead = true;
 	  expressionToClass.erase(VClass->expression);
+	  memoryExpressionToClass.erase(VClass->expression);
+	}
 	// delete VClass;
       } else if (VClass->leader == V) {
 	VClass->leader = *(VClass->members.begin());
@@ -1877,19 +1985,19 @@ void GVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
       for (BasicBlock::iterator BI = To->begin(), BE = To->end();
 	   BI != BE; ++BI)
 	touchedInstructions.insert(BI);
+    } else {
+      DEBUG(dbgs() << "Block " << getBlockName(To) << " was reachable, but new edge to it found\n");
+      // We've made an edge reachable to an existing block, which may
+      // impact predicates.
+      // Otherwise, only mark the phi nodes as touched
+      BasicBlock::iterator BI = To->begin();
+      while (isa<PHINode>(BI)) {
+	touchedInstructions.insert(BI);
+	++BI;
+      }
+      // Propagate the change downstream.
+      propagateChangeInEdge(To);
     }
-  } else {
-    DEBUG(dbgs() << "Block " << getBlockName(To) << " was reachable, but new edge to it found\n");
-    // We've made an edge reachable to an existing block, which may
-    // impact predicates.
-    // Otherwise, only mark the phi nodes as touched
-    BasicBlock::iterator BI = To->begin();
-    while (isa<PHINode>(BI)) {
-      touchedInstructions.insert(BI);
-      ++BI;
-    }
-    // Propagate the change downstream.
-    propagateChangeInEdge(To);
   }
 }
 
@@ -2072,9 +2180,10 @@ void GVN::ReplaceInstruction(Instruction *I, Value *V, CongruenceClass *ReplClas
   ReplClass->members.erase(I);
   // We save the actual erasing to avoid invalidating memory
   // dependencies until we are done with everything.
-  instrsToErase.push_back(I);
   if (MD)
     MD->removeInstruction(I);
+  I->eraseFromParent();
+
 }
 
 bool GVN::ProcessBlock(BasicBlock *BB) {
@@ -2092,7 +2201,7 @@ bool GVN::ProcessBlock(BasicBlock *BB) {
       ProcessTerminatorInst(cast<TerminatorInst>(I));
       continue;
     }  else if (isa<StoreInst>(I)) {
-      // Eliminating stores is possible, but we'd rather not
+      // Eliminating stores is possible, but we'd rather not do the computation
       continue;
     } else if (isa<BitCastInst>(I)) {
       continue;
@@ -2101,7 +2210,9 @@ bool GVN::ProcessBlock(BasicBlock *BB) {
     bool isLoad = isa<LoadInst>(I);
 
     if (I->use_empty()) {
-      instrsToErase.push_back(I);
+      if (MD)
+	MD->removeInstruction(I);
+      I->eraseFromParent();
       continue;
     }
 
@@ -2111,7 +2222,7 @@ bool GVN::ProcessBlock(BasicBlock *BB) {
     if (!IClass)
       continue;
 
-    if (IClass->expression) {
+    if (IClass->expression && IClass->leader && IClass->leader != I) {
       if (Constant *C = dyn_cast<Constant>(IClass->leader)){
 	DEBUG(dbgs() << "Found constant replacement " << *C << " for " << *I << "\n");
 	ReplaceInstruction(I, C, IClass);
@@ -2124,7 +2235,8 @@ bool GVN::ProcessBlock(BasicBlock *BB) {
     }
 
     // Skip instructions with singleton congruence classes
-    if (IClass->members.size() <= 1)
+    // TODO unless they are nonlocal loads.
+    if (0 && IClass->members.size() <= 1)
       continue;
     Value *Result = availableTable.lookup(IClass);
 
@@ -2153,21 +2265,679 @@ bool GVN::ProcessBlock(BasicBlock *BB) {
 	ReplaceInstruction(I, Result, IClass);
       }
     } else {
-      if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
+      if (LoadInst *LI = dyn_cast<LoadInst>(I)){
 	MemDepResult local_dep = MD->getDependency(LI);
-	if (local_dep.isNonLocal()) {
-	  SmallVector<NonLocalDepResult, 64> Deps;
-	  AliasAnalysis::Location Loc = AA->getLocation(LI);
-	  MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
-	  //DEBUG(dbgs() << "INVESTIGATING NONLOCAL LOAD: "	  Alias
-	}
+	if (local_dep.isNonLocal())
+	  processNonLocalLoad(LI);
       }
       availableTable.insert(IClass, I);
     }
   }
   return Changed;
 }
+namespace {
 
+struct AvailableValueInBlock {
+  /// BB - The basic block in question.
+  BasicBlock *BB;
+  enum ValType {
+    SimpleVal,  // A simple offsetted value that is accessed.
+    LoadVal,    // A value produced by a load.
+    MemIntrin   // A memory intrinsic which is loaded from.
+  };
+
+  /// V - The value that is live out of the block.
+  PointerIntPair<Value *, 2, ValType> Val;
+
+  /// Offset - The byte offset in Val that is interesting for the load query.
+  unsigned Offset;
+
+  static AvailableValueInBlock get(BasicBlock *BB, Value *V,
+                                   unsigned Offset = 0) {
+    AvailableValueInBlock Res;
+    Res.BB = BB;
+    Res.Val.setPointer(V);
+    Res.Val.setInt(SimpleVal);
+    Res.Offset = Offset;
+    return Res;
+  }
+
+  static AvailableValueInBlock getMI(BasicBlock *BB, MemIntrinsic *MI,
+                                     unsigned Offset = 0) {
+    AvailableValueInBlock Res;
+    Res.BB = BB;
+    Res.Val.setPointer(MI);
+    Res.Val.setInt(MemIntrin);
+    Res.Offset = Offset;
+    return Res;
+  }
+
+  static AvailableValueInBlock getLoad(BasicBlock *BB, LoadInst *LI,
+                                       unsigned Offset = 0) {
+    AvailableValueInBlock Res;
+    Res.BB = BB;
+    Res.Val.setPointer(LI);
+    Res.Val.setInt(LoadVal);
+    Res.Offset = Offset;
+    return Res;
+  }
+
+  bool isSimpleValue() const { return Val.getInt() == SimpleVal; }
+  bool isCoercedLoadValue() const { return Val.getInt() == LoadVal; }
+  bool isMemIntrinValue() const { return Val.getInt() == MemIntrin; }
+
+  Value *getSimpleValue() const {
+    assert(isSimpleValue() && "Wrong accessor");
+    return Val.getPointer();
+  }
+
+  LoadInst *getCoercedLoadValue() const {
+    assert(isCoercedLoadValue() && "Wrong accessor");
+    return cast<LoadInst>(Val.getPointer());
+  }
+
+  MemIntrinsic *getMemIntrinValue() const {
+    assert(isMemIntrinValue() && "Wrong accessor");
+    return cast<MemIntrinsic>(Val.getPointer());
+  }
+
+  /// MaterializeAdjustedValue - Emit code into this block to adjust the value
+  /// defined here to the specified type.  This handles various coercion cases.
+  Value *MaterializeAdjustedValue(Type *LoadTy, GVN &gvn) const {
+    Value *Res;
+    if (isSimpleValue()) {
+      Res = getSimpleValue();
+      if (Res->getType() != LoadTy) {
+        const TargetData *TD = gvn.getTargetData();
+        assert(TD && "Need target data to handle type mismatch case");
+        Res = GetStoreValueForLoad(Res, Offset, LoadTy, BB->getTerminator(),
+                                   *TD);
+
+        DEBUG(dbgs() << "GVN COERCED NONLOCAL VAL:\nOffset: " << Offset << "  "
+                     << *getSimpleValue() << '\n'
+                     << *Res << '\n' << "\n\n\n");
+      }
+    } else if (isCoercedLoadValue()) {
+      LoadInst *Load = getCoercedLoadValue();
+      if (Load->getType() == LoadTy && Offset == 0) {
+        Res = Load;
+      } else {
+        Res = GetLoadValueForLoad(Load, Offset, LoadTy, BB->getTerminator(),
+                                  *TD);
+
+        DEBUG(dbgs() << "GVN COERCED NONLOCAL LOAD:\nOffset: " << Offset << "  "
+                     << *getCoercedLoadValue() << '\n'
+                     << *Res << '\n' << "\n\n\n");
+      }
+    } else {
+      const TargetData *TD = gvn.getTargetData();
+      assert(TD && "Need target data to handle type mismatch case");
+      Res = GetMemInstValueForLoad(getMemIntrinValue(), Offset,
+                                   LoadTy, BB->getTerminator(), *TD);
+      DEBUG(dbgs() << "GVN COERCED NONLOCAL MEM INTRIN:\nOffset: " << Offset
+                   << "  " << *getMemIntrinValue() << '\n'
+                   << *Res << '\n' << "\n\n\n");
+    }
+    return Res;
+  }
+};
+
+} // end anonymous namespace
+
+
+/// ConstructSSAForLoadSet - Given a set of loads specified by ValuesPerBlock,
+/// construct SSA form, allowing us to eliminate LI.  This returns the value
+/// that should be used at LI's definition site.
+static Value *ConstructSSAForLoadSet(LoadInst *LI,
+				     SmallVectorImpl<AvailableValueInBlock> &ValuesPerBlock,
+                                     GVN &gvn) {
+  // Check for the fully redundant, dominating load case.  In this case, we can
+  // just use the dominating value directly.
+  if (ValuesPerBlock.size() == 1 &&
+      gvn.getDominatorTree().properlyDominates(ValuesPerBlock[0].BB,
+                                               LI->getParent()))
+    return ValuesPerBlock[0].MaterializeAdjustedValue(LI->getType(), gvn);
+
+  // Otherwise, we have to construct SSA form.
+  SmallVector<PHINode*, 8> NewPHIs;
+  SSAUpdater SSAUpdate(&NewPHIs);
+  SSAUpdate.Initialize(LI->getType(), LI->getName());
+
+  Type *LoadTy = LI->getType();
+
+  for (unsigned i = 0, e = ValuesPerBlock.size(); i != e; ++i) {
+    const AvailableValueInBlock &AV = ValuesPerBlock[i];
+    BasicBlock *BB = AV.BB;
+
+    if (SSAUpdate.HasValueForBlock(BB))
+      continue;
+
+    SSAUpdate.AddAvailableValue(BB, AV.MaterializeAdjustedValue(LoadTy, gvn));
+  }
+
+  // Perform PHI construction.
+  Value *V = SSAUpdate.GetValueInMiddleOfBlock(LI->getParent());
+
+  // If new PHI nodes were created, notify alias analysis.
+  if (V->getType()->isPointerTy()) {
+    AliasAnalysis *AA = gvn.getAliasAnalysis();
+
+    for (unsigned i = 0, e = NewPHIs.size(); i != e; ++i)
+      AA->copyValue(LI, NewPHIs[i]);
+
+    // Now that we've copied information to the new PHIs, scan through
+    // them again and inform alias analysis that we've added potentially
+    // escaping uses to any values that are operands to these PHIs.
+    for (unsigned i = 0, e = NewPHIs.size(); i != e; ++i) {
+      PHINode *P = NewPHIs[i];
+      for (unsigned ii = 0, ee = P->getNumIncomingValues(); ii != ee; ++ii) {
+        unsigned jj = PHINode::getOperandNumForIncomingValue(ii);
+        AA->addEscapingUse(P->getOperandUse(jj));
+      }
+    }
+  }
+
+  return V;
+}
+
+static bool isLifetimeStart(const Instruction *Inst) {
+  if (const IntrinsicInst* II = dyn_cast<IntrinsicInst>(Inst))
+    return II->getIntrinsicID() == Intrinsic::lifetime_start;
+  return false;
+}
+/// IsValueFullyAvailableInBlock - Return true if we can prove that the value
+/// we're analyzing is fully available in the specified block.  As we go, keep
+/// track of which blocks we know are fully alive in FullyAvailableBlocks.  This
+/// map is actually a tri-state map with the following values:
+///   0) we know the block *is not* fully available.
+///   1) we know the block *is* fully available.
+///   2) we do not know whether the block is fully available or not, but we are
+///      currently speculating that it will be.
+///   3) we are speculating for this block and have used that to speculate for
+///      other blocks.
+static bool IsValueFullyAvailableInBlock(BasicBlock *BB,
+                            DenseMap<BasicBlock*, char> &FullyAvailableBlocks,
+                            uint32_t RecurseDepth) {
+  if (RecurseDepth > MaxRecurseDepth)
+    return false;
+
+  // Optimistically assume that the block is fully available and check to see
+  // if we already know about this block in one lookup.
+  std::pair<DenseMap<BasicBlock*, char>::iterator, char> IV =
+    FullyAvailableBlocks.insert(std::make_pair(BB, 2));
+
+  // If the entry already existed for this block, return the precomputed value.
+  if (!IV.second) {
+    // If this is a speculative "available" value, mark it as being used for
+    // speculation of other blocks.
+    if (IV.first->second == 2)
+      IV.first->second = 3;
+    return IV.first->second != 0;
+  }
+
+  // Otherwise, see if it is fully available in all predecessors.
+  pred_iterator PI = pred_begin(BB), PE = pred_end(BB);
+
+  // If this block has no predecessors, it isn't live-in here.
+  if (PI == PE)
+    goto SpeculationFailure;
+
+  for (; PI != PE; ++PI)
+    // If the value isn't fully available in one of our predecessors, then it
+    // isn't fully available in this block either.  Undo our previous
+    // optimistic assumption and bail out.
+    if (!IsValueFullyAvailableInBlock(*PI, FullyAvailableBlocks,RecurseDepth+1))
+      goto SpeculationFailure;
+
+  return true;
+
+// SpeculationFailure - If we get here, we found out that this is not, after
+// all, a fully-available block.  We have a problem if we speculated on this and
+// used the speculation to mark other blocks as available.
+SpeculationFailure:
+  char &BBVal = FullyAvailableBlocks[BB];
+
+  // If we didn't speculate on this, just return with it set to false.
+  if (BBVal == 2) {
+    BBVal = 0;
+    return false;
+  }
+
+  // If we did speculate on this value, we could have blocks set to 1 that are
+  // incorrect.  Walk the (transitive) successors of this block and mark them as
+  // 0 if set to one.
+  SmallVector<BasicBlock*, 32> BBWorklist;
+  BBWorklist.push_back(BB);
+
+  do {
+    BasicBlock *Entry = BBWorklist.pop_back_val();
+    // Note that this sets blocks to 0 (unavailable) if they happen to not
+    // already be in FullyAvailableBlocks.  This is safe.
+    char &EntryVal = FullyAvailableBlocks[Entry];
+    if (EntryVal == 0) continue;  // Already unavailable.
+
+    // Mark as unavailable.
+    EntryVal = 0;
+
+    for (succ_iterator I = succ_begin(Entry), E = succ_end(Entry); I != E; ++I)
+      BBWorklist.push_back(*I);
+  } while (!BBWorklist.empty());
+
+  return false;
+}
+
+
+/// processNonLocalLoad - Attempt to eliminate a load whose dependencies are
+/// non-local by performing PHI construction.
+bool GVN::processNonLocalLoad(LoadInst *LI) {
+  // Find the non-local dependencies of the load.
+  SmallVector<NonLocalDepResult, 64> Deps;
+  AliasAnalysis::Location Loc = AA->getLocation(LI);
+  MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
+  //DEBUG(dbgs() << "INVESTIGATING NONLOCAL LOAD: "
+  //             << Deps.size() << *LI << '\n');
+
+  // If we had to process more than one hundred blocks to find the
+  // dependencies, this load isn't worth worrying about.  Optimizing
+  // it will be too expensive.
+  unsigned NumDeps = Deps.size();
+  if (NumDeps > 100)
+    return false;
+
+  // If we had a phi translation failure, we'll have a single entry which is a
+  // clobber in the current block.  Reject this early.
+  if (NumDeps == 1 &&
+      !Deps[0].getResult().isDef() && !Deps[0].getResult().isClobber()) {
+    DEBUG(
+      dbgs() << "GVN: non-local load ";
+      WriteAsOperand(dbgs(), LI);
+      dbgs() << " has unknown dependencies\n";
+    );
+    return false;
+  }
+
+  // Filter out useless results (non-locals, etc).  Keep track of the blocks
+  // where we have a value available in repl, also keep track of whether we see
+  // dependencies that produce an unknown value for the load (such as a call
+  // that could potentially clobber the load).
+  SmallVector<AvailableValueInBlock, 64> ValuesPerBlock;
+  SmallVector<BasicBlock*, 64> UnavailableBlocks;
+
+  for (unsigned i = 0, e = NumDeps; i != e; ++i) {
+    BasicBlock *DepBB = Deps[i].getBB();
+    MemDepResult DepInfo = Deps[i].getResult();
+   
+    if (!reachableBlocks.count(DepBB))
+      DEBUG(dbgs() << "Skipping dependency in unreachable block\n");
+      
+    if (!DepInfo.isDef() && !DepInfo.isClobber()) {
+      UnavailableBlocks.push_back(DepBB);
+      continue;
+    }
+
+    if (DepInfo.isClobber()) {
+      // The address being loaded in this non-local block may not be the same as
+      // the pointer operand of the load if PHI translation occurs.  Make sure
+      // to consider the right address.
+      Value *Address = Deps[i].getAddress();
+
+      // If the dependence is to a store that writes to a superset of the bits
+      // read by the load, we can extract the bits we need for the load from the
+      // stored value.
+      if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInfo.getInst())) {
+        if (TD && Address) {
+          int Offset = AnalyzeLoadFromClobberingStore(LI->getType(), Address,
+                                                      DepSI, *TD);
+          if (Offset != -1) {
+            ValuesPerBlock.push_back(AvailableValueInBlock::get(DepBB,
+                                                       DepSI->getValueOperand(),
+                                                                Offset));
+            continue;
+          }
+        }
+      }
+
+      // Check to see if we have something like this:
+      //    load i32* P
+      //    load i8* (P+1)
+      // if we have this, replace the later with an extraction from the former.
+      if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInfo.getInst())) {
+        // If this is a clobber and L is the first instruction in its block, then
+        // we have the first instruction in the entry block.
+        if (DepLI != LI && Address && TD) {
+          int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
+                                                     LI->getPointerOperand(),
+                                                     DepLI, *TD);
+
+          if (Offset != -1) {
+            ValuesPerBlock.push_back(AvailableValueInBlock::getLoad(DepBB,DepLI,
+                                                                    Offset));
+            continue;
+          }
+        }
+      }
+
+      // If the clobbering value is a memset/memcpy/memmove, see if we can
+      // forward a value on from it.
+      if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(DepInfo.getInst())) {
+        if (TD && Address) {
+          int Offset = AnalyzeLoadFromClobberingMemInst(LI->getType(), Address,
+                                                        DepMI, *TD);
+          if (Offset != -1) {
+            ValuesPerBlock.push_back(AvailableValueInBlock::getMI(DepBB, DepMI,
+                                                                  Offset));
+            continue;
+          }
+        }
+      }
+
+      UnavailableBlocks.push_back(DepBB);
+      continue;
+    }
+
+    // DepInfo.isDef() here
+
+    Instruction *DepInst = DepInfo.getInst();
+
+    // Loading the allocation -> undef.
+    if (isa<AllocaInst>(DepInst) || isMalloc(DepInst) ||
+        // Loading immediately after lifetime begin -> undef.
+        isLifetimeStart(DepInst)) {
+      ValuesPerBlock.push_back(AvailableValueInBlock::get(DepBB,
+                                             UndefValue::get(LI->getType())));
+      continue;
+    }
+
+    if (StoreInst *S = dyn_cast<StoreInst>(DepInst)) {
+      // Reject loads and stores that are to the same address but are of
+      // different types if we have to.
+      if (S->getValueOperand()->getType() != LI->getType()) {
+        // If the stored value is larger or equal to the loaded value, we can
+        // reuse it.
+        if (TD == 0 || !CanCoerceMustAliasedValueToLoad(S->getValueOperand(),
+                                                        LI->getType(), *TD)) {
+          UnavailableBlocks.push_back(DepBB);
+          continue;
+        }
+      }
+
+      ValuesPerBlock.push_back(AvailableValueInBlock::get(DepBB,
+                                                         S->getValueOperand()));
+      continue;
+    }
+
+    if (LoadInst *LD = dyn_cast<LoadInst>(DepInst)) {
+      // If the types mismatch and we can't handle it, reject reuse of the load.
+      if (LD->getType() != LI->getType()) {
+        // If the stored value is larger or equal to the loaded value, we can
+        // reuse it.
+        if (TD == 0 || !CanCoerceMustAliasedValueToLoad(LD, LI->getType(),*TD)){
+          UnavailableBlocks.push_back(DepBB);
+          continue;
+        }
+      }
+      ValuesPerBlock.push_back(AvailableValueInBlock::getLoad(DepBB, LD));
+      continue;
+    }
+
+    UnavailableBlocks.push_back(DepBB);
+    continue;
+  }
+
+  // If we have no predecessors that produce a known value for this load, exit
+  // early.
+  if (ValuesPerBlock.empty()) return false;
+
+  // If all of the instructions we depend on produce a known value for this
+  // load, then it is fully redundant and we can use PHI insertion to compute
+  // its value.  Insert PHIs and remove the fully redundant value now.
+  if (UnavailableBlocks.empty()) {
+    DEBUG(dbgs() << "GVN REMOVING NONLOCAL LOAD: " << *LI << '\n');
+
+    // Perform PHI construction.
+    Value *V = ConstructSSAForLoadSet(LI, ValuesPerBlock, *this);
+    LI->replaceAllUsesWith(V);
+
+    if (isa<PHINode>(V))
+      V->takeName(LI);
+    if (V->getType()->isPointerTy())
+      MD->invalidateCachedPointerInfo(V);
+    LI->eraseFromParent();
+    ++NumGVNLoad;
+    return true;
+  }
+
+  if (!EnablePRE || !EnableLoadPRE)
+    return false;
+
+  // Okay, we have *some* definitions of the value.  This means that the value
+  // is available in some of our (transitive) predecessors.  Lets think about
+  // doing PRE of this load.  This will involve inserting a new load into the
+  // predecessor when it's not available.  We could do this in general, but
+  // prefer to not increase code size.  As such, we only do this when we know
+  // that we only have to insert *one* load (which means we're basically moving
+  // the load, not inserting a new one).
+
+  SmallPtrSet<BasicBlock *, 4> Blockers;
+  for (unsigned i = 0, e = UnavailableBlocks.size(); i != e; ++i)
+    Blockers.insert(UnavailableBlocks[i]);
+
+  // Let's find the first basic block with more than one predecessor.  Walk
+  // backwards through predecessors if needed.
+  BasicBlock *LoadBB = LI->getParent();
+  BasicBlock *TmpBB = LoadBB;
+
+  bool isSinglePred = false;
+  bool allSingleSucc = true;
+  while (TmpBB->getSinglePredecessor()) {
+    isSinglePred = true;
+    TmpBB = TmpBB->getSinglePredecessor();
+    if (TmpBB == LoadBB) // Infinite (unreachable) loop.
+      return false;
+    if (Blockers.count(TmpBB))
+      return false;
+
+    // If any of these blocks has more than one successor (i.e. if the edge we
+    // just traversed was critical), then there are other paths through this
+    // block along which the load may not be anticipated.  Hoisting the load
+    // above this block would be adding the load to execution paths along
+    // which it was not previously executed.
+    if (TmpBB->getTerminator()->getNumSuccessors() != 1)
+      return false;
+  }
+
+  assert(TmpBB);
+  LoadBB = TmpBB;
+
+  // FIXME: It is extremely unclear what this loop is doing, other than
+  // artificially restricting loadpre.
+  if (isSinglePred) {
+    bool isHot = false;
+    for (unsigned i = 0, e = ValuesPerBlock.size(); i != e; ++i) {
+      const AvailableValueInBlock &AV = ValuesPerBlock[i];
+      if (AV.isSimpleValue())
+        // "Hot" Instruction is in some loop (because it dominates its dep.
+        // instruction).
+        if (Instruction *I = dyn_cast<Instruction>(AV.getSimpleValue()))
+          if (DT->dominates(LI, I)) {
+            isHot = true;
+            break;
+          }
+    }
+
+    // We are interested only in "hot" instructions. We don't want to do any
+    // mis-optimizations here.
+    if (!isHot)
+      return false;
+  }
+
+  // Check to see how many predecessors have the loaded value fully
+  // available.
+  DenseMap<BasicBlock*, Value*> PredLoads;
+  DenseMap<BasicBlock*, char> FullyAvailableBlocks;
+  for (unsigned i = 0, e = ValuesPerBlock.size(); i != e; ++i)
+    FullyAvailableBlocks[ValuesPerBlock[i].BB] = true;
+  for (unsigned i = 0, e = UnavailableBlocks.size(); i != e; ++i)
+    FullyAvailableBlocks[UnavailableBlocks[i]] = false;
+
+  SmallVector<std::pair<TerminatorInst*, unsigned>, 4> NeedToSplit;
+  for (pred_iterator PI = pred_begin(LoadBB), E = pred_end(LoadBB);
+       PI != E; ++PI) {
+    BasicBlock *Pred = *PI;
+    if (IsValueFullyAvailableInBlock(Pred, FullyAvailableBlocks, 0)) {
+      continue;
+    }
+    PredLoads[Pred] = 0;
+
+    if (Pred->getTerminator()->getNumSuccessors() != 1) {
+      if (isa<IndirectBrInst>(Pred->getTerminator())) {
+        DEBUG(dbgs() << "COULD NOT PRE LOAD BECAUSE OF INDBR CRITICAL EDGE '"
+              << Pred->getName() << "': " << *LI << '\n');
+        return false;
+      }
+
+      if (LoadBB->isLandingPad()) {
+        DEBUG(dbgs()
+              << "COULD NOT PRE LOAD BECAUSE OF LANDING PAD CRITICAL EDGE '"
+              << Pred->getName() << "': " << *LI << '\n');
+        return false;
+      }
+
+      unsigned SuccNum = GetSuccessorNumber(Pred, LoadBB);
+      NeedToSplit.push_back(std::make_pair(Pred->getTerminator(), SuccNum));
+    }
+  }
+
+  if (!NeedToSplit.empty()) {
+    toSplit.append(NeedToSplit.begin(), NeedToSplit.end());
+    return false;
+  }
+
+  // Decide whether PRE is profitable for this load.
+  unsigned NumUnavailablePreds = PredLoads.size();
+  assert(NumUnavailablePreds != 0 &&
+         "Fully available value should be eliminated above!");
+
+  // If this load is unavailable in multiple predecessors, reject it.
+  // FIXME: If we could restructure the CFG, we could make a common pred with
+  // all the preds that don't have an available LI and insert a new load into
+  // that one block.
+  if (NumUnavailablePreds != 1)
+      return false;
+
+  // Check if the load can safely be moved to all the unavailable predecessors.
+  bool CanDoPRE = true;
+  SmallVector<Instruction*, 8> NewInsts;
+  for (DenseMap<BasicBlock*, Value*>::iterator I = PredLoads.begin(),
+         E = PredLoads.end(); I != E; ++I) {
+    BasicBlock *UnavailablePred = I->first;
+
+    // Do PHI translation to get its value in the predecessor if necessary.  The
+    // returned pointer (if non-null) is guaranteed to dominate UnavailablePred.
+
+    // If all preds have a single successor, then we know it is safe to insert
+    // the load on the pred (?!?), so we can insert code to materialize the
+    // pointer if it is not available.
+    PHITransAddr Address(LI->getPointerOperand(), TD);
+    Value *LoadPtr = 0;
+    if (allSingleSucc) {
+      LoadPtr = Address.PHITranslateWithInsertion(LoadBB, UnavailablePred,
+                                                  *DT, NewInsts);
+    } else {
+      Address.PHITranslateValue(LoadBB, UnavailablePred, DT);
+      LoadPtr = Address.getAddr();
+    }
+
+    // If we couldn't find or insert a computation of this phi translated value,
+    // we fail PRE.
+    if (LoadPtr == 0) {
+      DEBUG(dbgs() << "COULDN'T INSERT PHI TRANSLATED VALUE OF: "
+            << *LI->getPointerOperand() << "\n");
+      CanDoPRE = false;
+      break;
+    }
+
+    // Make sure it is valid to move this load here.  We have to watch out for:
+    //  @1 = getelementptr (i8* p, ...
+    //  test p and branch if == 0
+    //  load @1
+    // It is valid to have the getelementptr before the test, even if p can
+    // be 0, as getelementptr only does address arithmetic.
+    // If we are not pushing the value through any multiple-successor blocks
+    // we do not have this case.  Otherwise, check that the load is safe to
+    // put anywhere; this can be improved, but should be conservatively safe.
+    if (!allSingleSucc &&
+        // FIXME: REEVALUTE THIS.
+        !isSafeToLoadUnconditionally(LoadPtr,
+                                     UnavailablePred->getTerminator(),
+                                     LI->getAlignment(), TD)) {
+      CanDoPRE = false;
+      break;
+    }
+
+    I->second = LoadPtr;
+  }
+
+  if (!CanDoPRE) {
+    while (!NewInsts.empty()) {
+      Instruction *I = NewInsts.pop_back_val();
+      if (MD) MD->removeInstruction(I);
+      I->eraseFromParent();
+    }
+    return false;
+  }
+
+  // Okay, we can eliminate this load by inserting a reload in the predecessor
+  // and using PHI construction to get the value in the other predecessors, do
+  // it.
+  DEBUG(dbgs() << "GVN REMOVING PRE LOAD: " << *LI << '\n');
+  DEBUG(if (!NewInsts.empty())
+          dbgs() << "INSERTED " << NewInsts.size() << " INSTS: "
+                 << *NewInsts.back() << '\n');
+
+  // Assign value numbers to the new instructions.
+  for (unsigned i = 0, e = NewInsts.size(); i != e; ++i) {
+    // FIXME: We really _ought_ to insert these value numbers into their
+    // parent's availability map.  However, in doing so, we risk getting into
+    // ordering issues.  If a block hasn't been processed yet, we would be
+    // marking a value as AVAIL-IN, which isn't what we intend.
+    // VN.lookup_or_add(NewInsts[i]);
+  }
+
+  for (DenseMap<BasicBlock*, Value*>::iterator I = PredLoads.begin(),
+         E = PredLoads.end(); I != E; ++I) {
+    BasicBlock *UnavailablePred = I->first;
+    Value *LoadPtr = I->second;
+
+    Instruction *NewLoad = new LoadInst(LoadPtr, LI->getName()+".pre", false,
+                                        LI->getAlignment(),
+                                        UnavailablePred->getTerminator());
+
+    // Transfer the old load's TBAA tag to the new load.
+    if (MDNode *Tag = LI->getMetadata(LLVMContext::MD_tbaa))
+      NewLoad->setMetadata(LLVMContext::MD_tbaa, Tag);
+
+    // Transfer DebugLoc.
+    NewLoad->setDebugLoc(LI->getDebugLoc());
+
+    // Add the newly created load.
+    ValuesPerBlock.push_back(AvailableValueInBlock::get(UnavailablePred,
+                                                        NewLoad));
+    MD->invalidateCachedPointerInfo(LoadPtr);
+    DEBUG(dbgs() << "GVN INSERTED " << *NewLoad << '\n');
+  }
+
+  // Perform PHI construction.
+  Value *V = ConstructSSAForLoadSet(LI, ValuesPerBlock, *this);
+  LI->replaceAllUsesWith(V);
+  if (isa<PHINode>(V))
+    V->takeName(LI);
+  if (V->getType()->isPointerTy())
+    MD->invalidateCachedPointerInfo(V);
+  LI->eraseFromParent();
+  ++NumPRELoad;
+  return true;
+}
 
 static void DeleteInstructionInBlock(BasicBlock *BB) {
   DEBUG(dbgs() << "  BasicBlock Dead:" << *BB);
@@ -2262,6 +3032,7 @@ bool GVN::runOnFunction(Function& F) {
   // that can be quite expensive. At most, we have one expression per
   // instruction.
   expressionToClass.resize(ICount);
+  memoryExpressionToClass.resize(ICount * 8);
   rpoToBlock.resize(rpoBNumber+1);
   for (Function::iterator BI = F.begin(), BE = F.end(); BI != BE; ++BI)
     rpoToBlock[rpoBlockNumbers[BI]] = BI;
@@ -2402,9 +3173,6 @@ bool GVN::runOnFunction(Function& F) {
     // If it's a leaf node, it's done. Traverse upwards to pop ancestors.
     ExitScopeIfDone(Node, OpenChildren, ParentMap);
   }
-  for (unsigned i = 0, e = instrsToErase.size(); i != e; ++i) {
-    instrsToErase[i]->eraseFromParent();
-  }
   for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI){
     BasicBlock *BB = FI;
     if (!reachableBlocks.count(BB)) {
@@ -2436,6 +3204,7 @@ bool GVN::runOnFunction(Function& F) {
 
   congruenceClass.clear();
   expressionToClass.clear();
+  memoryExpressionToClass.clear();
   expressionToDelete.clear();
   uniquedExpressions.clear();
   rpoBlockNumbers.clear();
@@ -2448,7 +3217,6 @@ bool GVN::runOnFunction(Function& F) {
   touchedBlocks.clear();
   processedCount.clear();
   expressionAllocator.Reset();
-  instrsToErase.clear();
   leaderTable.clear();
   tableAllocator.Reset();
   return Changed;
