@@ -886,6 +886,7 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
       // We should mark the non-local ones so we can try to PRE them later
       SmallVector<NonLocalDepResult, 64> Deps;
       AliasAnalysis::Location Loc = AA->getLocation(LI);
+      Loc.Ptr = varargs[0];
       MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
       // If we had to process more than one hundred blocks to find the
       // dependencies, this load isn't worth worrying about.  Optimizing
@@ -922,6 +923,7 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 	}
 	// Make sure all dependencies are in the same congruence
 	// class
+	// TODO: need to be in the same congruence class or they need to be fixable.
 	CongruenceClass *DepClass = valueToClass[DepInfo.getInst()];
 	// It could be an unreachable dependency MemDep doesn't know
 	// about.
@@ -997,7 +999,7 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 	  }
 	  continue;
 	}
-
+	// TODO: Better coercion
 	if (LoadInst *LD = dyn_cast<LoadInst>(DepInst)) {
 	  // If the types mismatch and we can't handle it, reject reuse of the load.
 	  if (LD->getType() != LI->getType()) {
@@ -1922,6 +1924,180 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
   return E;
 }
 
+
+/// replaceAllDominatedUsesWith - Replace all uses of 'From' with 'To' if the
+/// use is dominated by the given basic block.  Returns the number of uses that
+/// were replaced.
+unsigned GVN::replaceAllDominatedUsesWith(Value *From, Value *To,
+                                          BasicBlock *Root) {
+  unsigned Count = 0;
+  for (Value::use_iterator UI = From->use_begin(), UE = From->use_end();
+       UI != UE; ) {
+    Use &U = (UI++).getUse();
+
+    // If From occurs as a phi node operand then the use implicitly lives in the
+    // corresponding incoming block.  Otherwise it is the block containing the
+    // user that must be dominated by Root.
+    BasicBlock *UsingBlock;
+    if (PHINode *PN = dyn_cast<PHINode>(U.getUser()))
+      UsingBlock = PN->getIncomingBlock(U);
+    else
+      UsingBlock = cast<Instruction>(U.getUser())->getParent();
+
+    if (DT->dominates(Root, UsingBlock)) {
+      if (Instruction *I = dyn_cast<Instruction>(U.getUser()))
+	touchedInstructions.insert(I);
+      DEBUG(dbgs() << "Equality propagation replacing " << *From << " with " << *To << " in " << U.getUser() << "\n");
+      U.set(To);
+      ++Count;
+    }
+  }
+  return Count;
+}
+
+/// propagateEquality - The given values are known to be equal in every block
+/// dominated by 'Root'.  Exploit this, for example by replacing 'LHS' with
+/// 'RHS' everywhere in the scope.  Returns whether a change was made.
+bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
+  SmallVector<std::pair<Value*, Value*>, 4> Worklist;
+  Worklist.push_back(std::make_pair(LHS, RHS));
+  bool Changed = false;
+
+  while (!Worklist.empty()) {
+    std::pair<Value*, Value*> Item = Worklist.pop_back_val();
+    LHS = Item.first; RHS = Item.second;
+
+    if (LHS == RHS) continue;
+    assert(LHS->getType() == RHS->getType() && "Equality but unequal types!");
+
+    // Don't try to propagate equalities between constants.
+    if (isa<Constant>(LHS) && isa<Constant>(RHS)) continue;
+
+    // Prefer a constant on the right-hand side, or an Argument if no constants.
+    if (isa<Constant>(LHS) || (isa<Argument>(LHS) && !isa<Constant>(RHS)))
+      std::swap(LHS, RHS);
+    assert((isa<Argument>(LHS) || isa<Instruction>(LHS)) && "Unexpected value!");
+    //TODO: Improve equality propagation
+#if 0
+    // If there is no obvious reason to prefer the left-hand side over the right-
+    // hand side, ensure the longest lived term is on the right-hand side, so the
+    // shortest lived term will be replaced by the longest lived.  This tends to
+    // expose more simplifications.
+    uint32_t LVN = VN.lookup_or_add(LHS);
+    if ((isa<Argument>(LHS) && isa<Argument>(RHS)) ||
+        (isa<Instruction>(LHS) && isa<Instruction>(RHS))) {
+      // Move the 'oldest' value to the right-hand side, using the value number as
+      // a proxy for age.
+      uint32_t RVN = VN.lookup_or_add(RHS);
+      if (LVN < RVN) {
+        std::swap(LHS, RHS);
+        LVN = RVN;
+      }
+    }
+#endif
+    assert((!isa<Instruction>(RHS) ||
+            DT->properlyDominates(cast<Instruction>(RHS)->getParent(), Root)) &&
+           "Instruction doesn't dominate scope!");
+    //TODO: Improve equality propagation
+#if 0
+    // If value numbering later deduces that an instruction in the scope is equal
+    // to 'LHS' then ensure it will be turned into 'RHS'.
+    addToLeaderTable(LVN, RHS, Root);
+#endif
+    // Replace all occurrences of 'LHS' with 'RHS' everywhere in the scope.  As
+    // LHS always has at least one use that is not dominated by Root, this will
+    // never do anything if LHS has only one use.
+    if (!LHS->hasOneUse()) {
+      unsigned NumReplacements = replaceAllDominatedUsesWith(LHS, RHS, Root);
+      Changed |= NumReplacements > 0;
+      NumGVNEqProp += NumReplacements;
+    }
+
+    // Now try to deduce additional equalities from this one.  For example, if the
+    // known equality was "(A != B)" == "false" then it follows that A and B are
+    // equal in the scope.  Only boolean equalities with an explicit true or false
+    // RHS are currently supported.
+    if (!RHS->getType()->isIntegerTy(1))
+      // Not a boolean equality - bail out.
+      continue;
+    ConstantInt *CI = dyn_cast<ConstantInt>(RHS);
+    if (!CI)
+      // RHS neither 'true' nor 'false' - bail out.
+      continue;
+    // Whether RHS equals 'true'.  Otherwise it equals 'false'.
+    bool isKnownTrue = CI->isAllOnesValue();
+    bool isKnownFalse = !isKnownTrue;
+
+    // If "A && B" is known true then both A and B are known true.  If "A || B"
+    // is known false then both A and B are known false.
+    Value *A, *B;
+    if ((isKnownTrue && match(LHS, m_And(m_Value(A), m_Value(B)))) ||
+        (isKnownFalse && match(LHS, m_Or(m_Value(A), m_Value(B))))) {
+      Worklist.push_back(std::make_pair(A, RHS));
+      Worklist.push_back(std::make_pair(B, RHS));
+      continue;
+    }
+    //TODO Multi propagation
+#if 0
+    // If we are propagating an equality like "(A == B)" == "true" then also
+    // propagate the equality A == B.  When propagating a comparison such as
+    // "(A >= B)" == "true", replace all instances of "A < B" with "false".
+    if (ICmpInst *Cmp = dyn_cast<ICmpInst>(LHS)) {
+      Value *Op0 = Cmp->getOperand(0), *Op1 = Cmp->getOperand(1);
+
+      // If "A == B" is known true, or "A != B" is known false, then replace
+      // A with B everywhere in the scope.
+      if ((isKnownTrue && Cmp->getPredicate() == CmpInst::ICMP_EQ) ||
+          (isKnownFalse && Cmp->getPredicate() == CmpInst::ICMP_NE))
+        Worklist.push_back(std::make_pair(Op0, Op1));
+
+      // If "A >= B" is known true, replace "A < B" with false everywhere.
+      CmpInst::Predicate NotPred = Cmp->getInversePredicate();
+      Constant *NotVal = ConstantInt::get(Cmp->getType(), isKnownFalse);
+      // Since we don't have the instruction "A < B" immediately to hand, work out
+      // the value number that it would have and use that to find an appropriate
+      // instruction (if any).
+      uint32_t NextNum = VN.getNextUnusedValueNumber();
+      uint32_t Num = VN.lookup_or_add_cmp(Cmp->getOpcode(), NotPred, Op0, Op1);
+      // If the number we were assigned was brand new then there is no point in
+      // looking for an instruction realizing it: there cannot be one!
+      if (Num < NextNum) {
+        Value *NotCmp = findLeader(Root, Num);
+        if (NotCmp && isa<Instruction>(NotCmp)) {
+          unsigned NumReplacements =
+            replaceAllDominatedUsesWith(NotCmp, NotVal, Root);
+          Changed |= NumReplacements > 0;
+          NumGVNEqProp += NumReplacements;
+        }
+      }
+      // Ensure that any instruction in scope that gets the "A < B" value number
+      // is replaced with false.
+      addToLeaderTable(Num, NotVal, Root);
+
+      continue;
+    }
+#endif
+  }
+
+  return Changed;
+}
+
+/// isOnlyReachableViaThisEdge - There is an edge from 'Src' to 'Dst'.  Return
+/// true if every path from the entry block to 'Dst' passes via this edge.  In
+/// particular 'Dst' must not be reachable via another edge from 'Src'.
+static bool isOnlyReachableViaThisEdge(BasicBlock *Src, BasicBlock *Dst,
+                                       DominatorTree *DT) {
+  // While in theory it is interesting to consider the case in which Dst has
+  // more than one predecessor, because Dst might be part of a loop which is
+  // only reachable from Src, in practice it is pointless since at the time
+  // GVN runs all such loops have preheaders, which means that Dst will have
+  // been changed to have only one predecessor, namely Src.
+  BasicBlock *Pred = Dst->getSinglePredecessor();
+  assert((!Pred || Pred == Src) && "No edge between these basic blocks!");
+  (void)Src;
+  return Pred != 0;
+}
+
 /// performCongruenceFinding - Perform congruence finding on a given value numbering expression
 void GVN::performCongruenceFinding(Value *V, Expression *E, DomTreeNode *DTN) {
   // This is guaranteed to return something, since it will at least find INITIAL
@@ -2059,8 +2235,8 @@ void GVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
 void GVN::processOutgoingEdges(TerminatorInst *TI) {
   // Evaluate Reachability of terminator instruction
   // Conditional branch
-  BranchInst *BR = dyn_cast<BranchInst>(TI);
-  if (BR && BR->isConditional()) {
+  BranchInst *BR;
+  if ((BR = dyn_cast<BranchInst>(TI)) && BR->isConditional()) {
     Value *Cond = BR->getCondition();
     Value *CondEvaluated = NULL;
     if (Instruction *I = dyn_cast<Instruction>(Cond)) {
@@ -2084,14 +2260,35 @@ void GVN::processOutgoingEdges(TerminatorInst *TI) {
 	updateReachableEdge(TI->getParent(), FalseSucc);
       }
     } else {
+      BasicBlock *Parent = BR->getParent();
+      if (isOnlyReachableViaThisEdge(Parent, TrueSucc, DT))
+	propagateEquality(Cond,
+			  ConstantInt::getTrue(TrueSucc->getContext()),
+			  TrueSucc);
+      
+      if (isOnlyReachableViaThisEdge(Parent, FalseSucc, DT))
+	propagateEquality(Cond,
+			  ConstantInt::getFalse(FalseSucc->getContext()),
+			  FalseSucc);
       updateReachableEdge(TI->getParent(), TrueSucc);
       updateReachableEdge(TI->getParent(), FalseSucc);
     }
   } else {
+    // For switches, propagate the case values into the case destinations.
+    if (SwitchInst *SI = dyn_cast<SwitchInst>(TI)) {
+      Value *SwitchCond = SI->getCondition();
+      BasicBlock *Parent = SI->getParent();
+      for (SwitchInst::CaseIt i = SI->case_begin(), e = SI->case_end();
+	   i != e; ++i) {
+	BasicBlock *Dst = i.getCaseSuccessor();
+	if (isOnlyReachableViaThisEdge(Parent, Dst, DT))
+	  propagateEquality(SwitchCond, i.getCaseValue(), Dst);
+      }
+    }
+    
     for (unsigned i = 0, e = TI->getNumSuccessors(); i != e; ++i) {
       BasicBlock *B = TI->getSuccessor(i);
       updateReachableEdge(TI->getParent(), B);
-      //TODO(predication)
     }
   }
 
@@ -2583,6 +2780,7 @@ bool GVN::processNonLocalLoad(LoadInst *LI) {
   // Find the non-local dependencies of the load.
   SmallVector<NonLocalDepResult, 64> Deps;
   AliasAnalysis::Location Loc = AA->getLocation(LI);
+  Loc.Ptr = lookupOperandLeader(LI->getPointerOperand());
   MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
   //DEBUG(dbgs() << "INVESTIGATING NONLOCAL LOAD: "
   //             << Deps.size() << *LI << '\n');
@@ -3269,7 +3467,6 @@ bool GVN::runOnFunction(Function& F) {
   // and eliminate the ones dominated by the last member.
   // When we find something not dominated, it becomes the new leader
   // for elimination purposes
-  DenseSet<Value*> lookedAtMembers;
  for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
    CongruenceClass *CC = congruenceClass[i];
    if (CC != InitialClass && !CC->dead) {
@@ -3314,8 +3511,6 @@ bool GVN::runOnFunction(Function& F) {
 	     //TODO: eliminate duplicate bitcasts but not valid bitcast
 	     if (isa<StoreInst>(member) || isa<BitCastInst>(member))
 	       continue;
-	     assert(!lookedAtMembers.count(member) && "Member is in two congruence classes?");
-	     lookedAtMembers.insert(member);
 	     
 	     DEBUG(dbgs() << "Last DFS numbers are (" << lastdfs_in << "," << lastdfs_out << ")\n");
 	     DEBUG(dbgs() << "Current DFS numbers are (" << currdfs_in << "," << currdfs_out <<")\n");
@@ -3346,7 +3541,8 @@ bool GVN::runOnFunction(Function& F) {
 		   Result = GetStoreValueForLoad(SIR->getValueOperand(), Offset, LI->getType(), LI, *TD);
 		 }
 	       }
-	       ReplaceInstruction(cast<Instruction>(member), Result, CC);
+	       if (member != CC->leader)
+		 ReplaceInstruction(cast<Instruction>(member), Result, CC);
 	     }
 	   }
 	 }
@@ -3354,7 +3550,6 @@ bool GVN::runOnFunction(Function& F) {
      }
    }
  }
- lookedAtMembers.clear();
  
  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI){
    BasicBlock *BB = FI;
