@@ -29,7 +29,6 @@
 #include "llvm/Analysis/MemoryBuiltins.h"
 #include "llvm/Analysis/MemoryDependenceAnalysis.h"
 #include "llvm/Analysis/PHITransAddr.h"
-#include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Assembly/Writer.h"
 #include "llvm/Target/TargetData.h"
@@ -1346,17 +1345,10 @@ typedef RecyclingAllocator<BumpPtrAllocator,
     typedef ScopedHTType::ScopeTy ScopeType;
     bool noLoads;
     DominatorTree *DT;
-    PostDominatorTree *PDT;
     const TargetLibraryInfo *TLI;
-    DenseMap<BasicBlock*, uint32_t> rpoBlockNumbers;
-    DenseMap<Instruction*, uint32_t> rpoInstructionNumbers;
-    DenseMap<BasicBlock*, std::pair<uint32_t, uint32_t> > rpoInstructionStartEnd;
-    std::vector<BasicBlock*> rpoToBlock;
     DenseSet<std::pair<BasicBlock*, BasicBlock*> > reachableEdges;
     DenseSet<Instruction*> touchedInstructions;
     DenseMap<Instruction*, uint32_t> processedCount;
-    // Tested: SparseBitVector, DenseSet, etc. vector<bool> is 3 times as fast
-    std::vector<bool> touchedBlocks;
     std::vector<CongruenceClass*> congruenceClass;
     DenseMap<BasicBlock*, ScopeType*> ScopeMap;
     ScopedHTType availableTable;
@@ -1503,16 +1495,12 @@ typedef RecyclingAllocator<BumpPtrAllocator,
     // List of critical edges to be split between iterations.
     SmallVector<std::pair<TerminatorInst*, unsigned>, 4> toSplit;
 
-    // This transformation requires dominator postdominator info
     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
       AU.addRequired<DominatorTree>();
-      AU.addRequired<PostDominatorTree>();
       AU.addRequired<TargetLibraryInfo>();
       if (!noLoads)
         AU.addRequired<MemoryDependenceAnalysis>();
       AU.addRequired<AliasAnalysis>();
-
-      AU.addPreserved<PostDominatorTree>();
       AU.addPreserved<DominatorTree>();
       AU.addPreserved<AliasAnalysis>();
     }
@@ -1540,7 +1528,6 @@ FunctionPass *llvm::createGVNPass(bool noLoads) {
 INITIALIZE_PASS_BEGIN(GVN, "gvn", "Global Value Numbering", false, false)
 INITIALIZE_PASS_DEPENDENCY(MemoryDependenceAnalysis)
 INITIALIZE_PASS_DEPENDENCY(DominatorTree)
-INITIALIZE_PASS_DEPENDENCY(PostDominatorTree)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfo)
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_END(GVN, "gvn", "Global Value Numbering", false, false)
@@ -2209,8 +2196,6 @@ void GVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
     // If this block wasn't reachable before, all instructions are touched
     if (reachableBlocks.insert(To).second) {
       DEBUG(dbgs() << "Block " << getBlockName(To) << " marked reachable\n");
-      uint32_t rpoNum = rpoBlockNumbers[To];
-      touchedBlocks[rpoNum] = true;
       for (BasicBlock::iterator BI = To->begin(), BE = To->end();
 	   BI != BE; ++BI)
 	touchedInstructions.insert(BI);
@@ -2303,33 +2288,13 @@ void GVN::processOutgoingEdges(TerminatorInst *TI) {
 // incoming edges at once.
 //
 void GVN::propagateChangeInEdge(BasicBlock *Dest) {
-  if (1) {
-  // We have two options here.
-  // We can either use the RPO numbers, and process all blocks with a
-  // greater RPO number, conservatively.  Or we can use the dominator tree and post
-  // dominator tree
-  // We have to touch instructions in blocks we dominate
-  // We only have to touch blocks we post-dominate
-  //
   // The algorithm states that you only need to touch blocks that are confluence nodes.
   // I also can't see why you would need to touch any instructions that aren't PHI
   // nodes.  Because we don't use predicates right now, they are the ones whose
   // value could have changed as a result of a new edge becoming live,
   // and any changes to their value should propagate appropriately
   // through the rest of the block.
-  DEBUG(dbgs() << "Would have processed " << rpoBlockNumbers.size() - rpoBlockNumbers[Dest] << " blocks here\n");
-  uint32_t blocksProcessed = 0;
   DomTreeNode *DTN = DT->getNode(Dest);
-  DomTreeNode *PDTN = PDT->getNode(Dest);
-  while (PDTN) {
-    BasicBlock *B = PDTN->getBlock();
-    touchedBlocks[rpoBlockNumbers[B]] = true;
-    blocksProcessed++;
-    PDTN = PDTN->getIDom();
-  }
-
-  DEBUG(dbgs() << "PDT now would have processed " << blocksProcessed << " blocks\n");
-  blocksProcessed = 0;
   //TODO(dannyb): This differs slightly from the published algorithm, verify it
   //The published algorithm touches all instructions, we only touch the phi nodes.
   // This is because there should be no other values that can
@@ -2344,19 +2309,6 @@ void GVN::propagateChangeInEdge(BasicBlock *Dest) {
 	if (!isa<PHINode>(BI))
 	  break;
 	touchedInstructions.insert(BI);
-      }
-      blocksProcessed++;
-    }
-  }
-  DEBUG(dbgs() << "DT now would have processed " << blocksProcessed << " blocks\n");
-  } else {
-    for (unsigned i = rpoBlockNumbers[Dest], e = rpoBlockNumbers.size(); i != e; ++i) {
-      if (!touchedBlocks[i]) {
-	touchedBlocks[i] = true;
-	BasicBlock *B = rpoToBlock[i];
-	for (BasicBlock::iterator BI = B->begin(), BE = B->end();
-	     BI != BE; ++BI)
-	  touchedInstructions.insert(BI);
       }
     }
   }
@@ -3229,7 +3181,6 @@ bool GVN::splitCriticalEdges() {
 /// runOnFunction - This is the main transformation entry point for a function.
 bool GVN::runOnFunction(Function& F) {
   DT = &getAnalysis<DominatorTree>();
-  PDT = &getAnalysis<PostDominatorTree>();
 
   TD = getAnalysisIfAvailable<TargetData>();
   TLI = &getAnalysis<TargetLibraryInfo>();
@@ -3258,44 +3209,23 @@ bool GVN::runOnFunction(Function& F) {
   uint32_t ICount = 0;
 
   nextCongruenceNum = 2;
-  // Initialize our rpo numbers so we can detect backwards edges
-  uint32_t rpoBNumber = 0;
-  uint32_t rpoINumber = 0;
+  // Count number of instructions for sizing of hash tables
   unsigned NumBasicBlocks = F.size();
-  rpoToBlock.resize(NumBasicBlocks + 1);
   DEBUG(dbgs() << "Found " << NumBasicBlocks <<  " basic blocks\n");
-  BasicBlock &EntryBlock = F.getEntryBlock();
-  ReversePostOrderTraversal<Function*> rpoT(&F);
-  for (ReversePostOrderTraversal<Function*>::rpo_iterator RI = rpoT.begin(),
-       RE = rpoT.end(); RI != RE; ++RI)
-    {
-      uint32_t IStart = rpoINumber;
-      rpoBlockNumbers[*RI] = rpoBNumber++;
-      // TODO: Use two worklist method
-       for (BasicBlock::iterator BI = EntryBlock.begin(), BE = EntryBlock.end();
+  for (Function::const_iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI)
+    for (BasicBlock::const_iterator BI = FI->begin(), BE = FI->end();
 	    BI != BE; ++BI)
-	 ++ICount;
+      ++ICount;
 
-      // 	rpoInstructionNumbers[BI] = rpoINumber++;
-      uint32_t IEnd = rpoINumber;
-      // rpoInstructionStartEnd[*RI] = std::make_pair(IStart, IEnd);
-    }
   // Ensure we don't end up resizing the expressionToClass map, as
   // that can be quite expensive. At most, we have one expression per
   // instruction.
-  expressionToClass.resize(ICount);
-  memoryExpressionToClass.resize(ICount * 8);
-  rpoToBlock.resize(rpoBNumber+1);
-  for (Function::iterator BI = F.begin(), BE = F.end(); BI != BE; ++BI)
-    rpoToBlock[rpoBlockNumbers[BI]] = BI;
+  expressionToClass.resize(ICount *2);
+  memoryExpressionToClass.resize(ICount *2);
 
-  touchedBlocks.resize(rpoToBlock.size());
-  for (unsigned i = 0, e = touchedBlocks.size(); i != e; ++i) {
-    touchedBlocks[i] = false;
-  }
 
   // Initialize the touched instructions to include the entry block
-  for (BasicBlock::iterator BI = EntryBlock.begin(), BE = EntryBlock.end();
+  for (BasicBlock::iterator BI = F.getEntryBlock().begin(), BE = F.getEntryBlock().end();
        BI != BE; ++BI)
     touchedInstructions.insert(BI);
   reachableBlocks.insert(&F.getEntryBlock());
@@ -3334,7 +3264,6 @@ bool GVN::runOnFunction(Function& F) {
 
 
   while (!touchedInstructions.empty()) {
-    //TODO:We should just sort the damn touchedinstructions and touchedblocks into RPO order after every iteration
     //TODO: or Use two worklist method to keep ordering straight
     //TODO: or Investigate RPO numbering both blocks and instructions in the same pass,
     //  and walknig both lists at the same time, processing whichever has the next number in order.
@@ -3581,14 +3510,9 @@ bool GVN::runOnFunction(Function& F) {
   memoryExpressionToClass.clear();
   expressionToDelete.clear();
   uniquedExpressions.clear();
-  rpoBlockNumbers.clear();
-  rpoInstructionNumbers.clear();
-  rpoInstructionStartEnd.clear();
-  rpoToBlock.clear();
   reachableBlocks.clear();
   reachableEdges.clear();
   touchedInstructions.clear();
-  touchedBlocks.clear();
   processedCount.clear();
   expressionAllocator.Reset();
   leaderTable.clear();

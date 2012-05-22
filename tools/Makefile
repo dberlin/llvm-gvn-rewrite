@@ -16,7 +16,7 @@ include $(LEVEL)/Makefile.config
 ifneq ($(CLANG_SRC_ROOT),)
   OPTIONAL_PARALLEL_DIRS := $(CLANG_SRC_ROOT)
 else
-#  OPTIONAL_PARALLEL_DIRS := clang
+  OPTIONAL_PARALLEL_DIRS := clang
 endif
 
 # Build LLDB if present. Note LLDB must be built last as it depends on the
