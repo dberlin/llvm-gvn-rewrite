@@ -618,7 +618,7 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
       return true;
     }
     // Return true if this is equivalent to the other expression, including memory dependencies
-    virtual bool depequals(const Expression &other) const {
+    virtual bool depequals(const Expression &other) {
       return true;
     }
 
@@ -736,7 +736,7 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 	return false;
       return true;
     }
-    virtual bool depequals (const Expression &other) const {
+    virtual bool depequals (const Expression &other) {
       const CallExpression &OE = cast<CallExpression>(other);
       // Given the same arguments, two calls are equal if the dependency checker says one is dependent
       // on the other
@@ -750,9 +750,11 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 	  if (local_cdep != OE.callinst_)
 	    return false;
 	} else {
+	  // True if all of the dependencies are either transparent or loads
+	  bool allTransparent = true;
 	  // Non-local case.
 	  const MemoryDependenceAnalysis::NonLocalDepInfo &deps =
-	    MD->getNonLocalCallDependency(CallSite(callinst_));
+	    MD->getNonLocalCallDependency(callinst_);
 	  CallInst* cdep = 0;
 	  CongruenceClass *cclass = valueToClass[OE.callinst_];
 	  assert(cclass != NULL && "Somehow got a call instruction without a congruence class into the expressionToClass mapping");
@@ -762,11 +764,15 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 	  // congruence class as the other call instruction
 	  for (unsigned i = 0, e = deps.size(); i != e; ++i) {
 	    const NonLocalDepEntry *I = &deps[i];
+	    
 	    if (I->getResult().isNonLocal())
 	      continue;
 
-	    // We don't handle non-definitions.  If we already have a
-	    // call, reject instruction dependencies.
+	    // Ignore clobbers by loads, since they have no impact on the call itself.
+	    if (I->getResult().isClobber() && isa<LoadInst>(I->getResult().getInst()))
+	      continue;
+	      
+	    allTransparent = false;
 	    if (!I->getResult().isDef() || cdep != 0) {
 	      cdep = 0;
 	      break;
@@ -792,7 +798,7 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 	    cdep = 0;
 	    break;
 	  }
-	  if (!cdep)
+	  if (!cdep && !allTransparent)
 	    return false;
 	}
       }
@@ -825,6 +831,7 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
     void operator=(const MemoryExpression&); // Do not implement
     MemoryExpression(const MemoryExpression&); // Do not implement
   protected:
+    bool nonLocal_;
     bool isStore_;
     union {
       Instruction *inst;
@@ -834,6 +841,11 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 
   public:
 
+    // True if this memory expression had non local dependencies
+    bool hadNonLocal() const {
+      return nonLocal_;
+    }
+    
     bool isStore() const {
       return isStore_;
     }
@@ -856,12 +868,14 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
     MemoryExpression(LoadInst *L) {
       etype_ = ExpressionTypeMemory;
       isStore_ = false;
+      nonLocal_ = false;
       inst_.loadinst = L;
     };
 
     MemoryExpression(StoreInst *S) {
       etype_ = ExpressionTypeMemory;
       isStore_ = true;
+      nonLocal_ = false;
       inst_.storeinst = S;
     };
 
@@ -956,7 +970,17 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 	      }
 	    }
 	  }
+	  // If the clobbering value is a memset/memcpy/memmove, see if we can forward
+	  // a value on from it.
+	  if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Dep.getInst())) {
+	    int Offset = AnalyzeLoadFromClobberingMemInst(LI->getType(),
+							  LI->getPointerOperand(),
+							  DepMI, *TD);
+	    if (Offset != -1)
+	      return false;
+	  }
 	}
+	
 	// DepInfo.isDef() here
 	Instruction *DepInst = DepInfo.getInst();
 
@@ -1000,7 +1024,7 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
       return true;
     }
 
-    virtual bool depequals(const Expression &other) const {
+    virtual bool depequals(const Expression &other) {
       const MemoryExpression &OE = cast<MemoryExpression>(other);
       if (!isStore_) {
 	LoadInst *LI = inst_.loadinst;
@@ -1009,11 +1033,14 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 	if (LI != OI) {
 	  MemDepResult Dep = MD->getDependency(LI);
 	  if (Dep.isNonLocal()) {
+	    nonLocal_ = true;
 	    return 0;
 	    return nonLocalEquals(LI, Dep, OE);
 	  }
+	  // If we weren't dependent on the other load, they aren't equal.
 	  if (Dep.getInst() != OI)
 	    return false;
+	  // If we are dependent, but it's not a straight def, see if they can be made equal.
 	  if (Dep.isClobber() && TD) {
 	    if (StoreInst *DepSI = dyn_cast<StoreInst>(Dep.getInst())) {
 	      int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
@@ -1035,9 +1062,19 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 		return false;
 	      return true;
 	    }
-	    // TODO: MemIntrinsic case
+	    // If the clobbering value is a memset/memcpy/memmove, see if we can forward
+	    // a value on from it.
+	    if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Dep.getInst())) {
+	      int Offset = AnalyzeLoadFromClobberingMemInst(LI->getType(),
+							    LI->getPointerOperand(),
+							    DepMI, *TD);
+	      if (Offset == -1)
+		return false;
+	      return true; 
+	    }
 	    return false;
 	  }
+	  // If the load is def'd, just make sure we can coerce types.
 	  if (!Dep.isDef()) {
 	    return false;
 	  }
@@ -1063,7 +1100,7 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 		return false;
 	    }
 	    return true;
-	  }
+	  }	    
 	  //TODO: memintrisic case
 	  return false;
 	}
@@ -1338,7 +1375,7 @@ typedef RecyclingAllocator<BumpPtrAllocator,
 
 
       }
-      static bool isEqual(const Expression *LHS, const Expression *RHS) {
+      static bool isEqual(Expression *LHS, const Expression *RHS) {
         if (LHS == RHS)
           return true;
         if (LHS == getTombstoneKey() || RHS == getTombstoneKey()
@@ -3232,9 +3269,11 @@ bool GVN::runOnFunction(Function& F) {
   // and eliminate the ones dominated by the last member.
   // When we find something not dominated, it becomes the new leader
   // for elimination purposes
+  DenseSet<Value*> lookedAtMembers;
  for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
    CongruenceClass *CC = congruenceClass[i];
    if (CC != InitialClass && !CC->dead) {
+     
      int lastdfs_in = 0;
      int lastdfs_out = 0;
      Value *lastval = NULL;
@@ -3247,35 +3286,82 @@ bool GVN::runOnFunction(Function& F) {
 	   ++CI;
 	   
 	   if (member != CC->leader) {
+	     //TODO: eliminate duplicate bitcasts but not valid bitcast
 	     if (isa<StoreInst>(member) || isa<BitCastInst>(member))
 	       continue;
 	     DEBUG(dbgs() << "Found replacement " << *(CC->leader) << " for " << *member << "\n");
-	     ReplaceInstruction(cast<Instruction>(CI->second), CC->leader, CC);
+	     ReplaceInstruction(cast<Instruction>(member), CC->leader, CC);
 	   }
 	 }
        } else {
-	 for (std::set<std::pair<std::pair<int, int>, Value*> >::const_iterator CI = CC->members.begin(), CE = CC->members.end(); CI != CE;) {
-	   int currdfs_in = CI->first.first;
-	   int currdfs_out = CI->first.second;
-	   Value *member = CI->second;
-	   ++CI;
-	   
-	   if (isa<StoreInst>(member) || isa<BitCastInst>(member))
-	     continue;
-	   DEBUG(dbgs() << "Last DFS numbers are (" << lastdfs_in << "," << lastdfs_out << ")\n");
-	   DEBUG(dbgs() << "Current DFS numbers are (" << currdfs_in << "," << currdfs_out <<")\n");
-	   // Walk along, processing members who are dominated by each other.
-	   if (lastval == NULL || !(currdfs_in >= lastdfs_in && currdfs_out <= lastdfs_out)) {
-	     lastval = member;
-	     lastdfs_in = currdfs_in;
-	     lastdfs_out = currdfs_out;
-	   } else {
-	     DEBUG(dbgs() << "Found replacement " << *lastval << " for " << *member << "\n");
-	     ReplaceInstruction(cast<Instruction>(member), lastval, CC);
+	 if (CC->members.size() == 1) {
+	   MemoryExpression *ME;
+	   if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
+	     if (ME->hadNonLocal()) {
+	       Value *member = CC->members.begin()->second;
+	       if (LoadInst *LI = dyn_cast<LoadInst>(member)){
+		 processNonLocalLoad(LI);
+	       }
+	     }
 	   }
-	 } 
+	 } else {
+	   for (std::set<std::pair<std::pair<int, int>, Value*> >::const_iterator CI = CC->members.begin(), CE = CC->members.end(); CI != CE;) {
+	     int currdfs_in = CI->first.first;
+	     int currdfs_out = CI->first.second;
+	     Value *member = CI->second;
+	     ++CI;
+	     
+	     //TODO: eliminate duplicate bitcasts but not valid bitcast
+	     if (isa<StoreInst>(member) || isa<BitCastInst>(member))
+	       continue;
+	     assert(!lookedAtMembers.count(member) && "Member is in two congruence classes?");
+	     lookedAtMembers.insert(member);
+	     
+	     DEBUG(dbgs() << "Last DFS numbers are (" << lastdfs_in << "," << lastdfs_out << ")\n");
+	     DEBUG(dbgs() << "Current DFS numbers are (" << currdfs_in << "," << currdfs_out <<")\n");
+	     // Walk along, processing members who are dominated by each other.
+	     if (lastval == NULL || !(currdfs_in >= lastdfs_in && currdfs_out <= lastdfs_out)) {
+	       lastval = member;
+	       lastdfs_in = currdfs_in;
+	       lastdfs_out = currdfs_out;
+	     } else {
+	       Value *Result = lastval;
+	       DEBUG(dbgs() << "Found replacement " << *lastval << " for " << *member << "\n");
+	       LoadInst *LI;
+	       if (Result->getType() != member->getType() && (LI = dyn_cast<LoadInst>(member))) {
+		 if (LoadInst *LIR = dyn_cast<LoadInst>(Result)) {
+		   int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
+							      LI->getPointerOperand(),
+							      LIR,
+							      *TD);
+		   assert(Offset != -1 && "Should have been able to coerce load");
+		   
+		   Result = GetLoadValueForLoad(LIR, Offset, LI->getType(), LI, *TD);
+		   
+		 } else if (StoreInst *SIR = dyn_cast<StoreInst>(Result)) {
+		   int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
+							       LI->getPointerOperand(),
+							       SIR, *TD);
+		   assert(Offset != -1 && "Should have been able to coerce store");
+		   Result = GetStoreValueForLoad(SIR->getValueOperand(), Offset, LI->getType(), LI, *TD);
+		 }
+	       }
+	       ReplaceInstruction(cast<Instruction>(member), Result, CC);
+	     }
+	   }
+	 }
        }
      }
+   }
+ }
+ lookedAtMembers.clear();
+ 
+ for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI){
+   BasicBlock *BB = FI;
+   if (!reachableBlocks.count(BB)) {
+     DEBUG(dbgs() << "We believe block " << getBlockName(BB) << " is unreachable\n");
+     DeleteInstructionInBlock(BB);
+     Changed = true;
    }
  }
  
