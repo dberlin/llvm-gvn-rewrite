@@ -1947,7 +1947,7 @@ unsigned GVN::replaceAllDominatedUsesWith(Value *From, Value *To,
     if (DT->dominates(Root, UsingBlock)) {
       if (Instruction *I = dyn_cast<Instruction>(U.getUser()))
 	touchedInstructions.insert(I);
-      DEBUG(dbgs() << "Equality propagation replacing " << *From << " with " << *To << " in " << U.getUser() << "\n");
+      DEBUG(dbgs() << "Equality propagation replacing " << *From << " with " << *To << " in " << *(U.getUser()) << "\n");
       U.set(To);
       ++Count;
     }
