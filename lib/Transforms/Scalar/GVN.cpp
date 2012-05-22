@@ -56,6 +56,7 @@
 
 #include <algorithm>
 #include <list>
+#include <set>
 
 using namespace llvm;
 using namespace PatternMatch;
@@ -91,6 +92,18 @@ MaxRecurseDepth("max-recurse-depth", cl::Hidden, cl::init(1000), cl::ZeroOrMore,
 /// as an efficient mechanism to determine the expression-wise equivalence of
 /// two values.
 namespace {
+  DenseSet<Instruction*> instrsToErase_;
+  static void markInstructionForDeletion(Instruction *I) {
+    instrsToErase_.insert(I);
+  }
+
+  static void UpdateMemDepInfo(MemoryDependenceAnalysis *MD, Instruction *I, Value *V) {
+    if (MD && V && V->getType()->isPointerTy())
+      MD->invalidateCachedPointerInfo(V);
+    if (MD && I && !I->isTerminator())
+      MD->removeInstruction(I);
+  }
+
   struct CongruenceClass;
   MemoryDependenceAnalysis *MD;
   const TargetData *TD;
@@ -465,7 +478,8 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     // tracks.  It is potentially possible to remove the load from the table,
     // but then there all of the operations based on it would need to be
     // rehashed.  Just leave the dead load around.
-    MD->removeInstruction(SrcVal);
+    // FIXME: This is no longer a problem
+    UpdateMemDepInfo(MD, SrcVal, NULL);
     SrcVal = NewLoad;
   }
 
@@ -538,7 +552,7 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
     uint32_t id;
     Value* leader;
     Expression* expression;
-    DenseSet<Value*> members;
+    std::set<std::pair<std::pair<int, int>, Value*> > members;
     bool dead;
     CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0), dead(false) {};
 
@@ -1388,7 +1402,7 @@ typedef RecyclingAllocator<BumpPtrAllocator,
     Expression *performSymbolicCallEvaluation(Instruction*, BasicBlock*);
     Expression *performSymbolicPHIEvaluation(Instruction*, BasicBlock*);
     // Congruence findin
-    void performCongruenceFinding(Value*, Expression*);
+    void performCongruenceFinding(Value*, Expression*, DomTreeNode*);
     // Predicate and reachability handling
     void updateReachableEdge(BasicBlock*, BasicBlock*);
     void processOutgoingEdges(TerminatorInst* TI);
@@ -1617,12 +1631,12 @@ Expression *GVN::createExpression(Instruction *I) {
       delete E;
       return createConstantExpression(C);
     }
-  } else if (isa<GetElementPtrInst>(I)) {
+  } else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
     //TODO: Since we noop bitcasts, we may need to check types before
     //simplifying, so that we don't end up simplifying based on a
     //wrong type assumption. We should clean this up so we can use
     //constants of the wrong type.
-    if (E->varargs[0]->getType() == E->varargs[1]->getType()) {
+    if (GEP->getPointerOperandType() == E->varargs[0]->getType() ) {
       Value *V = SimplifyGEPInst(E->varargs, TD, TLI, DT);
       Constant *C;
       if (V && (C = dyn_cast<Constant>(V))) {
@@ -1872,7 +1886,7 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
 }
 
 /// performCongruenceFinding - Perform congruence finding on a given value numbering expression
-void GVN::performCongruenceFinding(Value *V, Expression *E) {
+void GVN::performCongruenceFinding(Value *V, Expression *E, DomTreeNode *DTN) {
   // This is guaranteed to return something, since it will at least find INITIAL
   CongruenceClass *VClass = valueToClass[V];
   //TODO(dannyb): Double check algorithm where we are ignoring copy check of "if e is a variable"
@@ -1938,9 +1952,11 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
       changedValues.erase(DI);
     if (VClass != EClass) {
       DEBUG(dbgs() << "New congruence class for " << V << " is " << EClass->id << "\n");
-      VClass->members.erase(V);
-      assert(std::find(EClass->members.begin(), EClass->members.end(), V) == EClass->members.end() && "Tried to add something to members twice!");
-      EClass->members.insert(V);
+      int dfs_in = DTN->getDFSNumIn();
+      int dfs_out = DTN->getDFSNumOut();
+      VClass->members.erase(std::make_pair(std::make_pair(dfs_in, dfs_out), V));
+      // assert(std::find(EClass->members.begin(), EClass->members.end(), V) == EClass->members.end() && "Tried to add something to members twice!");
+      EClass->members.insert(std::make_pair(std::make_pair(dfs_in, dfs_out), V));
       valueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
       if (VClass->members.empty() && VClass != InitialClass) {
@@ -1951,13 +1967,13 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
 	}
 	// delete VClass;
       } else if (VClass->leader == V) {
-	VClass->leader = *(VClass->members.begin());
-	for (DenseSet<Value*>::iterator LI = VClass->members.begin(),
+	VClass->leader = VClass->members.begin()->second;
+	for (std::set<std::pair<std::pair<int, int>, Value* > >::iterator LI = VClass->members.begin(),
 	       LE = VClass->members.end();
 	     LI != LE; ++LI) {
-	  if (Instruction *I = dyn_cast<Instruction>(*LI))
+	  if (Instruction *I = dyn_cast<Instruction>(LI->second))
 	    touchedInstructions.insert(I);
-	  changedValues.insert(*LI);
+	  changedValues.insert(LI->second);
 	}
       }
     }
@@ -2166,6 +2182,7 @@ void GVN::ProcessTerminatorInst(TerminatorInst *TI){
 }
 
 void GVN::ReplaceInstruction(Instruction *I, Value *V, CongruenceClass *ReplClass) {
+  assert (ReplClass->leader != I && "About to accidentally remove our leader");
   if (V->getType() != I->getType()) {
     Instruction *insertPlace = I;
     if (isa<PHINode>(I))
@@ -2177,13 +2194,15 @@ void GVN::ReplaceInstruction(Instruction *I, Value *V, CongruenceClass *ReplClas
   I->replaceAllUsesWith(V);
   // Remove the old instruction from the class member list, so the
   // member size is correct for PRE.
-  ReplClass->members.erase(I);
+  DomTreeNode *DTN = DT->getNode(I->getParent());
+  int dfs_in = DTN->getDFSNumIn();
+  int dfs_out = DTN->getDFSNumOut();
+  
+  ReplClass->members.erase(std::make_pair(std::make_pair(dfs_in, dfs_out), I));
   // We save the actual erasing to avoid invalidating memory
   // dependencies until we are done with everything.
-  if (MD)
-    MD->removeInstruction(I);
-  I->eraseFromParent();
-
+  UpdateMemDepInfo(MD, I, V);
+  markInstructionForDeletion(I);
 }
 
 bool GVN::ProcessBlock(BasicBlock *BB) {
@@ -2209,12 +2228,6 @@ bool GVN::ProcessBlock(BasicBlock *BB) {
 
     bool isLoad = isa<LoadInst>(I);
 
-    if (I->use_empty()) {
-      if (MD)
-	MD->removeInstruction(I);
-      I->eraseFromParent();
-      continue;
-    }
 
     CongruenceClass *IClass = valueToClass[I];
     // We may not find a congruence class if it is, for example, a
@@ -2700,9 +2713,8 @@ bool GVN::processNonLocalLoad(LoadInst *LI) {
 
     if (isa<PHINode>(V))
       V->takeName(LI);
-    if (V->getType()->isPointerTy())
-      MD->invalidateCachedPointerInfo(V);
-    LI->eraseFromParent();
+    UpdateMemDepInfo(MD, LI, V);
+    markInstructionForDeletion(LI);
     ++NumGVNLoad;
     return true;
   }
@@ -2881,8 +2893,8 @@ bool GVN::processNonLocalLoad(LoadInst *LI) {
   if (!CanDoPRE) {
     while (!NewInsts.empty()) {
       Instruction *I = NewInsts.pop_back_val();
-      if (MD) MD->removeInstruction(I);
-      I->eraseFromParent();
+      UpdateMemDepInfo(MD, I, NULL);
+      markInstructionForDeletion(I);
     }
     return false;
   }
@@ -2932,9 +2944,8 @@ bool GVN::processNonLocalLoad(LoadInst *LI) {
   LI->replaceAllUsesWith(V);
   if (isa<PHINode>(V))
     V->takeName(LI);
-  if (V->getType()->isPointerTy())
-    MD->invalidateCachedPointerInfo(V);
-  LI->eraseFromParent();
+  UpdateMemDepInfo(MD, LI, V);
+  markInstructionForDeletion(LI);
   ++NumPRELoad;
   return true;
 }
@@ -2982,6 +2993,12 @@ bool GVN::splitCriticalEdges() {
 
 /// runOnFunction - This is the main transformation entry point for a function.
 bool GVN::runOnFunction(Function& F) {
+  DT = &getAnalysis<DominatorTree>();
+  PDT = &getAnalysis<PostDominatorTree>();
+
+  TD = getAnalysisIfAvailable<TargetData>();
+  TLI = &getAnalysis<TargetLibraryInfo>();
+
   // Split all critical edges to ensure maximal removal
   splitCriticalEdges();
 
@@ -3049,16 +3066,23 @@ bool GVN::runOnFunction(Function& F) {
   reachableBlocks.insert(&F.getEntryBlock());
 
   // Init the INITIAL class
-  DenseSet<Value*> InitialValues;
+  std::set<std::pair<std::pair<int, int>, Value* > > InitialValues;
   for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI)  {
+    DomTreeNode *DTN = DT->getNode(FI);
+    // In the unreachable block case, just ignore things
+    if (!DTN)
+      continue;
+    
+    int dfs_in = DTN->getDFSNumIn();
+    int dfs_out = DTN->getDFSNumOut();
     for (BasicBlock::iterator BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
-      InitialValues.insert(BI);
+      InitialValues.insert(std::make_pair(std::make_pair(dfs_in, dfs_out), BI));
     }
   }
   InitialClass = new CongruenceClass();
-  for (DenseSet<Value*>::iterator LI = InitialValues.begin(), LE = InitialValues.end();
+  for (std::set<std::pair<std::pair<int, int>, Value* > >::iterator LI = InitialValues.begin(), LE = InitialValues.end();
        LI != LE; ++LI)
-    valueToClass[*LI] = InitialClass;
+    valueToClass[LI->second] = InitialClass;
   InitialClass->members.swap(InitialValues);
   congruenceClass.push_back(InitialClass);
   if (!noLoads)
@@ -3073,11 +3097,6 @@ bool GVN::runOnFunction(Function& F) {
     }
 
 
-  DT = &getAnalysis<DominatorTree>();
-  PDT = &getAnalysis<PostDominatorTree>();
-
-  TD = getAnalysisIfAvailable<TargetData>();
-  TLI = &getAnalysis<TargetLibraryInfo>();
 
   while (!touchedInstructions.empty()) {
     //TODO:We should just sort the damn touchedinstructions and touchedblocks into RPO order after every iteration
@@ -3090,6 +3109,7 @@ bool GVN::runOnFunction(Function& F) {
       //TODO(Predication)
       bool blockReachable = reachableBlocks.count(*RI);
       bool movedForward = false;
+      DomTreeNode *DTN = DT->getNode(*RI);
       for (BasicBlock::iterator BI = (*RI)->begin(), BE = (*RI)->end(); BI != BE; !movedForward ? BI++ : BI) {
 	movedForward = false;
         DenseSet<Instruction*>::iterator DI = touchedInstructions.find(BI);
@@ -3122,14 +3142,19 @@ bool GVN::runOnFunction(Function& F) {
 	    }
 
 	    I->replaceAllUsesWith(V);
-	    if (MD && V->getType()->isPointerTy())
-	      MD->invalidateCachedPointerInfo(V);
 	    DEBUG(dbgs() << "GVN removed: " << *I << '\n');
-	    if (MD) MD->removeInstruction(I);
-	    I->eraseFromParent();
+	    UpdateMemDepInfo(MD, I, V);
+	    markInstructionForDeletion(I);
 	    ++NumGVNSimpl;
 	    continue;
 	  }
+
+	  // if (I->use_empty()) {
+	  //   UpdateMemDepInfo(MD, I, NULL);
+	  //   markInstructionForDeletion(I);
+	  //   continue;
+	  // }
+
 	  if (processedCount.count(I) == 0) {
 	    processedCount.insert(std::make_pair(I, 1));
 	  } else {
@@ -3139,7 +3164,7 @@ bool GVN::runOnFunction(Function& F) {
 
           if (!I->isTerminator()) {
 	    Expression *Symbolized = performSymbolicEvaluation(I, *RI);
-            performCongruenceFinding(I, Symbolized);
+            performCongruenceFinding(I, Symbolized, DTN);
           } else {
             processOutgoingEdges(dyn_cast<TerminatorInst>(I));
           }
@@ -3164,7 +3189,7 @@ bool GVN::runOnFunction(Function& F) {
       Worklist.push_back(Child);
     }
   } while (!Worklist.empty());
-
+#if 0
  for (unsigned i = 0, e = Scopes.size(); i != e; ++i) {
     DomTreeNode *Node = Scopes[i];
     BasicBlock *BB = Node->getBlock();
@@ -3183,7 +3208,79 @@ bool GVN::runOnFunction(Function& F) {
   }
 
   //TODO: Perform PRE.
+  for (DenseSet<Instruction*>::iterator DI = instrsToErase_.begin(), DE = instrsToErase_.end(); DI != DE;) {
+    Instruction *toErase = *DI;
+    ++DI;
+    // if (!toErase->use_empty()) {
+    //   for (Value::use_iterator UI = toErase->use_begin(), UE = toErase->use_end();
+    // 	 UI != UE; ++UI) {
+    // 	assert (instrsToErase_.count(cast<Instruction>(*UI)) && "trying to removing something without also deleting it's uses");
+    //   }
+    // }
+    
+    // toErase->eraseFromParent();
+  }
+#else
 
+  // This is a mildly crazy eliminator. The normal way to eliminate is
+  // to walk the dominator tree in order, keeping track of available
+  // values, and eliminating them.  However, we keep track of the
+  // dominator tree dfs numbers in each value, and by keeping the set
+  // sorted in dfs number order, we don't need to walk anything to
+  // eliminate
+  // Instead, we walk the congruence class members in order,
+  // and eliminate the ones dominated by the last member.
+  // When we find something not dominated, it becomes the new leader
+  // for elimination purposes
+ for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
+   CongruenceClass *CC = congruenceClass[i];
+   if (CC != InitialClass && !CC->dead) {
+     int lastdfs_in = 0;
+     int lastdfs_out = 0;
+     Value *lastval = NULL;
+     if (0 && CC->members.size() == 1)
+       continue;
+     if (CC->expression && CC->leader) {
+       if (isa<Constant>(CC->leader) || isa<Argument>(CC->leader)) {
+	 for (std::set<std::pair<std::pair<int, int>, Value*> >::const_iterator CI = CC->members.begin(), CE = CC->members.end(); CI != CE; ) {
+	   Value *member = CI->second;
+	   ++CI;
+	   
+	   if (member != CC->leader) {
+	     if (isa<StoreInst>(member) || isa<BitCastInst>(member))
+	       continue;
+	     DEBUG(dbgs() << "Found replacement " << *(CC->leader) << " for " << *member << "\n");
+	     ReplaceInstruction(cast<Instruction>(CI->second), CC->leader, CC);
+	   }
+	 }
+       } else {
+	 for (std::set<std::pair<std::pair<int, int>, Value*> >::const_iterator CI = CC->members.begin(), CE = CC->members.end(); CI != CE;) {
+	   int currdfs_in = CI->first.first;
+	   int currdfs_out = CI->first.second;
+	   Value *member = CI->second;
+	   ++CI;
+	   
+	   if (isa<StoreInst>(member) || isa<BitCastInst>(member))
+	     continue;
+	   DEBUG(dbgs() << "Last DFS numbers are (" << lastdfs_in << "," << lastdfs_out << ")\n");
+	   DEBUG(dbgs() << "Current DFS numbers are (" << currdfs_in << "," << currdfs_out <<")\n");
+	   // Walk along, processing members who are dominated by each other.
+	   if (lastval == NULL || !(currdfs_in >= lastdfs_in && currdfs_out <= lastdfs_out)) {
+	     lastval = member;
+	     lastdfs_in = currdfs_in;
+	     lastdfs_out = currdfs_out;
+	   } else {
+	     DEBUG(dbgs() << "Found replacement " << *lastval << " for " << *member << "\n");
+	     ReplaceInstruction(cast<Instruction>(member), lastval, CC);
+	   }
+	 } 
+       }
+     }
+   }
+ }
+ 
+       
+#endif
  ScopeMap.clear();
  Scopes.clear();
  valueToClass.clear();
@@ -3192,14 +3289,10 @@ bool GVN::runOnFunction(Function& F) {
    congruenceClass[i] = NULL;
  }
 
-  std::vector<Expression*> toDelete;
-  for (DenseSet<Expression*>::iterator I = expressionToDelete.begin(), E = expressionToDelete.end(); I != E; ++I) {
-    toDelete.push_back(*I);
-  }
-
-  for (unsigned i = 0, e = toDelete.size(); i != e; ++i) {
-    delete toDelete[i];
-    toDelete[i] = NULL;
+  for (DenseSet<Expression*>::iterator DI = expressionToDelete.begin(), DE = expressionToDelete.end(); DI != DE;) {
+    Expression *toErase = *DI;
+    ++DI;
+    delete toErase;
   }
 
   congruenceClass.clear();
@@ -3219,5 +3312,6 @@ bool GVN::runOnFunction(Function& F) {
   expressionAllocator.Reset();
   leaderTable.clear();
   tableAllocator.Reset();
+  instrsToErase_.clear();
   return Changed;
 }
