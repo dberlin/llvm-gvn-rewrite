@@ -369,7 +369,8 @@ namespace llvm {
     /// This method assumes the pointer has a "NonLocal" dependency within BB.
     void getNonLocalPointerDependency(const AliasAnalysis::Location &Loc,
                                       bool isLoad, BasicBlock *BB,
-                                    SmallVectorImpl<NonLocalDepResult> &Result);
+				      SmallVectorImpl<NonLocalDepResult> &Result,
+				      BasicBlock *StopBB = NULL);
 
     /// removeInstruction - Remove an instruction from the dependence analysis,
     /// updating the dependence of instructions that previously depended on it.
@@ -423,7 +424,8 @@ namespace llvm {
                                      bool isLoad, BasicBlock *BB,
                                      SmallVectorImpl<NonLocalDepResult> &Result,
                                      DenseMap<BasicBlock*, Value*> &Visited,
-                                     bool SkipFirstBlock = false);
+                                     bool SkipFirstBlock = false,
+				     BasicBlock *StopBB = NULL);
     MemDepResult GetNonLocalInfoForBlock(const AliasAnalysis::Location &Loc,
                                          bool isLoad, BasicBlock *BB,
                                          NonLocalDepInfo *Cache,

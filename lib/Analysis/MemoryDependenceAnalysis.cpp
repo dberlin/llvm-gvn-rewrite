@@ -737,7 +737,8 @@ MemoryDependenceAnalysis::getNonLocalCallDependency(CallSite QueryCS) {
 void MemoryDependenceAnalysis::
 getNonLocalPointerDependency(const AliasAnalysis::Location &Loc, bool isLoad,
                              BasicBlock *FromBB,
-                             SmallVectorImpl<NonLocalDepResult> &Result) {
+                             SmallVectorImpl<NonLocalDepResult> &Result,
+			     BasicBlock *StopBB) {
   assert(Loc.Ptr->getType()->isPointerTy() &&
          "Can't get pointer deps of a non-pointer!");
   Result.clear();
@@ -750,7 +751,7 @@ getNonLocalPointerDependency(const AliasAnalysis::Location &Loc, bool isLoad,
   // translation.
   DenseMap<BasicBlock*, Value*> Visited;
   if (!getNonLocalPointerDepFromBB(Address, Loc, isLoad, FromBB,
-                                   Result, Visited, true))
+                                   Result, Visited, true, StopBB))
     return;
   Result.clear();
   Result.push_back(NonLocalDepResult(FromBB,
@@ -882,7 +883,8 @@ getNonLocalPointerDepFromBB(const PHITransAddr &Pointer,
                             bool isLoad, BasicBlock *StartBB,
                             SmallVectorImpl<NonLocalDepResult> &Result,
                             DenseMap<BasicBlock*, Value*> &Visited,
-                            bool SkipFirstBlock) {
+                            bool SkipFirstBlock,
+			    BasicBlock *StopBlock) {
   
   // Look up the cached info for Pointer.
   ValueIsLoadPair CacheKey(Pointer.getAddr(), isLoad);
@@ -1022,7 +1024,10 @@ getNonLocalPointerDepFromBB(const PHITransAddr &Pointer,
         continue;
       }
     }
-    
+    if (BB == StopBlock) {
+      SkipFirstBlock = false;
+      continue;
+    }
     // If 'Pointer' is an instruction defined in this block, then we need to do
     // phi translation to change it into a value live in the predecessor block.
     // If not, we just add the predecessors to the worklist and scan them with
@@ -1030,6 +1035,7 @@ getNonLocalPointerDepFromBB(const PHITransAddr &Pointer,
     if (!Pointer.NeedsPHITranslationFromBlock(BB)) {
       SkipFirstBlock = false;
       SmallVector<BasicBlock*, 16> NewBlocks;
+
       for (BasicBlock **PI = PredCache->GetPreds(BB); *PI; ++PI) {
         // Verify that we haven't looked at this block yet.
         std::pair<DenseMap<BasicBlock*,Value*>::iterator, bool>
