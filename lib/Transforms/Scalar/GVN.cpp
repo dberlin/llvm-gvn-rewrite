@@ -91,6 +91,10 @@ MaxRecurseDepth("max-recurse-depth", cl::Hidden, cl::init(1000), cl::ZeroOrMore,
 /// as an efficient mechanism to determine the expression-wise equivalence of
 /// two values.
 namespace {
+ typedef DenseMap<std::pair<std::pair<Value*, Value*>, BasicBlock*>, bool> DepBBQueryMap;
+  DepBBQueryMap depQueryCache;
+  typedef DenseMap<std::pair<Value*, Value*>, bool> DepIQueryMap;
+  DepIQueryMap depIQueryCache;
 
   static void UpdateMemDepInfo(MemoryDependenceAnalysis *MD, Instruction *I, Value *V) {
     if (MD && V && V->getType()->isPointerTy())
@@ -127,89 +131,6 @@ static bool CanCoerceMustAliasedValueToLoad(Value *StoredVal,
   return true;
 }
 
-/// CoerceAvailableValueToLoadType - If we saw a store of a value to memory, and
-/// then a load from a must-aliased pointer of a different type, try to coerce
-/// the stored value.  LoadedTy is the type of the load we want to replace and
-/// InsertPt is the place to insert new instructions.
-///
-/// If we can't do it, return null.
-static Value *CoerceAvailableValueToLoadType(Value *StoredVal,
-                                             Type *LoadedTy,
-                                             Instruction *InsertPt,
-                                             const TargetData &TD) {
-  if (!CanCoerceMustAliasedValueToLoad(StoredVal, LoadedTy, TD))
-    return 0;
-
-  // If this is already the right type, just return it.
-  Type *StoredValTy = StoredVal->getType();
-
-  uint64_t StoreSize = TD.getTypeSizeInBits(StoredValTy);
-  uint64_t LoadSize = TD.getTypeSizeInBits(LoadedTy);
-
-  // If the store and reload are the same size, we can always reuse it.
-  if (StoreSize == LoadSize) {
-    // Pointer to Pointer -> use bitcast.
-    if (StoredValTy->isPointerTy() && LoadedTy->isPointerTy())
-      return new BitCastInst(StoredVal, LoadedTy, "", InsertPt);
-
-    // Convert source pointers to integers, which can be bitcast.
-    if (StoredValTy->isPointerTy()) {
-      StoredValTy = TD.getIntPtrType(StoredValTy->getContext());
-      StoredVal = new PtrToIntInst(StoredVal, StoredValTy, "", InsertPt);
-    }
-
-    Type *TypeToCastTo = LoadedTy;
-    if (TypeToCastTo->isPointerTy())
-      TypeToCastTo = TD.getIntPtrType(StoredValTy->getContext());
-
-    if (StoredValTy != TypeToCastTo)
-      StoredVal = new BitCastInst(StoredVal, TypeToCastTo, "", InsertPt);
-
-    // Cast to pointer if the load needs a pointer type.
-    if (LoadedTy->isPointerTy())
-      StoredVal = new IntToPtrInst(StoredVal, LoadedTy, "", InsertPt);
-
-    return StoredVal;
-  }
-
-  // If the loaded value is smaller than the available value, then we can
-  // extract out a piece from it.  If the available value is too small, then we
-  // can't do anything.
-  assert(StoreSize >= LoadSize && "CanCoerceMustAliasedValueToLoad fail");
-
-  // Convert source pointers to integers, which can be manipulated.
-  if (StoredValTy->isPointerTy()) {
-    StoredValTy = TD.getIntPtrType(StoredValTy->getContext());
-    StoredVal = new PtrToIntInst(StoredVal, StoredValTy, "", InsertPt);
-  }
-
-  // Convert vectors and fp to integer, which can be manipulated.
-  if (!StoredValTy->isIntegerTy()) {
-    StoredValTy = IntegerType::get(StoredValTy->getContext(), StoreSize);
-    StoredVal = new BitCastInst(StoredVal, StoredValTy, "", InsertPt);
-  }
-
-  // If this is a big-endian system, we need to shift the value down to the low
-  // bits so that a truncate will work.
-  if (TD.isBigEndian()) {
-    Constant *Val = ConstantInt::get(StoredVal->getType(), StoreSize-LoadSize);
-    StoredVal = BinaryOperator::CreateLShr(StoredVal, Val, "tmp", InsertPt);
-  }
-
-  // Truncate the integer to the right size now.
-  Type *NewIntTy = IntegerType::get(StoredValTy->getContext(), LoadSize);
-  StoredVal = new TruncInst(StoredVal, NewIntTy, "trunc", InsertPt);
-
-  if (LoadedTy == NewIntTy)
-    return StoredVal;
-
-  // If the result is a pointer, inttoptr.
-  if (LoadedTy->isPointerTy())
-    return new IntToPtrInst(StoredVal, LoadedTy, "inttoptr", InsertPt);
-
-  // Otherwise, bitcast.
-  return new BitCastInst(StoredVal, LoadedTy, "bitcast", InsertPt);
-}
 
 /// AnalyzeLoadFromClobberingWrite - This function is called when we have a
 /// memdep query of a load that ends up being a clobbering memory write (store,
@@ -721,141 +642,6 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 
     virtual ~MemoryExpression() {};
 
-    bool nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
-			const MemoryExpression &OE) const {
-      // We should mark the non-local ones so we can try to PRE them later
-      SmallVector<NonLocalDepResult, 64> Deps;
-      AliasAnalysis::Location Loc = AA->getLocation(LI);
-      Loc.Ptr = varargs[0];
-      MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps, OE.inst_.inst->getParent());
-      // If we had to process more than one hundred blocks to find the
-      // dependencies, this load isn't worth worrying about.  Optimizing
-      // it will be too expensive.
-      unsigned NumDeps = Deps.size();
-      if (NumDeps > 100)
-	return false;
-      if (NumDeps == 1 &&
-	  !Deps[0].getResult().isDef() && !Deps[0].getResult().isClobber()) {
-	DEBUG(
-	      dbgs() << "GVN: non-local load ";
-	      WriteAsOperand(dbgs(), LI);
-	      dbgs() << " has unknown dependencies\n";
-	      );
-	return false;
-      }
-      // Check to see if all of the other deps have the same congruence class
-      // as the load we are asking about, or we can reuse them.
-      CongruenceClass *OIClass = valueToClass[OE.inst_.loadinst];
-      if (!OIClass)
-	return false;
-      for (unsigned i = 0, e = NumDeps; i != e; ++i) {
-	BasicBlock *DepBB = Deps[i].getBB();
-
-	// We may have dependencies memdep has discovered but are in
-	// unreachable blocks. They don't matter (block reachability
-	// for things reaching this block should be completely
-	// calculated by the time we get here)
-	if (!reachableBlocks.count(DepBB))
-	  continue;
-	MemDepResult DepInfo = Deps[i].getResult();
-	if (!DepInfo.isDef() && !DepInfo.isClobber()) {
-	  return false;
-	}
-	// Make sure all dependencies are in the same congruence
-	// class
-	// TODO: need to be in the same congruence class or they need to be fixable.
-	CongruenceClass *DepClass = valueToClass[DepInfo.getInst()];
-	// It could be an unreachable dependency MemDep doesn't know
-	// about.
-	// If this is the case, it will still have the InitialClass as
-	// its congruence class
-	if (DepClass != OIClass)
-	  return false;
-
-	if (DepInfo.isClobber()) {
-	  // The address being loaded in this non-local block may
-	  // not be the same as the pointer operand of the load
-	  // if PHI translation occurs.  Make sure to consider
-	  // the right address.
-	  Value *Address = Deps[i].getAddress();
-
-	  // If the dependence is to a store that writes to a
-	  // superset of the bits read by the load, we can
-	  // extract the bits we need for the load from the
-	  // stored value.
-	  if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInfo.getInst())) {
-	    if (TD && Address) {
-	      int Offset = AnalyzeLoadFromClobberingStore(LI->getType(), Address,
-							  DepSI, *TD);
-	      if (Offset == -1) {
-		return false;
-	      }
-	    }
-	  }
-
-	  // Check to see if we have something like this:
-	  //    load i32* P
-	  //    load i8* (P+1)
-	  // if we have this, we can replace the later with an
-	  // extraction from the former.
-	  if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInfo.getInst())) {
-	    // If this is a clobber and L is the first
-	    // instruction in its block, then we have the first
-	    // instruction in the entry block.
-	    if (DepLI != LI && Address && TD) {
-	      int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
-							 LI->getPointerOperand(),
-							 DepLI, *TD);
-
-	      if (Offset == -1) {
-		return false;
-	      }
-	    }
-	  }
-	  // If the clobbering value is a memset/memcpy/memmove, see if we can forward
-	  // a value on from it.
-	  if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Dep.getInst())) {
-	    int Offset = AnalyzeLoadFromClobberingMemInst(LI->getType(),
-							  LI->getPointerOperand(),
-							  DepMI, *TD);
-	    if (Offset != -1)
-	      return false;
-	  }
-	}
-	
-	// DepInfo.isDef() here
-	Instruction *DepInst = DepInfo.getInst();
-
-	if (StoreInst *S = dyn_cast<StoreInst>(DepInst)) {
-	  // Reject loads and stores that are to the same address
-	  // but are of different types if we have to.
-	  if (S->getValueOperand()->getType() != LI->getType()) {
-	    // If the stored value is larger or equal to the
-	    // loaded value, we can reuse it.
-	    if (TD == 0 || !CanCoerceMustAliasedValueToLoad(S->getValueOperand(),
-							    LI->getType(), *TD)) {
-	      return false;
-	    }
-	  }
-	  continue;
-	}
-	// TODO: Better coercion
-	if (LoadInst *LD = dyn_cast<LoadInst>(DepInst)) {
-	  // If the types mismatch and we can't handle it, reject reuse of the load.
-	  if (LD->getType() != LI->getType()) {
-	    // If the stored value is larger or equal to the loaded value, we can
-	    // reuse it.
-	    if (TD == 0 || !CanCoerceMustAliasedValueToLoad(LD, LI->getType(),*TD)){
-	      return false;
-	    }
-	  }
-	  continue;
-	}
-	return false;
-      }
-      // If we got through all the dependencies, we are good to go
-      return true;
-    }
     virtual bool equals(const Expression &other) const {
       // Two loads/stores are never the same if we don't have memory dependence info
       if (!MD)
@@ -876,7 +662,6 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 	  MemDepResult Dep = MD->getDependency(LI);
 	  if (Dep.isNonLocal()) {
 	    nonLocal_ = true;
-	    return 0;
 	    return nonLocalEquals(LI, Dep, OE);
 	  }
 	  // If we weren't dependent on the other load, they aren't equal.
@@ -955,6 +740,183 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 	return false;
       }
 
+      return true;
+    }
+
+    bool nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
+			const MemoryExpression &OE) const {
+      DepIQueryMap::key_type iCacheKey(std::make_pair(LI, OE.inst_.inst));
+      DepIQueryMap::const_iterator DII = depIQueryCache.find(iCacheKey);
+      if (DII != depIQueryCache.end()) {
+	DEBUG(dbgs() << "IDep query hit\n");
+	return DII->second;
+      }
+      DepBBQueryMap::key_type cacheKey(std::make_pair(std::make_pair(varargs[0], OE.varargs[0]), LI->getParent()));
+      DepBBQueryMap::const_iterator DQI = depQueryCache.find(cacheKey);
+      if (DQI != depQueryCache.end()) {
+	DEBUG(dbgs() << "Dep query hit\n");
+	return DQI->second;
+      }
+      // Check to see if all of the other deps have the same congruence class
+      // as the load we are asking about, or we can reuse them.
+      CongruenceClass *OIClass = valueToClass[OE.inst_.loadinst];
+      if (!OIClass)
+	return false;
+
+      // We should mark the non-local ones so we can try to PRE them later
+      SmallVector<NonLocalDepResult, 64> Deps;
+      AliasAnalysis::Location Loc = AA->getLocation(LI);
+      Loc.Ptr = varargs[0];
+      MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
+      // If we had to process more than one hundred blocks to find the
+      // dependencies, this load isn't worth worrying about.  Optimizing
+      // it will be too expensive.
+      unsigned NumDeps = Deps.size();
+      if (NumDeps > 100) {
+	// assert(0 && "Large number of deps\n");
+	depIQueryCache[iCacheKey] = false;
+	depQueryCache[cacheKey] = false;
+	return false;
+      }
+      if (NumDeps == 1 &&
+	  !Deps[0].getResult().isDef() && !Deps[0].getResult().isClobber()) {
+	DEBUG(
+	      dbgs() << "GVN: non-local load ";
+	      WriteAsOperand(dbgs(), LI);
+	      dbgs() << " has unknown dependencies\n";
+	      );
+	depIQueryCache[iCacheKey] = false;
+	depQueryCache[cacheKey] = false;
+	return false;
+      }
+      for (unsigned i = 0, e = NumDeps; i != e; ++i) {
+	BasicBlock *DepBB = Deps[i].getBB();
+
+	// We may have dependencies memdep has discovered but are in
+	// unreachable blocks. They don't matter (block reachability
+	// for things reaching this block should be completely
+	// calculated by the time we get here)
+	if (!reachableBlocks.count(DepBB))
+	  continue;
+	MemDepResult DepInfo = Deps[i].getResult();
+	if (!DepInfo.isDef() && !DepInfo.isClobber()) {
+	  depIQueryCache[iCacheKey] = false;
+	  depQueryCache[cacheKey] = false;
+	  return false;
+	}
+	// Make sure all dependencies are in the same congruence
+	// class
+	// TODO: need to be in the same congruence class or they need to be fixable.
+	CongruenceClass *DepClass = valueToClass[DepInfo.getInst()];
+	// It could be an unreachable dependency MemDep doesn't know
+	// about.
+	// If this is the case, it will still have the InitialClass as
+	// its congruence class
+	if (DepClass != OIClass) {
+	  depQueryCache[cacheKey] = false;
+	  return false;
+	}
+
+	if (DepInfo.isClobber()) {
+	  // The address being loaded in this non-local block may
+	  // not be the same as the pointer operand of the load
+	  // if PHI translation occurs.  Make sure to consider
+	  // the right address.
+	  Value *Address = Deps[i].getAddress();
+
+	  // If the dependence is to a store that writes to a
+	  // superset of the bits read by the load, we can
+	  // extract the bits we need for the load from the
+	  // stored value.
+	  if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInfo.getInst())) {
+	    if (TD && Address) {
+	      int Offset = AnalyzeLoadFromClobberingStore(LI->getType(), Address,
+							  DepSI, *TD);
+	      if (Offset == -1) {
+		depIQueryCache[iCacheKey] = false;
+		depQueryCache[cacheKey] = false;
+		return false;
+	      }
+	    }
+	  }
+
+	  // Check to see if we have something like this:
+	  //    load i32* P
+	  //    load i8* (P+1)
+	  // if we have this, we can replace the later with an
+	  // extraction from the former.
+	  if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInfo.getInst())) {
+	    // If this is a clobber and L is the first
+	    // instruction in its block, then we have the first
+	    // instruction in the entry block.
+	    if (DepLI != LI && Address && TD) {
+	      int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
+							 LI->getPointerOperand(),
+							 DepLI, *TD);
+
+	      if (Offset == -1) {
+		depIQueryCache[iCacheKey] = false;
+		depQueryCache[cacheKey] = false;
+		return false;
+	      }
+	    }
+	  }
+	  // If the clobbering value is a memset/memcpy/memmove, see if we can forward
+	  // a value on from it.
+	  if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Dep.getInst())) {
+	    int Offset = AnalyzeLoadFromClobberingMemInst(LI->getType(),
+							  LI->getPointerOperand(),
+							  DepMI, *TD);
+	    if (Offset != -1) {
+	      depIQueryCache[iCacheKey] = false;
+	      depQueryCache[cacheKey] = false;
+	      return false;
+	    }
+	  }
+	  depIQueryCache[iCacheKey] = false;
+	  depQueryCache[cacheKey] = false;
+	  return false;
+	}
+	
+	// DepInfo.isDef() here
+	Instruction *DepInst = DepInfo.getInst();
+
+	if (StoreInst *S = dyn_cast<StoreInst>(DepInst)) {
+	  // Reject loads and stores that are to the same address
+	  // but are of different types if we have to.
+	  if (S->getValueOperand()->getType() != LI->getType()) {
+	    // If the stored value is larger or equal to the
+	    // loaded value, we can reuse it.
+	    if (TD == 0 || !CanCoerceMustAliasedValueToLoad(S->getValueOperand(),
+							    LI->getType(), *TD)) {
+	      depIQueryCache[iCacheKey] = false;
+	      depQueryCache[cacheKey] = false;
+	      return false;
+	    }
+	  }
+	  continue;
+	}
+	// TODO: Better coercion
+	if (LoadInst *LD = dyn_cast<LoadInst>(DepInst)) {
+	  // If the types mismatch and we can't handle it, reject reuse of the load.
+	  if (LD->getType() != LI->getType()) {
+	    // If the stored value is larger or equal to the loaded value, we can
+	    // reuse it.
+	    if (TD == 0 || !CanCoerceMustAliasedValueToLoad(LD, LI->getType(),*TD)) {
+	      depIQueryCache[iCacheKey] = false;
+	      depQueryCache[cacheKey] = false;
+	      return false;
+	    }
+	  }
+	  continue;
+	}
+	depIQueryCache[iCacheKey] = false;
+	depQueryCache[cacheKey] = false;
+	return false;
+      }
+      depIQueryCache[iCacheKey] = true;
+      depQueryCache[cacheKey] = true;
+      // If we got through all the dependencies, we are good to go
       return true;
     }
 
@@ -1269,6 +1231,8 @@ typedef RecyclingAllocator<BumpPtrAllocator,
     // New instruction creation
     void handleNewInstruction(Instruction*);
     void markUsersTouched(Value*);
+    Value *CoerceAvailableValueToLoadType(Value*,Type*,Instruction*,const TargetData &);
+    
     Value *GetStoreValueForLoad(Value*, unsigned, Type*, Instruction*,
 				const TargetData&);
     Value *GetLoadValueForLoad(LoadInst*, unsigned, Type*, Instruction*,
@@ -1280,8 +1244,11 @@ typedef RecyclingAllocator<BumpPtrAllocator,
     DenseSet<Instruction*> instrsToErase_;
     void markInstructionForDeletion(Instruction *I) {
       DEBUG(dbgs() << "Marking " << *I << " for deletion\n");
-      instrsToErase_.insert(I); 
-      valueToClass.erase(I);
+      // instrsToErase_.insert(I); 
+      // CongruenceClass *CC = valueToClass.lookup(I);
+      // assert (!CC || CC == InitialClass);
+      
+      // valueToClass.erase(I);
     }
     void verifyRemoved(Instruction *I) {
       for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
@@ -1292,7 +1259,7 @@ typedef RecyclingAllocator<BumpPtrAllocator,
 	DomTreeNode *DTN = DT->getNode(I->getParent());
 	int dfs_in = DTN->getDFSNumIn();
 	int dfs_out = DTN->getDFSNumOut();
-	
+
 	assert (CC->leader != I && "Leader is messed up");
 	assert (CC->members.count(std::make_pair(std::make_pair(dfs_in, dfs_out), I)) == 0 && "Removed instruction still a member");
       }
@@ -1406,6 +1373,120 @@ INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_END(GVN, "gvn", "Global Value Numbering", false, false)
 
 
+/// CoerceAvailableValueToLoadType - If we saw a store of a value to memory, and
+/// then a load from a must-aliased pointer of a different type, try to coerce
+/// the stored value.  LoadedTy is the type of the load we want to replace and
+/// InsertPt is the place to insert new instructions.
+///
+/// If we can't do it, return null.
+Value *GVN::CoerceAvailableValueToLoadType(Value *StoredVal,
+                                             Type *LoadedTy,
+                                             Instruction *InsertPt,
+                                             const TargetData &TD) {
+  if (!CanCoerceMustAliasedValueToLoad(StoredVal, LoadedTy, TD))
+    return 0;
+
+  // If this is already the right type, just return it.
+  Type *StoredValTy = StoredVal->getType();
+
+  uint64_t StoreSize = TD.getTypeSizeInBits(StoredValTy);
+  uint64_t LoadSize = TD.getTypeSizeInBits(LoadedTy);
+
+  // If the store and reload are the same size, we can always reuse it.
+  if (StoreSize == LoadSize) {
+    // Pointer to Pointer -> use bitcast.
+    if (StoredValTy->isPointerTy() && LoadedTy->isPointerTy()) {
+      Instruction *I = new BitCastInst(StoredVal, LoadedTy, "", InsertPt);
+      handleNewInstruction(I);
+      
+      return I;
+    }
+    
+
+    // Convert source pointers to integers, which can be bitcast.
+    if (StoredValTy->isPointerTy()) {
+      StoredValTy = TD.getIntPtrType(StoredValTy->getContext());
+      Instruction *I = new PtrToIntInst(StoredVal, StoredValTy, "", InsertPt);
+      StoredVal = I;
+      handleNewInstruction(I);
+    }
+
+    Type *TypeToCastTo = LoadedTy;
+    if (TypeToCastTo->isPointerTy())
+      TypeToCastTo = TD.getIntPtrType(StoredValTy->getContext());
+
+    if (StoredValTy != TypeToCastTo) 
+      {
+         Instruction *I = new BitCastInst(StoredVal, TypeToCastTo, "", InsertPt);
+	 StoredVal = I;
+	 handleNewInstruction(I);
+      }
+    
+
+    // Cast to pointer if the load needs a pointer type.
+    if (LoadedTy->isPointerTy()) 
+      {
+	Instruction *I = new IntToPtrInst(StoredVal, LoadedTy, "", InsertPt);
+	StoredVal = I;
+	handleNewInstruction(I);
+      }
+    return StoredVal;
+  }
+
+  // If the loaded value is smaller than the available value, then we can
+  // extract out a piece from it.  If the available value is too small, then we
+  // can't do anything.
+  assert(StoreSize >= LoadSize && "CanCoerceMustAliasedValueToLoad fail");
+
+  // Convert source pointers to integers, which can be manipulated.
+  if (StoredValTy->isPointerTy()) {
+    StoredValTy = TD.getIntPtrType(StoredValTy->getContext());
+    Instruction *I = new PtrToIntInst(StoredVal, StoredValTy, "", InsertPt);
+    StoredVal = I;
+    handleNewInstruction(I);
+  }
+
+  // Convert vectors and fp to integer, which can be manipulated.
+  if (!StoredValTy->isIntegerTy()) {
+    StoredValTy = IntegerType::get(StoredValTy->getContext(), StoreSize);
+    Instruction *I =  new BitCastInst(StoredVal, StoredValTy, "", InsertPt);
+    StoredVal = I;
+    handleNewInstruction(I);
+  }
+
+  // If this is a big-endian system, we need to shift the value down to the low
+  // bits so that a truncate will work.
+  if (TD.isBigEndian()) {
+    Constant *Val = ConstantInt::get(StoredVal->getType(), StoreSize-LoadSize);
+    StoredVal = BinaryOperator::CreateLShr(StoredVal, Val, "tmp", InsertPt);
+    if (Instruction *I = dyn_cast<Instruction>(StoredVal)) 
+      handleNewInstruction(I);
+  }
+
+  // Truncate the integer to the right size now.
+  Type *NewIntTy = IntegerType::get(StoredValTy->getContext(), LoadSize);
+  Instruction *I = new TruncInst(StoredVal, NewIntTy, "trunc", InsertPt);
+  StoredVal = I;
+  handleNewInstruction(I);
+
+  if (LoadedTy == NewIntTy)
+    return StoredVal;
+
+  // If the result is a pointer, inttoptr.
+  if (LoadedTy->isPointerTy())
+    {
+      I = new IntToPtrInst(StoredVal, LoadedTy, "inttoptr", InsertPt);
+      handleNewInstruction(I);
+      return I;
+    }
+  
+
+  // Otherwise, bitcast.
+  I = new BitCastInst(StoredVal, LoadedTy, "bitcast", InsertPt);
+  handleNewInstruction(I);
+  return I;
+}
+
 /// GetStoreValueForLoad - This function is called when we have a
 /// memdep query of a load that ends up being a clobbering store.  This means
 /// that the store provides bits used by the load but we the pointers don't
@@ -1488,6 +1569,8 @@ Value *GVN::GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
                        cast<PointerType>(PtrVal->getType())->getAddressSpace());
     Builder.SetCurrentDebugLocation(SrcVal->getDebugLoc());
     PtrVal = Builder.CreateBitCast(PtrVal, DestPTy);
+     if (Instruction *I = dyn_cast<Instruction>(PtrVal))
+      handleNewInstruction(I);
     LoadInst *NewLoad = Builder.CreateLoad(PtrVal);
     NewLoad->takeName(SrcVal);
     NewLoad->setAlignment(SrcVal->getAlignment());
@@ -1541,9 +1624,12 @@ Value *GVN::GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     // memset(P, 'x', 1234) -> splat('x'), even if x is a variable, and
     // independently of what the offset is.
     Value *Val = MSI->getValue();
-    if (LoadSize != 1)
+    if (LoadSize != 1) {
       Val = Builder.CreateZExt(Val, IntegerType::get(Ctx, LoadSize*8));
-
+      if (Instruction *I = dyn_cast<Instruction>(Val))
+	handleNewInstruction(I);
+    }
+    
     Value *OneElt = Val;
 
     // Splat the value out to the right number of bits.
@@ -1551,14 +1637,24 @@ Value *GVN::GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
       // If we can double the number of bytes set, do it.
       if (NumBytesSet*2 <= LoadSize) {
         Value *ShVal = Builder.CreateShl(Val, NumBytesSet*8);
+	if (Instruction *I = dyn_cast<Instruction>(ShVal))
+	  handleNewInstruction(I);
         Val = Builder.CreateOr(Val, ShVal);
+	if (Instruction *I = dyn_cast<Instruction>(Val))
+	  handleNewInstruction(I);
         NumBytesSet <<= 1;
         continue;
       }
 
       // Otherwise insert one byte at a time.
       Value *ShVal = Builder.CreateShl(Val, 1*8);
+      if (Instruction *I = dyn_cast<Instruction>(ShVal))
+	handleNewInstruction(I);
+
       Val = Builder.CreateOr(OneElt, ShVal);
+      if (Instruction *I = dyn_cast<Instruction>(Val))
+	handleNewInstruction(I);
+
       ++NumBytesSet;
     }
 
@@ -2154,7 +2250,9 @@ void GVN::performCongruenceFinding(Value *V, Expression *E, DomTreeNode *DTN) {
   // This is guaranteed to return something, since it will at least find INITIAL
   CongruenceClass *VClass = valueToClass[V];
   assert (VClass && "Should have found a vclass");
+  assert (!VClass->dead && "Found a dead class");
   
+
   //TODO(dannyb): Double check algorithm where we are ignoring copy check of "if e is a variable"
   CongruenceClass *EClass;
   // Expressions we can't symbolize are always in their own unique congruence class
@@ -2174,17 +2272,6 @@ void GVN::performCongruenceFinding(Value *V, Expression *E, DomTreeNode *DTN) {
       EClass = VClass;
     }
   } else {
-    if (LoadInst* LI = dyn_cast<LoadInst>(V)){
-      if (MemoryExpression *ME = dyn_cast<MemoryExpression>(E)) {
-	if (!ME->isStore()) {
-	  MemDepResult local_dep = MD->getDependency(LI);
-	  if (local_dep.isNonLocal())
-	    if (processNonLocalLoad(LI))
-	      return;
-	}
-      }
-    }
-
 
     ExpressionClassMap *lookupMap = isa<MemoryExpression>(E) ? &memoryExpressionToClass : &expressionToClass;
     std::pair<ExpressionClassMap::iterator, bool> lookupResult =
@@ -3426,6 +3513,12 @@ bool GVN::runOnFunction(Function& F) {
 	    processedCount[I] += 1;
 	    assert(processedCount[I] < 100 && "Seem to have processed the same instruction a lot");
 	  }
+	  // if (LoadInst* LI = dyn_cast<LoadInst>(I)){
+	  //   MemDepResult local_dep = MD->getDependency(LI);
+	  //   if (local_dep.isNonLocal())
+	  //     if (processNonLocalLoad(LI))
+	  // 	continue;
+	  // }	  
 
           if (!I->isTerminator()) {
 	    Expression *Symbolized = performSymbolicEvaluation(I, *RI);
@@ -3435,16 +3528,16 @@ bool GVN::runOnFunction(Function& F) {
           }
         }
       }
-      for (DenseSet<Instruction*>::iterator DI = instrsToErase_.begin(), DE = instrsToErase_.end(); DI != DE;) {
-	Instruction *toErase = *DI;
-	++DI;
-	DEBUG(dbgs() << "GVN removed: " << *toErase << '\n');
-	if (MD) MD->removeInstruction(toErase);
-	DEBUG(verifyRemoved(toErase));
-	toErase->eraseFromParent();
+      // for (DenseSet<Instruction*>::iterator DI = instrsToErase_.begin(), DE = instrsToErase_.end(); DI != DE;) {
+      // 	Instruction *toErase = *DI;
+      // 	++DI;
+      // 	DEBUG(dbgs() << "GVN removed: " << *toErase << '\n');
+      // 	if (MD) MD->removeInstruction(toErase);
+      // 	DEBUG(verifyRemoved(toErase));
+      // 	toErase->eraseFromParent();
 	
-      }
-      instrsToErase_.clear();
+      // }
+      // instrsToErase_.clear();
     }
   }
 
@@ -3531,7 +3624,7 @@ bool GVN::runOnFunction(Function& F) {
 	   }
 	 }
        } else {
-#if 0
+#if 1
 	 if (CC->members.size() == 1) {
 	   MemoryExpression *ME;
 	   if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
@@ -3600,7 +3693,7 @@ bool GVN::runOnFunction(Function& F) {
        }
      }
    }
-#if 0
+#if 1
  }
  
 #endif
@@ -3657,5 +3750,7 @@ bool GVN::runOnFunction(Function& F) {
   leaderTable.clear();
   tableAllocator.Reset();
   instrsToErase_.clear();
+  depQueryCache.clear();
+  depIQueryCache.clear();
   return Changed;
 }
