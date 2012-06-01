@@ -91,10 +91,13 @@ MaxRecurseDepth("max-recurse-depth", cl::Hidden, cl::init(1000), cl::ZeroOrMore,
 /// as an efficient mechanism to determine the expression-wise equivalence of
 /// two values.
 namespace {
- typedef DenseMap<std::pair<std::pair<Value*, Value*>, BasicBlock*>, bool> DepBBQueryMap;
+  typedef DenseMap<std::pair<std::pair<Value*, Value*>, BasicBlock*>, bool> DepBBQueryMap;
   DepBBQueryMap depQueryCache;
   typedef DenseMap<std::pair<Value*, Value*>, bool> DepIQueryMap;
   DepIQueryMap depIQueryCache;
+  typedef DenseMap<Value *, SmallVector<NonLocalDepResult, 64> > LocDepMap;
+  LocDepMap locDepCache;
+  
 
   static void UpdateMemDepInfo(MemoryDependenceAnalysis *MD, Instruction *I, Value *V) {
     if (MD && V && V->getType()->isPointerTy())
@@ -745,6 +748,16 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 
     bool nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
 			const MemoryExpression &OE) const {
+
+      // Check our two caches.  Note that the caches do not cause us
+      // to lose any equivalences. 
+      // Because this is an optimistic value numbering, things do not
+      // become *more equivalent*, only less equivalent.
+      // As such, we only cache negative results, never positive ones
+      // Positive results may become negative results in cases where
+      // the congruence classes change
+
+
       DepIQueryMap::key_type iCacheKey(std::make_pair(LI, OE.inst_.inst));
       DepIQueryMap::const_iterator DII = depIQueryCache.find(iCacheKey);
       if (DII != depIQueryCache.end()) {
@@ -766,14 +779,24 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
       // We should mark the non-local ones so we can try to PRE them later
       SmallVector<NonLocalDepResult, 64> Deps;
       AliasAnalysis::Location Loc = AA->getLocation(LI);
+      // TODO: This should be safe right now (getLocation rips the type info out
+      // before we change it, etc).  It may become unsafe in the future.
+      // We should change the interface and code a bit to make this
+      // explicit
+      // Note that this catches significantly more loads, because we
+      // avoid phi translation failures
+      // 
       Loc.Ptr = varargs[0];
-      MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
+      Deps = locDepCache.lookup(LI);
+      if (Deps.size() == 0)  {
+	MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
+	locDepCache[LI] = Deps;
+      }
       // If we had to process more than one hundred blocks to find the
       // dependencies, this load isn't worth worrying about.  Optimizing
       // it will be too expensive.
       unsigned NumDeps = Deps.size();
       if (NumDeps > 100) {
-	// assert(0 && "Large number of deps\n");
 	depIQueryCache[iCacheKey] = false;
 	depQueryCache[cacheKey] = false;
 	return false;
@@ -789,6 +812,9 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 	depQueryCache[cacheKey] = false;
 	return false;
       }
+      int numcallclobbers = 0;
+      int numstoreclobbers = 0;
+      int numloadclobbers = 0;
       for (unsigned i = 0, e = NumDeps; i != e; ++i) {
 	BasicBlock *DepBB = Deps[i].getBB();
 
@@ -914,8 +940,8 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 	depQueryCache[cacheKey] = false;
 	return false;
       }
-      depIQueryCache[iCacheKey] = true;
-      depQueryCache[cacheKey] = true;
+      // depIQueryCache[iCacheKey] = true;
+      // depQueryCache[cacheKey] = true;
       // If we got through all the dependencies, we are good to go
       return true;
     }
@@ -2917,7 +2943,8 @@ bool GVN::processNonLocalLoad(LoadInst *LI) {
   // Find the non-local dependencies of the load.
   SmallVector<NonLocalDepResult, 64> Deps;
   AliasAnalysis::Location Loc = AA->getLocation(LI);
-  Loc.Ptr = lookupOperandLeader(LI->getPointerOperand());
+  
+  // Loc.Ptr = lookupOperandLeader(LI->getPointerOperand());
   MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
   //DEBUG(dbgs() << "INVESTIGATING NONLOCAL LOAD: "
   //             << Deps.size() << *LI << '\n');
@@ -3752,5 +3779,6 @@ bool GVN::runOnFunction(Function& F) {
   instrsToErase_.clear();
   depQueryCache.clear();
   depIQueryCache.clear();
+  locDepCache.clear();
   return Changed;
 }
