@@ -940,8 +940,6 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 	depQueryCache[cacheKey] = false;
 	return false;
       }
-      // depIQueryCache[iCacheKey] = true;
-      // depQueryCache[cacheKey] = true;
       // If we got through all the dependencies, we are good to go
       return true;
     }
