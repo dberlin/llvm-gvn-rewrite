@@ -609,6 +609,13 @@ public:
   CreateTargetHazardRecognizer(const TargetMachine *TM,
                                const ScheduleDAG *DAG) const = 0;
 
+  /// CreateTargetMIHazardRecognizer - Allocate and return a hazard recognizer
+  /// to use for this target when scheduling the machine instructions before
+  /// register allocation.
+  virtual ScheduleHazardRecognizer*
+  CreateTargetMIHazardRecognizer(const InstrItineraryData*,
+                                 const ScheduleDAG *DAG) const = 0;
+
   /// CreateTargetPostRAHazardRecognizer - Allocate and return a hazard
   /// recognizer to use for this target when scheduling the machine instructions
   /// after register allocation.
@@ -630,6 +637,14 @@ public:
   virtual bool OptimizeCompareInstr(MachineInstr *CmpInstr,
                                     unsigned SrcReg, int Mask, int Value,
                                     const MachineRegisterInfo *MRI) const {
+    return false;
+  }
+
+  /// OptimizeSubInstr - See if the SUB instruction can be converted into
+  /// something more efficient E.g., on X86, we can replace SUB with CMP
+  /// if the actual result of SUB is not used.
+  virtual bool OptimizeSubInstr(MachineInstr *SubInstr,
+                                const MachineRegisterInfo *MRI) const {
     return false;
   }
 
@@ -875,6 +890,10 @@ public:
 
   virtual ScheduleHazardRecognizer *
   CreateTargetHazardRecognizer(const TargetMachine*, const ScheduleDAG*) const;
+
+  virtual ScheduleHazardRecognizer *
+  CreateTargetMIHazardRecognizer(const InstrItineraryData*,
+                                 const ScheduleDAG*) const;
 
   virtual ScheduleHazardRecognizer *
   CreateTargetPostRAHazardRecognizer(const InstrItineraryData*,

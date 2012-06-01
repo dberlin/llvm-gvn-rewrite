@@ -171,7 +171,7 @@ static unsigned determineREX(const MachineInstr &MI) {
   unsigned NumOps = Desc.getNumOperands();
   if (NumOps) {
     bool isTwoAddr = NumOps > 1 &&
-    Desc.getOperandConstraint(1, MCOI::TIED_TO) != -1;
+      Desc.getOperandConstraint(1, MCOI::TIED_TO) != -1;
 
     // If it accesses SPL, BPL, SIL, or DIL, then it requires a 0x40 REX prefix.
     unsigned i = isTwoAddr ? 1 : 0;
@@ -933,7 +933,10 @@ void Emitter<CodeEmitter>::emitVEXOpcodePrefix(uint64_t TSFlags,
   }
 
   // Classify VEX_B, VEX_4V, VEX_R, VEX_X
+  unsigned NumOps = Desc->getNumOperands();
   unsigned CurOp = 0;
+  if (NumOps > 1 && Desc->getOperandConstraint(1, MCOI::TIED_TO) != -1)
+    ++CurOp;
   switch (TSFlags & X86II::FormMask) {
     case X86II::MRMInitReg:
       // Duplicate register.
@@ -1433,7 +1436,7 @@ void Emitter<CodeEmitter>::emitInstruction(MachineInstr &MI,
     break;
   }
 
-  if (CurOp != NumOps) {
+  while (CurOp != NumOps && NumOps - CurOp <= 2) {
     // The last source register of a 4 operand instruction in AVX is encoded
     // in bits[7:4] of a immediate byte.
     if ((TSFlags >> X86II::VEXShift) & X86II::VEX_I8IMM) {

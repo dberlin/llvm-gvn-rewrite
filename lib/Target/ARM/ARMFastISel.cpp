@@ -2216,11 +2216,6 @@ bool ARMFastISel::SelectCall(const Instruction *I,
   // Can't handle inline asm.
   if (isa<InlineAsm>(Callee)) return false;
 
-  // Only handle global variable Callees.
-  const GlobalValue *GV = dyn_cast<GlobalValue>(Callee);
-  if (!GV)
-    return false;
-
   // Check the calling convention.
   ImmutableCallSite CS(CI);
   CallingConv::ID CC = CS.getCallingConv();
@@ -2313,18 +2308,33 @@ bool ARMFastISel::SelectCall(const Instruction *I,
 
   // Issue the call.
   MachineInstrBuilder MIB;
+  const GlobalValue *GV = dyn_cast<GlobalValue>(Callee);
   unsigned CallOpc = ARMSelectCallOp(GV);
+  unsigned CalleeReg = 0;
+
+  if (!GV){
+    CallOpc = isThumb2 ? ARM::tBLXr : ARM::BLX;
+    CalleeReg = getRegForValue(Callee);
+    if (CalleeReg == 0) return false;
+  }
+
   // Explicitly adding the predicate here.
   if(isThumb2) {
     // Explicitly adding the predicate here.
     MIB = AddDefaultPred(BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL,
                                  TII.get(CallOpc)));
-    if (!IntrMemName)
+    if (!GV)
+      MIB.addReg(CalleeReg);
+    else if (!IntrMemName)
       MIB.addGlobalAddress(GV, 0, 0);
     else 
       MIB.addExternalSymbol(IntrMemName, 0);
   } else {
-    if (!IntrMemName)
+    if (!GV)
+      MIB = AddDefaultPred(BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL,
+                                   TII.get(CallOpc))
+            .addReg(CalleeReg));
+    else if (!IntrMemName)
       // Explicitly adding the predicate here.
       MIB = AddDefaultPred(BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL,
                                    TII.get(CallOpc))
@@ -2396,6 +2406,42 @@ bool ARMFastISel::SelectIntrinsicCall(const IntrinsicInst &I) {
   // FIXME: Handle more intrinsics.
   switch (I.getIntrinsicID()) {
   default: return false;
+  case Intrinsic::frameaddress: {
+    MachineFrameInfo *MFI = FuncInfo.MF->getFrameInfo();
+    MFI->setFrameAddressIsTaken(true);
+
+    unsigned LdrOpc;
+    const TargetRegisterClass *RC;
+    if (isThumb2) {
+      LdrOpc =  ARM::t2LDRi12;
+      RC = (const TargetRegisterClass*)&ARM::tGPRRegClass;
+    } else {
+      LdrOpc =  ARM::LDRi12;
+      RC = (const TargetRegisterClass*)&ARM::GPRRegClass;
+    }
+
+    const ARMBaseRegisterInfo *RegInfo =
+          static_cast<const ARMBaseRegisterInfo*>(TM.getRegisterInfo());
+    unsigned FramePtr = RegInfo->getFrameRegister(*(FuncInfo.MF));
+    unsigned SrcReg = FramePtr;
+
+    // Recursively load frame address
+    // ldr r0 [fp]
+    // ldr r0 [r0]
+    // ldr r0 [r0]
+    // ...
+    unsigned DestReg;
+    unsigned Depth = cast<ConstantInt>(I.getOperand(0))->getZExtValue();
+    while (Depth--) {
+      DestReg = createResultReg(RC);
+      AddOptionalDefs(BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL,
+                              TII.get(LdrOpc), DestReg)
+                      .addReg(SrcReg).addImm(0));
+      SrcReg = DestReg;
+    }
+    UpdateValueMap(&I, DestReg);
+    return true;
+  }
   case Intrinsic::memcpy:
   case Intrinsic::memmove: {
     const MemTransferInst &MTI = cast<MemTransferInst>(I);

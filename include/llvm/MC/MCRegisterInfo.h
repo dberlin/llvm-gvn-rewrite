@@ -106,10 +106,14 @@ public:
 /// of AX.
 ///
 struct MCRegisterDesc {
-  const char *Name;         // Printable name for the reg (for debugging)
-  uint32_t   Overlaps;      // Overlapping registers, described above
-  uint32_t   SubRegs;       // Sub-register set, described above
-  uint32_t   SuperRegs;     // Super-register set, described above
+  uint32_t Name;      // Printable name for the reg (for debugging)
+  uint32_t Overlaps;  // Overlapping registers, described above
+  uint32_t SubRegs;   // Sub-register set, described above
+  uint32_t SuperRegs; // Super-register set, described above
+
+  // RegUnits - Points to the list of register units. The low 4 bits holds the
+  // Scale, the high bits hold an offset into DiffLists. See MCRegUnitIterator.
+  uint32_t RegUnits;
 };
 
 /// MCRegisterInfo base class - We assume that the target defines a static
@@ -142,7 +146,11 @@ private:
   unsigned RAReg;                             // Return address register
   const MCRegisterClass *Classes;             // Pointer to the regclass array
   unsigned NumClasses;                        // Number of entries in the array
+  unsigned NumRegUnits;                       // Number of regunits.
+  const uint16_t (*RegUnitRoots)[2];          // Pointer to regunit root table.
   const uint16_t *RegLists;                   // Pointer to the reglists array
+  const uint16_t *DiffLists;                  // Pointer to the difflists array
+  const char *RegStrings;                     // Pointer to the string table.
   const uint16_t *SubRegIndices;              // Pointer to the subreg lookup
                                               // array.
   unsigned NumSubRegIndices;                  // Number of subreg indices.
@@ -160,11 +168,88 @@ private:
   DenseMap<unsigned, int> L2SEHRegs;          // LLVM to SEH regs mapping
 
 public:
+  /// RegListIterator. This iterator class is used to traverse lists of
+  /// super-registers, sub-registers, and overlapping registers. Don't use it
+  /// directly, use one of the sub-classes defined below.
+  class RegListIterator {
+    const uint16_t *Pos;
+  public:
+    explicit RegListIterator(const uint16_t *Table)
+      : Pos(Table) {}
+
+    /// isValid - Return false when the end of the list is reached.
+    bool isValid() const { return *Pos; }
+
+    /// Dereference the iterator to get the current register.
+    unsigned operator*() const { return *Pos; }
+
+    /// Pre-increment. Move to the next register.
+    void operator++() { ++Pos; }
+  };
+
+  /// DiffListIterator - Base iterator class that can traverse the
+  /// differentially encoded register and regunit lists in DiffLists.
+  /// Don't use this class directly, use one of the specialized sub-classes
+  /// defined below.
+  class DiffListIterator {
+    uint16_t Val;
+    const uint16_t *List;
+
+  protected:
+    /// Create an invalid iterator. Call init() to point to something useful.
+    DiffListIterator() : Val(0), List(0) {}
+
+    /// init - Point the iterator to InitVal, decoding subsequent values from
+    /// DiffList. The iterator will initially point to InitVal, sub-classes are
+    /// responsible for skipping the seed value if it is not part of the list.
+    void init(uint16_t InitVal, const uint16_t *DiffList) {
+      Val = InitVal;
+      List = DiffList;
+    }
+
+    /// advance - Move to the next list position, return the applied
+    /// differential. This function does not detect the end of the list, that
+    /// is the caller's responsibility (by checking for a 0 return value).
+    unsigned advance() {
+      assert(isValid() && "Cannot move off the end of the list.");
+      uint16_t D = *List++;
+      Val += D;
+      return D;
+    }
+
+  public:
+
+    /// isValid - returns true if this iterator is not yet at the end.
+    bool isValid() const { return List; }
+
+    /// Dereference the iterator to get the value at the current position.
+    unsigned operator*() const { return Val; }
+
+    /// Pre-increment to move to the next position.
+    void operator++() {
+      // The end of the list is encoded as a 0 differential.
+      if (!advance())
+        List = 0;
+    }
+  };
+
+  // These iterators are allowed to sub-class RegListIterator and
+  // DiffListIterator and access internal list pointers.
+  friend class MCSubRegIterator;
+  friend class MCSuperRegIterator;
+  friend class MCRegAliasIterator;
+  friend class MCRegUnitIterator;
+  friend class MCRegUnitRootIterator;
+
   /// InitMCRegisterInfo - Initialize MCRegisterInfo, called by TableGen
   /// auto-generated routines. *DO NOT USE*.
   void InitMCRegisterInfo(const MCRegisterDesc *D, unsigned NR, unsigned RA,
                           const MCRegisterClass *C, unsigned NC,
+                          const uint16_t (*RURoots)[2],
+                          unsigned NRU,
                           const uint16_t *RL,
+                          const uint16_t *DL,
+                          const char *Strings,
                           const uint16_t *SubIndices,
                           unsigned NumIndices,
                           const uint16_t *RET) {
@@ -173,7 +258,11 @@ public:
     RAReg = RA;
     Classes = C;
     RegLists = RL;
+    DiffLists = DL;
+    RegStrings = Strings;
     NumClasses = NC;
+    RegUnitRoots = RURoots;
+    NumRegUnits = NRU;
     SubRegIndices = SubIndices;
     NumSubRegIndices = NumIndices;
     RegEncodingTable = RET;
@@ -301,13 +390,20 @@ public:
   /// getName - Return the human-readable symbolic target-specific name for the
   /// specified physical register.
   const char *getName(unsigned RegNo) const {
-    return get(RegNo).Name;
+    return RegStrings + get(RegNo).Name;
   }
 
   /// getNumRegs - Return the number of registers this target has (useful for
   /// sizing arrays holding per register information)
   unsigned getNumRegs() const {
     return NumRegs;
+  }
+
+  /// getNumRegUnits - Return the number of (native) register units in the
+  /// target. Register units are numbered from 0 to getNumRegUnits() - 1. They
+  /// can be accessed through MCRegUnitIterator defined below.
+  unsigned getNumRegUnits() const {
+    return NumRegUnits;
   }
 
   /// getDwarfRegNum - Map a target register to an equivalent dwarf register
@@ -366,6 +462,112 @@ public:
     return RegEncodingTable[RegNo];
   }
 
+};
+
+//===----------------------------------------------------------------------===//
+//                          Register List Iterators
+//===----------------------------------------------------------------------===//
+
+// MCRegisterInfo provides lists of super-registers, sub-registers, and
+// aliasing registers. Use these iterator classes to traverse the lists.
+
+/// MCSubRegIterator enumerates all sub-registers of Reg.
+class MCSubRegIterator : public MCRegisterInfo::RegListIterator {
+public:
+  MCSubRegIterator(unsigned Reg, const MCRegisterInfo *MCRI)
+    : RegListIterator(MCRI->RegLists + MCRI->get(Reg).SubRegs) {}
+};
+
+/// MCSuperRegIterator enumerates all super-registers of Reg.
+class MCSuperRegIterator : public MCRegisterInfo::RegListIterator {
+public:
+  MCSuperRegIterator(unsigned Reg, const MCRegisterInfo *MCRI)
+    : RegListIterator(MCRI->RegLists + MCRI->get(Reg).SuperRegs) {}
+};
+
+/// MCRegAliasIterator enumerates all registers aliasing Reg.
+/// If IncludeSelf is set, Reg itself is included in the list.
+class MCRegAliasIterator : public MCRegisterInfo::RegListIterator {
+public:
+  MCRegAliasIterator(unsigned Reg, const MCRegisterInfo *MCRI, bool IncludeSelf)
+    : RegListIterator(MCRI->RegLists + MCRI->get(Reg).Overlaps + !IncludeSelf)
+  {}
+};
+
+//===----------------------------------------------------------------------===//
+//                               Register Units
+//===----------------------------------------------------------------------===//
+
+// Register units are used to compute register aliasing. Every register has at
+// least one register unit, but it can have more. Two registers overlap if and
+// only if they have a common register unit.
+//
+// A target with a complicated sub-register structure will typically have many
+// fewer register units than actual registers. MCRI::getNumRegUnits() returns
+// the number of register units in the target.
+
+// MCRegUnitIterator enumerates a list of register units for Reg. The list is
+// in ascending numerical order.
+class MCRegUnitIterator : public MCRegisterInfo::DiffListIterator {
+public:
+  /// MCRegUnitIterator - Create an iterator that traverses the register units
+  /// in Reg.
+  MCRegUnitIterator(unsigned Reg, const MCRegisterInfo *MCRI) {
+    // Decode the RegUnits MCRegisterDesc field.
+    unsigned RU = MCRI->get(Reg).RegUnits;
+    unsigned Scale = RU & 15;
+    unsigned Offset = RU >> 4;
+
+    // Initialize the iterator to Reg * Scale, and the List pointer to
+    // DiffLists + Offset.
+    init(Reg * Scale, MCRI->DiffLists + Offset);
+
+    // That may not be a valid unit, we need to advance by one to get the real
+    // unit number. The first differential can be 0 which would normally
+    // terminate the list, but since we know every register has at least one
+    // unit, we can allow a 0 differential here.
+    advance();
+  }
+};
+
+// Each register unit has one or two root registers. The complete set of
+// registers containing a register unit is the union of the roots and their
+// super-registers. All registers aliasing Unit can be visited like this:
+//
+//   for (MCRegUnitRootIterator RI(Unit, MCRI); RI.isValid(); ++RI) {
+//     unsigned Root = *RI;
+//     visit(Root);
+//     for (MCSuperRegIterator SI(Root, MCRI); SI.isValid(); ++SI)
+//       visit(*SI);
+//    }
+
+/// MCRegUnitRootIterator enumerates the root registers of a register unit.
+class MCRegUnitRootIterator {
+  uint16_t Reg0;
+  uint16_t Reg1;
+public:
+  MCRegUnitRootIterator(unsigned RegUnit, const MCRegisterInfo *MCRI) {
+    assert(RegUnit < MCRI->getNumRegUnits() && "Invalid register unit");
+    Reg0 = MCRI->RegUnitRoots[RegUnit][0];
+    Reg1 = MCRI->RegUnitRoots[RegUnit][1];
+  }
+
+  /// Dereference to get the current root register.
+  unsigned operator*() const {
+    return Reg0;
+  }
+
+  /// isValid - Check if the iterator is at the end of the list.
+  bool isValid() const {
+    return Reg0;
+  }
+
+  /// Preincrement to move to the next root register.
+  void operator++() {
+    assert(isValid() && "Cannot move off the end of the list.");
+    Reg0 = Reg1;
+    Reg1 = 0;
+  }
 };
 
 } // End llvm namespace

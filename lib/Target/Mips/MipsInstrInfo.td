@@ -140,15 +140,16 @@ def IsN64       :     Predicate<"Subtarget.isABI_N64()">,
                       AssemblerPredicate<"FeatureN64">;
 def NotN64      :     Predicate<"!Subtarget.isABI_N64()">,
                       AssemblerPredicate<"!FeatureN64">;
+def InMips16Mode :    Predicate<"Subtarget.inMips16Mode()">,
+                      AssemblerPredicate<"FeatureMips16">;
 def RelocStatic :     Predicate<"TM.getRelocationModel() == Reloc::Static">,
                       AssemblerPredicate<"FeatureMips32">;
 def RelocPIC    :     Predicate<"TM.getRelocationModel() == Reloc::PIC_">,
                       AssemblerPredicate<"FeatureMips32">;
 def NoNaNsFPMath :    Predicate<"TM.Options.NoNaNsFPMath">,
                       AssemblerPredicate<"FeatureMips32">;
-def HasStandardEncoding:
-               Predicate<"Subtarget.hasStandardEncoding()">,
-               AssemblerPredicate<"FeatureMips32,FeatureMips32r2,FeatureMips64"> ;
+def HasStandardEncoding : Predicate<"Subtarget.hasStandardEncoding()">,
+                          AssemblerPredicate<"!FeatureMips16">;
 
 //===----------------------------------------------------------------------===//
 // Instruction format superclass
@@ -256,7 +257,8 @@ def immZExt5 : ImmLeaf<i32, [{return Imm == (Imm & 0x1f);}]>;
 
 // Mips Address Mode! SDNode frameindex could possibily be a match
 // since load and store instructions from stack used it.
-def addr : ComplexPattern<iPTR, 2, "SelectAddr", [frameindex], [SDNPWantParent]>;
+def addr :
+  ComplexPattern<iPTR, 2, "SelectAddr", [frameindex], [SDNPWantParent]>;
 
 //===----------------------------------------------------------------------===//
 // Pattern fragment for load/store
@@ -793,29 +795,6 @@ let neverHasSideEffects = 1 in
 def CPRESTORE : MipsPseudo<(outs), (ins i32imm:$loc, CPURegs:$gp),
                            ".cprestore\t$loc", []>;
 
-// For O32 ABI & PIC & non-fixed global base register, the following instruction
-// seqeunce is emitted to set the global base register:
-//
-//  0. lui   $2, %hi(_gp_disp)
-//  1. addiu $2, $2, %lo(_gp_disp)
-//  2. addu  $globalbasereg, $2, $t9
-//
-// SETGP01 is emitted during Prologue/Epilogue insertion and then converted to
-// instructions 0 and 1 in the sequence above during MC lowering.
-// SETGP2 is emitted just before register allocation and converted to
-// instruction 2 just prior to post-RA scheduling.
-//
-// These pseudo instructions are needed to ensure no instructions are inserted
-// before or between instructions 0 and 1, which is a limitation imposed by
-// GNU linker.
-
-let isTerminator = 1, isBarrier = 1 in
-def SETGP01 : MipsPseudo<(outs CPURegs:$dst), (ins), "", []>;
-
-let neverHasSideEffects = 1 in
-def SETGP2 : MipsPseudo<(outs CPURegs:$globalreg), (ins CPURegs:$picreg), "",
-                        []>;
-
 let usesCustomInserter = 1 in {
   defm ATOMIC_LOAD_ADD_I8   : Atomic2Ops32<atomic_load_add_8, "load_add_8">;
   defm ATOMIC_LOAD_ADD_I16  : Atomic2Ops32<atomic_load_add_16, "load_add_16">;
@@ -1211,4 +1190,4 @@ include "MipsCondMov.td"
 // Mips16
 
 include "Mips16InstrFormats.td"
-
+include "Mips16InstrInfo.td"

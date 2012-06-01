@@ -51,7 +51,7 @@
 #include "llvm/Target/TargetLowering.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/CRSBuilder.h"
+#include "llvm/Support/IntegersSubsetMapping.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
@@ -1903,8 +1903,6 @@ bool SelectionDAGBuilder::handleSmallSwitchRange(CaseRec& CR,
                                                  const Value* SV,
                                                  MachineBasicBlock *Default,
                                                  MachineBasicBlock *SwitchBB) {
-  Case& BackCase  = *(CR.Range.second-1);
-
   // Size is the number of Cases represented by this range.
   size_t Size = CR.Range.second - CR.Range.first;
   if (Size > 3)
@@ -1972,11 +1970,28 @@ bool SelectionDAGBuilder::handleSmallSwitchRange(CaseRec& CR,
     }
   }
 
+  // Order cases by weight so the most likely case will be checked first.
+  BranchProbabilityInfo *BPI = FuncInfo.BPI;
+  if (BPI) {
+    for (CaseItr I = CR.Range.first, IE = CR.Range.second; I != IE; ++I) {
+      uint32_t IWeight = BPI->getEdgeWeight(SwitchBB->getBasicBlock(),
+                                            I->BB->getBasicBlock());
+      for (CaseItr J = CR.Range.first; J < I; ++J) {
+        uint32_t JWeight = BPI->getEdgeWeight(SwitchBB->getBasicBlock(),
+                                              J->BB->getBasicBlock());
+        if (IWeight > JWeight)
+          std::swap(*I, *J);
+      }
+    }
+  }
   // Rearrange the case blocks so that the last one falls through if possible.
-  if (NextBlock && Default != NextBlock && BackCase.BB != NextBlock) {
+  Case &BackCase = *(CR.Range.second-1);
+  if (Size > 1 &&
+      NextBlock && Default != NextBlock && BackCase.BB != NextBlock) {
     // The last case block won't fall through into 'NextBlock' if we emit the
     // branches in this order.  See if rearranging a case value would help.
-    for (CaseItr I = CR.Range.first, E = CR.Range.second-1; I != E; ++I) {
+    // We start at the bottom as it's the case with the least weight.
+    for (Case *I = &*(CR.Range.second-2), *E = &*CR.Range.first-1; I != E; --I){
       if (I->BB == NextBlock) {
         std::swap(*I, BackCase);
         break;
@@ -2412,7 +2427,7 @@ size_t SelectionDAGBuilder::Clusterify(CaseVector& Cases,
   
   /// Use a shorter form of declaration, and also
   /// show the we want to use CRSBuilder as Clusterifier.
-  typedef CRSBuilderBase<MachineBasicBlock, true> Clusterifier;
+  typedef IntegersSubsetMapping<MachineBasicBlock> Clusterifier;
   
   Clusterifier TheClusterifier;
 
@@ -2441,7 +2456,10 @@ size_t SelectionDAGBuilder::Clusterify(CaseVector& Cases,
       BPI->setEdgeWeight(SI.getParent(), C.second->getBasicBlock(), W);  
     }
 
-    Cases.push_back(Case(C.first.Low, C.first.High, C.second, W));
+    // FIXME: Currently work with ConstantInt based numbers.
+    // Changing it to APInt based is a pretty heavy for this commit.
+    Cases.push_back(Case(C.first.Low.toConstantInt(),
+                         C.first.High.toConstantInt(), C.second, W));
     
     if (C.first.Low != C.first.High)
     // A range counts double, since it requires two compares.
@@ -4902,6 +4920,11 @@ SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I, unsigned Intrinsic) {
   case Intrinsic::pow:
     visitPow(I);
     return 0;
+  case Intrinsic::fabs:
+    setValue(&I, DAG.getNode(ISD::FABS, dl,
+                             getValue(I.getArgOperand(0)).getValueType(),
+                             getValue(I.getArgOperand(0))));
+    return 0;
   case Intrinsic::fma:
     setValue(&I, DAG.getNode(ISD::FMA, dl,
                              getValue(I.getArgOperand(0)).getValueType(),
@@ -5065,13 +5088,14 @@ SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I, unsigned Intrinsic) {
       return 0;
     }
     TargetLowering::ArgListTy Args;
-    std::pair<SDValue, SDValue> Result =
-      TLI.LowerCallTo(getRoot(), I.getType(),
+    TargetLowering::
+    CallLoweringInfo CLI(getRoot(), I.getType(),
                  false, false, false, false, 0, CallingConv::C,
                  /*isTailCall=*/false,
                  /*doesNotRet=*/false, /*isReturnValueUsed=*/true,
                  DAG.getExternalSymbol(TrapFuncName.data(), TLI.getPointerTy()),
                  Args, DAG, getCurDebugLoc());
+    std::pair<SDValue, SDValue> Result = TLI.LowerCallTo(CLI);
     DAG.setRoot(Result.second);
     return 0;
   }
@@ -5149,9 +5173,8 @@ void SelectionDAGBuilder::LowerCallTo(ImmutableCallSite CS, SDValue Callee,
 
   // Check whether the function can return without sret-demotion.
   SmallVector<ISD::OutputArg, 4> Outs;
-  SmallVector<uint64_t, 4> Offsets;
   GetReturnInfo(RetTy, CS.getAttributes().getRetAttributes(),
-                Outs, TLI, &Offsets);
+                Outs, TLI);
 
   bool CanLowerReturn = TLI.CanLowerReturn(CS.getCallingConv(),
 					   DAG.getMachineFunction(),
@@ -5239,16 +5262,10 @@ void SelectionDAGBuilder::LowerCallTo(ImmutableCallSite CS, SDValue Callee,
   if (isTailCall && TM.Options.EnableFastISel)
     isTailCall = false;
 
-  std::pair<SDValue,SDValue> Result =
-    TLI.LowerCallTo(getRoot(), RetTy,
-                    CS.paramHasAttr(0, Attribute::SExt),
-                    CS.paramHasAttr(0, Attribute::ZExt), FTy->isVarArg(),
-                    CS.paramHasAttr(0, Attribute::InReg), FTy->getNumParams(),
-                    CS.getCallingConv(),
-                    isTailCall,
-                    CS.doesNotReturn(),
-                    !CS.getInstruction()->use_empty(),
-                    Callee, Args, DAG, getCurDebugLoc());
+  TargetLowering::
+  CallLoweringInfo CLI(getRoot(), RetTy, FTy, isTailCall, Callee, Args, DAG,
+                       getCurDebugLoc(), CS);
+  std::pair<SDValue,SDValue> Result = TLI.LowerCallTo(CLI);
   assert((isTailCall || Result.second.getNode()) &&
          "Non-null chain expected with non-tail call!");
   assert((Result.second.getNode() || !Result.first.getNode()) &&
@@ -5264,7 +5281,13 @@ void SelectionDAGBuilder::LowerCallTo(ImmutableCallSite CS, SDValue Callee,
     ComputeValueVTs(TLI, PtrRetTy, PVTs);
     assert(PVTs.size() == 1 && "Pointers should fit in one register");
     EVT PtrVT = PVTs[0];
-    unsigned NumValues = Outs.size();
+
+    SmallVector<EVT, 4> RetTys;
+    SmallVector<uint64_t, 4> Offsets;
+    RetTy = FTy->getReturnType();
+    ComputeValueVTs(TLI, RetTy, RetTys, &Offsets);
+
+    unsigned NumValues = RetTys.size();
     SmallVector<SDValue, 4> Values(NumValues);
     SmallVector<SDValue, 4> Chains(NumValues);
 
@@ -5272,8 +5295,7 @@ void SelectionDAGBuilder::LowerCallTo(ImmutableCallSite CS, SDValue Callee,
       SDValue Add = DAG.getNode(ISD::ADD, getCurDebugLoc(), PtrVT,
                                 DemoteStackSlot,
                                 DAG.getConstant(Offsets[i], PtrVT));
-      SDValue L = DAG.getLoad(Outs[i].VT, getCurDebugLoc(), Result.second,
-                              Add,
+      SDValue L = DAG.getLoad(RetTys[i], getCurDebugLoc(), Result.second, Add,
                   MachinePointerInfo::getFixedStack(DemoteStackIdx, Offsets[i]),
                               false, false, false, 1);
       Values[i] = L;
@@ -5284,30 +5306,10 @@ void SelectionDAGBuilder::LowerCallTo(ImmutableCallSite CS, SDValue Callee,
                                 MVT::Other, &Chains[0], NumValues);
     PendingLoads.push_back(Chain);
 
-    // Collect the legal value parts into potentially illegal values
-    // that correspond to the original function's return values.
-    SmallVector<EVT, 4> RetTys;
-    RetTy = FTy->getReturnType();
-    ComputeValueVTs(TLI, RetTy, RetTys);
-    ISD::NodeType AssertOp = ISD::DELETED_NODE;
-    SmallVector<SDValue, 4> ReturnValues;
-    unsigned CurReg = 0;
-    for (unsigned I = 0, E = RetTys.size(); I != E; ++I) {
-      EVT VT = RetTys[I];
-      EVT RegisterVT = TLI.getRegisterType(RetTy->getContext(), VT);
-      unsigned NumRegs = TLI.getNumRegisters(RetTy->getContext(), VT);
-
-      SDValue ReturnValue =
-        getCopyFromParts(DAG, getCurDebugLoc(), &Values[CurReg], NumRegs,
-                         RegisterVT, VT, AssertOp);
-      ReturnValues.push_back(ReturnValue);
-      CurReg += NumRegs;
-    }
-
     setValue(CS.getInstruction(),
              DAG.getNode(ISD::MERGE_VALUES, getCurDebugLoc(),
                          DAG.getVTList(&RetTys[0], RetTys.size()),
-                         &ReturnValues[0], ReturnValues.size()));
+                         &Values[0], Values.size()));
   }
 
   // Assign order to nodes here. If the call does not produce a result, it won't
@@ -6361,24 +6363,18 @@ void SelectionDAGBuilder::visitVACopy(const CallInst &I) {
 /// FIXME: When all targets are
 /// migrated to using LowerCall, this hook should be integrated into SDISel.
 std::pair<SDValue, SDValue>
-TargetLowering::LowerCallTo(SDValue Chain, Type *RetTy,
-                            bool RetSExt, bool RetZExt, bool isVarArg,
-                            bool isInreg, unsigned NumFixedArgs,
-                            CallingConv::ID CallConv, bool isTailCall,
-                            bool doesNotRet, bool isReturnValueUsed,
-                            SDValue Callee,
-                            ArgListTy &Args, SelectionDAG &DAG,
-                            DebugLoc dl) const {
+TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
   // Handle all of the outgoing arguments.
-  SmallVector<ISD::OutputArg, 32> Outs;
-  SmallVector<SDValue, 32> OutVals;
+  CLI.Outs.clear();
+  CLI.OutVals.clear();
+  ArgListTy &Args = CLI.Args;
   for (unsigned i = 0, e = Args.size(); i != e; ++i) {
     SmallVector<EVT, 4> ValueVTs;
     ComputeValueVTs(*this, Args[i].Ty, ValueVTs);
     for (unsigned Value = 0, NumValues = ValueVTs.size();
          Value != NumValues; ++Value) {
       EVT VT = ValueVTs[Value];
-      Type *ArgTy = VT.getTypeForEVT(RetTy->getContext());
+      Type *ArgTy = VT.getTypeForEVT(CLI.RetTy->getContext());
       SDValue Op = SDValue(Args[i].Node.getNode(),
                            Args[i].Node.getResNo() + Value);
       ISD::ArgFlagsTy Flags;
@@ -6411,8 +6407,8 @@ TargetLowering::LowerCallTo(SDValue Chain, Type *RetTy,
         Flags.setNest();
       Flags.setOrigAlign(OriginalAlignment);
 
-      EVT PartVT = getRegisterType(RetTy->getContext(), VT);
-      unsigned NumParts = getNumRegisters(RetTy->getContext(), VT);
+      EVT PartVT = getRegisterType(CLI.RetTy->getContext(), VT);
+      unsigned NumParts = getNumRegisters(CLI.RetTy->getContext(), VT);
       SmallVector<SDValue, 4> Parts(NumParts);
       ISD::NodeType ExtendKind = ISD::ANY_EXTEND;
 
@@ -6421,89 +6417,88 @@ TargetLowering::LowerCallTo(SDValue Chain, Type *RetTy,
       else if (Args[i].isZExt)
         ExtendKind = ISD::ZERO_EXTEND;
 
-      getCopyToParts(DAG, dl, Op, &Parts[0], NumParts,
+      getCopyToParts(CLI.DAG, CLI.DL, Op, &Parts[0], NumParts,
                      PartVT, ExtendKind);
 
       for (unsigned j = 0; j != NumParts; ++j) {
         // if it isn't first piece, alignment must be 1
         ISD::OutputArg MyFlags(Flags, Parts[j].getValueType(),
-                               i < NumFixedArgs);
+                               i < CLI.NumFixedArgs);
         if (NumParts > 1 && j == 0)
           MyFlags.Flags.setSplit();
         else if (j != 0)
           MyFlags.Flags.setOrigAlign(1);
 
-        Outs.push_back(MyFlags);
-        OutVals.push_back(Parts[j]);
+        CLI.Outs.push_back(MyFlags);
+        CLI.OutVals.push_back(Parts[j]);
       }
     }
   }
 
   // Handle the incoming return values from the call.
-  SmallVector<ISD::InputArg, 32> Ins;
+  CLI.Ins.clear();
   SmallVector<EVT, 4> RetTys;
-  ComputeValueVTs(*this, RetTy, RetTys);
+  ComputeValueVTs(*this, CLI.RetTy, RetTys);
   for (unsigned I = 0, E = RetTys.size(); I != E; ++I) {
     EVT VT = RetTys[I];
-    EVT RegisterVT = getRegisterType(RetTy->getContext(), VT);
-    unsigned NumRegs = getNumRegisters(RetTy->getContext(), VT);
+    EVT RegisterVT = getRegisterType(CLI.RetTy->getContext(), VT);
+    unsigned NumRegs = getNumRegisters(CLI.RetTy->getContext(), VT);
     for (unsigned i = 0; i != NumRegs; ++i) {
       ISD::InputArg MyFlags;
       MyFlags.VT = RegisterVT.getSimpleVT();
-      MyFlags.Used = isReturnValueUsed;
-      if (RetSExt)
+      MyFlags.Used = CLI.IsReturnValueUsed;
+      if (CLI.RetSExt)
         MyFlags.Flags.setSExt();
-      if (RetZExt)
+      if (CLI.RetZExt)
         MyFlags.Flags.setZExt();
-      if (isInreg)
+      if (CLI.IsInReg)
         MyFlags.Flags.setInReg();
-      Ins.push_back(MyFlags);
+      CLI.Ins.push_back(MyFlags);
     }
   }
 
   SmallVector<SDValue, 4> InVals;
-  Chain = LowerCall(Chain, Callee, CallConv, isVarArg, doesNotRet, isTailCall,
-                    Outs, OutVals, Ins, dl, DAG, InVals);
+  CLI.Chain = LowerCall(CLI, InVals);
 
   // Verify that the target's LowerCall behaved as expected.
-  assert(Chain.getNode() && Chain.getValueType() == MVT::Other &&
+  assert(CLI.Chain.getNode() && CLI.Chain.getValueType() == MVT::Other &&
          "LowerCall didn't return a valid chain!");
-  assert((!isTailCall || InVals.empty()) &&
+  assert((!CLI.IsTailCall || InVals.empty()) &&
          "LowerCall emitted a return value for a tail call!");
-  assert((isTailCall || InVals.size() == Ins.size()) &&
+  assert((CLI.IsTailCall || InVals.size() == CLI.Ins.size()) &&
          "LowerCall didn't emit the correct number of values!");
 
   // For a tail call, the return value is merely live-out and there aren't
   // any nodes in the DAG representing it. Return a special value to
   // indicate that a tail call has been emitted and no more Instructions
   // should be processed in the current block.
-  if (isTailCall) {
-    DAG.setRoot(Chain);
+  if (CLI.IsTailCall) {
+    CLI.DAG.setRoot(CLI.Chain);
     return std::make_pair(SDValue(), SDValue());
   }
 
-  DEBUG(for (unsigned i = 0, e = Ins.size(); i != e; ++i) {
+  DEBUG(for (unsigned i = 0, e = CLI.Ins.size(); i != e; ++i) {
           assert(InVals[i].getNode() &&
                  "LowerCall emitted a null value!");
-          assert(EVT(Ins[i].VT) == InVals[i].getValueType() &&
+          assert(EVT(CLI.Ins[i].VT) == InVals[i].getValueType() &&
                  "LowerCall emitted a value with the wrong type!");
         });
 
   // Collect the legal value parts into potentially illegal values
   // that correspond to the original function's return values.
   ISD::NodeType AssertOp = ISD::DELETED_NODE;
-  if (RetSExt)
+  if (CLI.RetSExt)
     AssertOp = ISD::AssertSext;
-  else if (RetZExt)
+  else if (CLI.RetZExt)
     AssertOp = ISD::AssertZext;
   SmallVector<SDValue, 4> ReturnValues;
   unsigned CurReg = 0;
   for (unsigned I = 0, E = RetTys.size(); I != E; ++I) {
     EVT VT = RetTys[I];
-    EVT RegisterVT = getRegisterType(RetTy->getContext(), VT);
-    unsigned NumRegs = getNumRegisters(RetTy->getContext(), VT);
+    EVT RegisterVT = getRegisterType(CLI.RetTy->getContext(), VT);
+    unsigned NumRegs = getNumRegisters(CLI.RetTy->getContext(), VT);
 
-    ReturnValues.push_back(getCopyFromParts(DAG, dl, &InVals[CurReg],
+    ReturnValues.push_back(getCopyFromParts(CLI.DAG, CLI.DL, &InVals[CurReg],
                                             NumRegs, RegisterVT, VT,
                                             AssertOp));
     CurReg += NumRegs;
@@ -6513,12 +6508,12 @@ TargetLowering::LowerCallTo(SDValue Chain, Type *RetTy,
   // such a node, so we just return a null return value in that case. In
   // that case, nothing will actually look at the value.
   if (ReturnValues.empty())
-    return std::make_pair(SDValue(), Chain);
+    return std::make_pair(SDValue(), CLI.Chain);
 
-  SDValue Res = DAG.getNode(ISD::MERGE_VALUES, dl,
-                            DAG.getVTList(&RetTys[0], RetTys.size()),
+  SDValue Res = CLI.DAG.getNode(ISD::MERGE_VALUES, CLI.DL,
+                                CLI.DAG.getVTList(&RetTys[0], RetTys.size()),
                             &ReturnValues[0], ReturnValues.size());
-  return std::make_pair(Res, Chain);
+  return std::make_pair(Res, CLI.Chain);
 }
 
 void TargetLowering::LowerOperationWrapper(SDNode *N,
