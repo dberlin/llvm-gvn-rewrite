@@ -311,12 +311,26 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 
   class Expression;
 
+  struct ValueDFS {
+    int dfs_in;
+    int dfs_out;
+    int localnum;
+    Value *value;
+    bool operator <(const ValueDFS &other) const {
+      if (dfs_in < other.dfs_in)
+	return true;
+      if (dfs_out < other.dfs_out)
+	return true;
+      return localnum < other.localnum;
+    }
+  };
+    
   static uint32_t nextCongruenceNum = 0;
   struct CongruenceClass {
     uint32_t id;
     Value* leader;
     Expression* expression;
-    std::set<std::pair<std::pair<int, int>, Value*> > members;
+    DenseSet<Value *> members;
     bool dead;
     CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0), dead(false) {};
 
@@ -1214,17 +1228,6 @@ typedef RecyclingAllocator<BumpPtrAllocator,
     DenseSet<Expression*> expressionToDelete;
     DenseSet<Value*> changedValues;
 
-
-    /// LeaderTable - A mapping from value numbers to lists of Value*'s that
-    /// have that value number.  Use findLeader to query it.
-    struct LeaderTableEntry {
-      Value *Val;
-      BasicBlock *BB;
-      LeaderTableEntry *Next;
-    };
-    DenseMap<uint32_t, LeaderTableEntry> leaderTable;
-    BumpPtrAllocator tableAllocator;
-
     Value *lookupOperandLeader(Value*);
     // expression handling
     Expression *createExpression(Instruction*);
@@ -1280,16 +1283,17 @@ typedef RecyclingAllocator<BumpPtrAllocator,
 	    || congruenceClass[i]->dead) 
 	  continue;
 	CongruenceClass *CC = congruenceClass[i];
-	DomTreeNode *DTN = DT->getNode(I->getParent());
-	int dfs_in = DTN->getDFSNumIn();
-	int dfs_out = DTN->getDFSNumOut();
-
 	assert (CC->leader != I && "Leader is messed up");
-	assert (CC->members.count(std::make_pair(std::make_pair(dfs_in, dfs_out), I)) == 0 && "Removed instruction still a member");
+	assert (CC->members.count(I) == 0 && "Removed instruction still a member");
       }
     }
     
-    void ReplaceInstruction(Instruction*, Value*, CongruenceClass*);
+    // Elimination
+    void convertDenseToDFSOrdered(DenseSet<Value*>&, std::set<ValueDFS>&);
+    void replaceInstruction(Instruction*, Value*, CongruenceClass*);
+    DenseMap<BasicBlock*, std::pair<int, int> > DFSBBMap;
+    DenseMap<Instruction*, uint32_t> InstrLocalDFS;
+
     // Symbolic evaluation
     Expression *performSymbolicEvaluation(Value*, BasicBlock*);
     Expression *performSymbolicLoadEvaluation(Instruction*, BasicBlock*);
@@ -1297,7 +1301,7 @@ typedef RecyclingAllocator<BumpPtrAllocator,
     Expression *performSymbolicCallEvaluation(Instruction*, BasicBlock*);
     Expression *performSymbolicPHIEvaluation(Instruction*, BasicBlock*);
     // Congruence findin
-    void performCongruenceFinding(Value*, Expression*, DomTreeNode*);
+    void performCongruenceFinding(Value*, Expression*);
     // Predicate and reachability handling
     void updateReachableEdge(BasicBlock*, BasicBlock*);
     void processOutgoingEdges(TerminatorInst* TI);
@@ -1312,50 +1316,6 @@ typedef RecyclingAllocator<BumpPtrAllocator,
     void ProcessTerminatorInst(TerminatorInst *TI);
     void ExitScopeIfDone(DomTreeNode*, DenseMap<DomTreeNode*, unsigned>&,
 			 DenseMap<DomTreeNode*, DomTreeNode*> &);
-
-    /// addToLeaderTable - Push a new Value to the LeaderTable onto the list for
-    /// its value number.
-    void addToLeaderTable(uint32_t N, Value *V, BasicBlock *BB) {
-      LeaderTableEntry &Curr = leaderTable[N];
-      if (!Curr.Val) {
-        Curr.Val = V;
-        Curr.BB = BB;
-        return;
-      }
-
-      LeaderTableEntry *Node = tableAllocator.Allocate<LeaderTableEntry>();
-      Node->Val = V;
-      Node->BB = BB;
-      Node->Next = Curr.Next;
-      Curr.Next = Node;
-    }
-
-    /// removeFromLeaderTable - Scan the list of values corresponding to a given
-    /// value number, and remove the given value if encountered.
-    void removeFromLeaderTable(uint32_t N, Value *V, BasicBlock *BB) {
-      LeaderTableEntry* Prev = 0;
-      LeaderTableEntry* Curr = &leaderTable[N];
-
-      while (Curr->Val != V || Curr->BB != BB) {
-        Prev = Curr;
-        Curr = Curr->Next;
-      }
-
-      if (Prev) {
-        Prev->Next = Curr->Next;
-      } else {
-        if (!Curr->Next) {
-          Curr->Val = 0;
-          Curr->BB = 0;
-        } else {
-          LeaderTableEntry* Next = Curr->Next;
-          Curr->Val = Next->Val;
-          Curr->BB = Next->BB;
-          Curr->Next = Next->Next;
-        }
-      }
-    }
-
     // List of critical edges to be split between iterations.
     SmallVector<std::pair<TerminatorInst*, unsigned>, 4> toSplit;
 
@@ -1698,34 +1658,6 @@ Value *GVN::GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
   Src = ConstantExpr::getGetElementPtr(Src, OffsetCst);
   Src = ConstantExpr::getBitCast(Src, PointerType::getUnqual(LoadTy));
   return ConstantFoldLoadFromConstPtr(Src, &TD);
-}
-
-// findLeader - In order to find a leader for a given value number at a
-// specific basic block, we first obtain the list of all Values for that number,
-// and then scan the list to find one whose block dominates the block in
-// question.  This is fast because dominator tree queries consist of only
-// a few comparisons of DFS numbers.
-Value *GVN::findLeader(BasicBlock *BB, uint32_t num) {
-  LeaderTableEntry Vals = leaderTable[num];
-  if (!Vals.Val) return 0;
-
-  Value *Val = 0;
-  if (DT->dominates(Vals.BB, BB)) {
-    Val = Vals.Val;
-    if (isa<Constant>(Val)) return Val;
-  }
-
-  LeaderTableEntry* Next = Vals.Next;
-  while (Next) {
-    if (DT->dominates(Next->BB, BB)) {
-      if (isa<Constant>(Next->Val)) return Next->Val;
-      if (!Val) Val = Next->Val;
-    }
-
-    Next = Next->Next;
-  }
-
-  return Val;
 }
 
 void GVN::dump(DenseMap<uint32_t, Value*>& d) {
@@ -2270,7 +2202,7 @@ static bool isOnlyReachableViaThisEdge(BasicBlock *Src, BasicBlock *Dst,
 }
 
 /// performCongruenceFinding - Perform congruence finding on a given value numbering expression
-void GVN::performCongruenceFinding(Value *V, Expression *E, DomTreeNode *DTN) {
+void GVN::performCongruenceFinding(Value *V, Expression *E) {
   // This is guaranteed to return something, since it will at least find INITIAL
   CongruenceClass *VClass = valueToClass[V];
   assert (VClass && "Should have found a vclass");
@@ -2285,8 +2217,7 @@ void GVN::performCongruenceFinding(Value *V, Expression *E, DomTreeNode *DTN) {
     if (VClass->members.size() != 1 || VClass->leader != V) {
       CongruenceClass *NewClass = new CongruenceClass();
       congruenceClass.push_back(NewClass);
-      // We should always be adding it below
-      // NewClass->members.push_back(V);
+      // We should always be adding the member in the below code
       NewClass->expression = NULL;
       NewClass->leader = V;
       EClass = NewClass;
@@ -2341,11 +2272,9 @@ void GVN::performCongruenceFinding(Value *V, Expression *E, DomTreeNode *DTN) {
       changedValues.erase(DI);
     if (VClass != EClass) {
       DEBUG(dbgs() << "New congruence class for " << V << " is " << EClass->id << "\n");
-      int dfs_in = DTN->getDFSNumIn();
-      int dfs_out = DTN->getDFSNumOut();
-      VClass->members.erase(std::make_pair(std::make_pair(dfs_in, dfs_out), V));
+      VClass->members.erase(V);
       // assert(std::find(EClass->members.begin(), EClass->members.end(), V) == EClass->members.end() && "Tried to add something to members twice!");
-      EClass->members.insert(std::make_pair(std::make_pair(dfs_in, dfs_out), V));
+      EClass->members.insert(V);
       valueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
       if (VClass->members.empty() && VClass != InitialClass) {
@@ -2356,13 +2285,13 @@ void GVN::performCongruenceFinding(Value *V, Expression *E, DomTreeNode *DTN) {
 	}
 	// delete VClass;
       } else if (VClass->leader == V) {
-	VClass->leader = VClass->members.begin()->second;
-	for (std::set<std::pair<std::pair<int, int>, Value* > >::iterator LI = VClass->members.begin(),
+	VClass->leader = *(VClass->members.begin());
+	for (DenseSet<Value*>::iterator LI = VClass->members.begin(),
 	       LE = VClass->members.end();
 	     LI != LE; ++LI) {
-	  if (Instruction *I = dyn_cast<Instruction>(LI->second))
+	  if (Instruction *I = dyn_cast<Instruction>(*LI))
 	    touchedInstructions.insert(I);
-	  changedValues.insert(LI->second);
+	  changedValues.insert(*LI);
 	}
       }
     }
@@ -2551,7 +2480,7 @@ void GVN::ProcessTerminatorInst(TerminatorInst *TI){
   }
 }
 
-void GVN::ReplaceInstruction(Instruction *I, Value *V, CongruenceClass *ReplClass) {
+void GVN::replaceInstruction(Instruction *I, Value *V, CongruenceClass *ReplClass) {
   assert (ReplClass->leader != I && "About to accidentally remove our leader");
   if (V->getType() != I->getType()) {
     Instruction *insertPlace = I;
@@ -2564,11 +2493,7 @@ void GVN::ReplaceInstruction(Instruction *I, Value *V, CongruenceClass *ReplClas
   I->replaceAllUsesWith(V);
   // Remove the old instruction from the class member list, so the
   // member size is correct for PRE.
-  DomTreeNode *DTN = DT->getNode(I->getParent());
-  int dfs_in = DTN->getDFSNumIn();
-  int dfs_out = DTN->getDFSNumOut();
-  
-  ReplClass->members.erase(std::make_pair(std::make_pair(dfs_in, dfs_out), I));
+  ReplClass->members.erase(I);
   // We save the actual erasing to avoid invalidating memory
   // dependencies until we are done with everything.
   UpdateMemDepInfo(MD, I, V);
@@ -2608,11 +2533,11 @@ bool GVN::ProcessBlock(BasicBlock *BB) {
     if (IClass->expression && IClass->leader && IClass->leader != I) {
       if (Constant *C = dyn_cast<Constant>(IClass->leader)){
 	DEBUG(dbgs() << "Found constant replacement " << *C << " for " << *I << "\n");
-	ReplaceInstruction(I, C, IClass);
+	replaceInstruction(I, C, IClass);
 	continue;
       } else if (Argument *A = dyn_cast<Argument>(IClass->leader)) {
 	DEBUG(dbgs() << "Found argument replacement " << *A << " for " << *I << "\n");
-	ReplaceInstruction(I, A, IClass);
+	replaceInstruction(I, A, IClass);
 	continue;
       }
     }
@@ -2645,7 +2570,7 @@ bool GVN::ProcessBlock(BasicBlock *BB) {
 	    Result = GetStoreValueForLoad(SIR->getValueOperand(), Offset, LI->getType(), LI, *TD);
 	  }
 	}
-	ReplaceInstruction(I, Result, IClass);
+	replaceInstruction(I, Result, IClass);
       }
     } else {
       if (LoadInst *LI = dyn_cast<LoadInst>(I)){
@@ -2924,15 +2849,7 @@ void GVN::markUsersTouched(Value *V) {
 void GVN::handleNewInstruction(Instruction *I) {
   valueToClass[I] = InitialClass;
   touchedInstructions.insert(I);
-  DomTreeNode *DTN = DT->getNode(I->getParent());
-  // In the unreachable block case, just ignore things
-  if (!DTN)
-    return;
-  
-  int dfs_in = DTN->getDFSNumIn();
-  int dfs_out = DTN->getDFSNumOut();
-  
-  InitialClass->members.insert(std::make_pair(std::make_pair(dfs_in, dfs_out), I));
+  InitialClass->members.insert(I);
 }
 
 /// processNonLocalLoad - Attempt to eliminate a load whose dependencies are
@@ -3388,6 +3305,21 @@ bool GVN::splitCriticalEdges() {
   return true;
 }
 
+
+void GVN::convertDenseToDFSOrdered(DenseSet<Value*> &Dense, std::set<ValueDFS> &DFSOrderedSet) {
+  for (DenseSet<Value*>::iterator DI = Dense.begin(), DE = Dense.end(); DI != DE; ++DE) {
+    Instruction *I = dyn_cast<Instruction>(*DI);
+    assert (I && "Not an instruction in our member set");
+    std::pair<int, int> DFSPair = DFSBBMap[I->getParent()];
+    ValueDFS VD;
+    VD.dfs_in = DFSPair.first;
+    VD.dfs_out = DFSPair.second;
+    VD.localnum = InstrLocalDFS[I];
+    VD.value = I;
+    DFSOrderedSet.insert(VD);
+  }
+}
+  
 // uint32_t GVN::nextCongruenceNum = 0;
 
 /// runOnFunction - This is the main transformation entry point for a function.
@@ -3425,11 +3357,12 @@ bool GVN::runOnFunction(Function& F) {
   // Count number of instructions for sizing of hash tables
   unsigned NumBasicBlocks = F.size();
   DEBUG(dbgs() << "Found " << NumBasicBlocks <<  " basic blocks\n");
-  for (Function::const_iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI)
-    for (BasicBlock::const_iterator BI = FI->begin(), BE = FI->end();
-	    BI != BE; ++BI)
+  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI)
+    for (BasicBlock::iterator BI = FI->begin(), BE = FI->end();
+	 BI != BE; ++BI) {
+      InstrLocalDFS[BI] = ICount;
       ++ICount;
-
+    }
   // Ensure we don't end up resizing the expressionToClass map, as
   // that can be quite expensive. At most, we have one expression per
   // instruction.
@@ -3444,23 +3377,17 @@ bool GVN::runOnFunction(Function& F) {
   reachableBlocks.insert(&F.getEntryBlock());
 
   // Init the INITIAL class
-  std::set<std::pair<std::pair<int, int>, Value* > > InitialValues;
+  DenseSet<Value*> InitialValues;
   for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI)  {
-    DomTreeNode *DTN = DT->getNode(FI);
-    // In the unreachable block case, just ignore things
-    if (!DTN)
-      continue;
-    
-    int dfs_in = DTN->getDFSNumIn();
-    int dfs_out = DTN->getDFSNumOut();
     for (BasicBlock::iterator BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
-      InitialValues.insert(std::make_pair(std::make_pair(dfs_in, dfs_out), BI));
+      InitialValues.insert(BI);
     }
   }
+
   InitialClass = new CongruenceClass();
-  for (std::set<std::pair<std::pair<int, int>, Value* > >::iterator LI = InitialValues.begin(), LE = InitialValues.end();
+  for (DenseSet<Value*>::iterator LI = InitialValues.begin(), LE = InitialValues.end();
        LI != LE; ++LI)
-    valueToClass[LI->second] = InitialClass;
+    valueToClass[*LI] = InitialClass;
   InitialClass->members.swap(InitialValues);
   congruenceClass.push_back(InitialClass);
   if (!noLoads)
@@ -3486,7 +3413,6 @@ bool GVN::runOnFunction(Function& F) {
       //TODO(Predication)
       bool blockReachable = reachableBlocks.count(*RI);
       bool movedForward = false;
-      DomTreeNode *DTN = DT->getNode(*RI);
       for (BasicBlock::iterator BI = (*RI)->begin(), BE = (*RI)->end(); BI != BE; !movedForward ? BI++ : BI) {
 	movedForward = false;
         DenseSet<Instruction*>::iterator DI = touchedInstructions.find(BI);
@@ -3547,7 +3473,7 @@ bool GVN::runOnFunction(Function& F) {
 
           if (!I->isTerminator()) {
 	    Expression *Symbolized = performSymbolicEvaluation(I, *RI);
-            performCongruenceFinding(I, Symbolized, DTN);
+            performCongruenceFinding(I, Symbolized);
           } else {
             processOutgoingEdges(dyn_cast<TerminatorInst>(I));
           }
@@ -3625,6 +3551,14 @@ bool GVN::runOnFunction(Function& F) {
   // and eliminate the ones dominated by the last member.
   // When we find something not dominated, it becomes the new leader
   // for elimination purposes
+
+  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
+    DomTreeNode *DTN = DT->getNode(FI);
+    if (!DTN)
+      continue;
+    DFSBBMap[FI] = std::make_pair(DTN->getDFSNumIn(), DTN->getDFSNumOut());
+  }
+  
  for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
    CongruenceClass *CC = congruenceClass[i];
    if (CC != InitialClass && !CC->dead) {
@@ -3636,8 +3570,9 @@ bool GVN::runOnFunction(Function& F) {
        continue;
      if (CC->expression && CC->leader) {
        if (isa<Constant>(CC->leader) || isa<Argument>(CC->leader)) {
-	 for (std::set<std::pair<std::pair<int, int>, Value*> >::const_iterator CI = CC->members.begin(), CE = CC->members.end(); CI != CE; ) {
-	   Value *member = CI->second;
+	 
+	 for (DenseSet<Value*>::iterator CI = CC->members.begin(), CE = CC->members.end(); CI != CE; ) {
+	   Value *member = *CI;
 	   ++CI;
 	   
 	   if (member != CC->leader) {
@@ -3645,7 +3580,7 @@ bool GVN::runOnFunction(Function& F) {
 	     if (isa<StoreInst>(member) || isa<BitCastInst>(member))
 	       continue;
 	     DEBUG(dbgs() << "Found replacement " << *(CC->leader) << " for " << *member << "\n");
-	     ReplaceInstruction(cast<Instruction>(member), CC->leader, CC);
+	     replaceInstruction(cast<Instruction>(member), CC->leader, CC);
 	   }
 	 }
        } else {
@@ -3654,7 +3589,7 @@ bool GVN::runOnFunction(Function& F) {
 	   MemoryExpression *ME;
 	   if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
 	     if (ME->hadNonLocal()) {
-	       Value *member = CC->members.begin()->second;
+	       Value *member = *(CC->members.begin());
 	       if (LoadInst *LI = dyn_cast<LoadInst>(member)){
 		 processNonLocalLoad(LI);
 	       }
@@ -3664,17 +3599,20 @@ bool GVN::runOnFunction(Function& F) {
 	   MemoryExpression *ME;
 	   if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
 	     if (ME->hadNonLocal()) {
-	       Value *member = CC->members.begin()->second;
+	       Value *member = *(CC->members.begin());
 	       if (LoadInst *LI = dyn_cast<LoadInst>(member)){
 		 processNonLocalLoad(LI);
 	       }
 	     }
 	   }
 #endif
-	   for (std::set<std::pair<std::pair<int, int>, Value*> >::const_iterator CI = CC->members.begin(), CE = CC->members.end(); CI != CE;) {
-	     int currdfs_in = CI->first.first;
-	     int currdfs_out = CI->first.second;
-	     Value *member = CI->second;
+	   std::set<ValueDFS> DFSOrderedSet;
+	   convertDenseToDFSOrdered(CC->members, DFSOrderedSet);
+	   
+	   for (std::set<ValueDFS>::iterator CI = DFSOrderedSet.begin(), CE = DFSOrderedSet.end(); CI != CE;) {
+	     int currdfs_in = CI->dfs_in;
+	     int currdfs_out = CI->dfs_out;
+	     Value *member = CI->value;
 	     ++CI;
 	     
 	     //TODO: eliminate duplicate bitcasts but not valid bitcast
@@ -3711,7 +3649,7 @@ bool GVN::runOnFunction(Function& F) {
 		 }
 	       }
 	       if (member != CC->leader)
-		 ReplaceInstruction(cast<Instruction>(member), Result, CC);
+		 replaceInstruction(cast<Instruction>(member), Result, CC);
 	     }
 	   }
 	 }
@@ -3772,11 +3710,11 @@ bool GVN::runOnFunction(Function& F) {
   touchedInstructions.clear();
   processedCount.clear();
   expressionAllocator.Reset();
-  leaderTable.clear();
-  tableAllocator.Reset();
   instrsToErase_.clear();
   depQueryCache.clear();
   depIQueryCache.clear();
   locDepCache.clear();
+  DFSBBMap.clear();
+  InstrLocalDFS.clear();
   return Changed;
 }
