@@ -40,7 +40,6 @@
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/PostOrderIterator.h"
-#include "llvm/ADT/ScopedHashTable.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SparseBitVector.h"
 #include "llvm/ADT/Statistic.h"
@@ -319,9 +318,14 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     bool operator <(const ValueDFS &other) const {
       if (dfs_in < other.dfs_in)
 	return true;
-      if (dfs_out < other.dfs_out)
-	return true;
-      return localnum < other.localnum;
+      else if (dfs_in == other.dfs_in)
+	{
+	  if (dfs_out < other.dfs_out)
+	    return true;
+	  else if (dfs_out == other.dfs_out)
+	    return localnum < other.localnum;
+	}
+      return false;
     }
   };
     
@@ -1179,11 +1183,6 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 namespace {
   class GVN : public FunctionPass {
     CongruenceClass *InitialClass;
-typedef RecyclingAllocator<BumpPtrAllocator,
-			       ScopedHashTableVal<CongruenceClass*, Value*> > AllocatorTy;
-    typedef ScopedHashTable<CongruenceClass*, Value*,  DenseMapInfo<CongruenceClass*>,
-			    AllocatorTy> ScopedHTType;
-    typedef ScopedHTType::ScopeTy ScopeType;
     bool noLoads;
     DominatorTree *DT;
     const TargetLibraryInfo *TLI;
@@ -1191,8 +1190,6 @@ typedef RecyclingAllocator<BumpPtrAllocator,
     DenseSet<Instruction*> touchedInstructions;
     DenseMap<Instruction*, uint32_t> processedCount;
     std::vector<CongruenceClass*> congruenceClass;
-    DenseMap<BasicBlock*, ScopeType*> ScopeMap;
-    ScopedHTType availableTable;
 
     struct ComparingExpressionInfo {
       static inline Expression* getEmptyKey() {
@@ -1309,13 +1306,6 @@ typedef RecyclingAllocator<BumpPtrAllocator,
     // Non-local load handling
     bool processNonLocalLoad(LoadInst*);
     
-    // Dominator based replacement handling
-    void EnterScope(BasicBlock*);
-    void ExitScope(BasicBlock*);
-    bool ProcessBlock(BasicBlock*);
-    void ProcessTerminatorInst(TerminatorInst *TI);
-    void ExitScopeIfDone(DomTreeNode*, DenseMap<DomTreeNode*, unsigned>&,
-			 DenseMap<DomTreeNode*, DomTreeNode*> &);
     // List of critical edges to be split between iterations.
     SmallVector<std::pair<TerminatorInst*, unsigned>, 4> toSplit;
 
@@ -2427,58 +2417,6 @@ void GVN::propagateChangeInEdge(BasicBlock *Dest) {
   }
 }
 
-void GVN::EnterScope(BasicBlock *BB) {
-  DEBUG(dbgs() << "Entering: " << BB->getName() << '\n');
-  ScopeType *Scope = new ScopeType(availableTable);
-  ScopeMap[BB] = Scope;
-}
-
-void GVN::ExitScope(BasicBlock *BB) {
-  DEBUG(dbgs() << "Exiting: " << BB->getName() << '\n');
-  DenseMap<BasicBlock*, ScopeType*>::iterator SI = ScopeMap.find(BB);
-  assert(SI != ScopeMap.end());
-  ScopeMap.erase(SI);
-  delete SI->second;
-}
-
-// ExitScopeIfDone - Destroy scope for the BB that corresponds to the given
-/// dominator tree node if its a leaf or all of its children are done. Walk
-/// up the dominator tree to destroy ancestors which are now done.
-void GVN::ExitScopeIfDone(DomTreeNode *Node,
-			  DenseMap<DomTreeNode*, unsigned> &OpenChildren,
-			  DenseMap<DomTreeNode*, DomTreeNode*> &ParentMap) {
-  if (OpenChildren[Node])
-    return;
-
-  // Pop scope.
-  ExitScope(Node->getBlock());
-
-  // Now traverse upwards to pop ancestors whose offsprings are all done.
-  while (DomTreeNode *Parent = ParentMap[Node]) {
-    unsigned Left = --OpenChildren[Parent];
-    if (Left != 0)
-      break;
-    ExitScope(Parent->getBlock());
-    Node = Parent;
-  }
-}
-
-void GVN::ProcessTerminatorInst(TerminatorInst *TI){
-  BranchInst *BR = dyn_cast<BranchInst>(TI);
-  if (BR && BR->isConditional()) {
-    Value *Cond = BR->getCondition();
-    // See if it was already simplified for us. This should be the
-    // normal cases for ones we can remove
-    if (isa<Constant>(Cond)) {
-      return;
-    }
-    // Otherwise
-    CongruenceClass *CondClass = valueToClass[Cond];
-    if (CondClass && CondClass->expression) {
-      assert (!isa<ConstantExpression>(CondClass->expression) && "Should have been folded already");
-    }
-  }
-}
 
 void GVN::replaceInstruction(Instruction *I, Value *V, CongruenceClass *ReplClass) {
   assert (ReplClass->leader != I && "About to accidentally remove our leader");
@@ -2500,89 +2438,6 @@ void GVN::replaceInstruction(Instruction *I, Value *V, CongruenceClass *ReplClas
   markInstructionForDeletion(I);
 }
 
-bool GVN::ProcessBlock(BasicBlock *BB) {
-  bool Changed = false;
-  if (!reachableBlocks.count(BB)) {
-    DEBUG(dbgs() << "Skipping unreachable block " << getBlockName(BB) << " during elimination\n");
-    return false;
-  }
-
-  for (BasicBlock::iterator II = BB->begin(), IE = BB->end();  II != IE; ) {
-    Instruction *I = &*II;
-    ++II;
-    // Terminators
-    if (I->isTerminator()) {
-      ProcessTerminatorInst(cast<TerminatorInst>(I));
-      continue;
-    }  else if (isa<StoreInst>(I)) {
-      // Eliminating stores is possible, but we'd rather not do the computation
-      continue;
-    } else if (isa<BitCastInst>(I)) {
-      continue;
-    }
-
-    bool isLoad = isa<LoadInst>(I);
-
-
-    CongruenceClass *IClass = valueToClass[I];
-    // We may not find a congruence class if it is, for example, a
-    // bitcast instruction we just inserted
-    if (!IClass)
-      continue;
-
-    if (IClass->expression && IClass->leader && IClass->leader != I) {
-      if (Constant *C = dyn_cast<Constant>(IClass->leader)){
-	DEBUG(dbgs() << "Found constant replacement " << *C << " for " << *I << "\n");
-	replaceInstruction(I, C, IClass);
-	continue;
-      } else if (Argument *A = dyn_cast<Argument>(IClass->leader)) {
-	DEBUG(dbgs() << "Found argument replacement " << *A << " for " << *I << "\n");
-	replaceInstruction(I, A, IClass);
-	continue;
-      }
-    }
-
-    // Skip instructions with singleton congruence classes
-    // TODO unless they are nonlocal loads.
-    if (0 && IClass->members.size() <= 1)
-      continue;
-    Value *Result = availableTable.lookup(IClass);
-
-    if (Result){
-      if (Result != I) {
-	DEBUG(dbgs() << "Found replacement " << *Result << " for " << *I << "\n");
-	LoadInst *LI;
-	if (I->getType() != Result->getType() && (LI = dyn_cast<LoadInst>(I))) {
-	  if (LoadInst *LIR = dyn_cast<LoadInst>(Result)) {
-	    int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
-						       LI->getPointerOperand(),
-						       LIR,
-						       *TD);
-	    assert(Offset != -1 && "Should have been able to coerce load");
-
-	    Result = GetLoadValueForLoad(LIR, Offset, LI->getType(), LI, *TD);
-
-	  } else if (StoreInst *SIR = dyn_cast<StoreInst>(Result)) {
-	    int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
-							LI->getPointerOperand(),
-							SIR, *TD);
-	    assert(Offset != -1 && "Should have been able to coerce store");
-	    Result = GetStoreValueForLoad(SIR->getValueOperand(), Offset, LI->getType(), LI, *TD);
-	  }
-	}
-	replaceInstruction(I, Result, IClass);
-      }
-    } else {
-      if (LoadInst *LI = dyn_cast<LoadInst>(I)){
-	MemDepResult local_dep = MD->getDependency(LI);
-	if (local_dep.isNonLocal())
-	  processNonLocalLoad(LI);
-      }
-      availableTable.insert(IClass, I);
-    }
-  }
-  return Changed;
-}
 namespace {
 
 struct AvailableValueInBlock {
@@ -2859,7 +2714,7 @@ bool GVN::processNonLocalLoad(LoadInst *LI) {
   SmallVector<NonLocalDepResult, 64> Deps;
   AliasAnalysis::Location Loc = AA->getLocation(LI);
   
-  // Loc.Ptr = lookupOperandLeader(LI->getPointerOperand());
+  Loc.Ptr = lookupOperandLeader(LI->getPointerOperand());
   MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
   //DEBUG(dbgs() << "INVESTIGATING NONLOCAL LOAD: "
   //             << Deps.size() << *LI << '\n');
@@ -3307,7 +3162,7 @@ bool GVN::splitCriticalEdges() {
 
 
 void GVN::convertDenseToDFSOrdered(DenseSet<Value*> &Dense, std::set<ValueDFS> &DFSOrderedSet) {
-  for (DenseSet<Value*>::iterator DI = Dense.begin(), DE = Dense.end(); DI != DE; ++DE) {
+  for (DenseSet<Value*>::iterator DI = Dense.begin(), DE = Dense.end(); DI != DE; ++DI) {
     Instruction *I = dyn_cast<Instruction>(*DI);
     assert (I && "Not an instruction in our member set");
     std::pair<int, int> DFSPair = DFSBBMap[I->getParent()];
@@ -3332,10 +3187,6 @@ bool GVN::runOnFunction(Function& F) {
   // Split all critical edges to ensure maximal removal
   splitCriticalEdges();
 
-  DenseMap<DomTreeNode*, unsigned> OpenChildren;
-  DenseMap<DomTreeNode*, DomTreeNode*> ParentMap;
-  SmallVector<DomTreeNode*, 32> Scopes;
-  SmallVector<DomTreeNode*, 8> Worklist;
 
   bool Changed = false;
   
@@ -3492,54 +3343,6 @@ bool GVN::runOnFunction(Function& F) {
     }
   }
 
-  // Perform dominator based elimination.
-
-  Worklist.push_back(DT->getRootNode());
-  do {
-    DomTreeNode *Node;
-    Node = Worklist.pop_back_val();
-    Scopes.push_back(Node);
-    const std::vector<DomTreeNode*> &Children = Node->getChildren();
-    unsigned NumChildren = Children.size();
-    OpenChildren[Node] = NumChildren;
-    for (unsigned i = 0; i != NumChildren; ++i) {
-      DomTreeNode *Child = Children[i];
-      ParentMap[Child] = Node;
-      Worklist.push_back(Child);
-    }
-  } while (!Worklist.empty());
-#if 0
- for (unsigned i = 0, e = Scopes.size(); i != e; ++i) {
-    DomTreeNode *Node = Scopes[i];
-    BasicBlock *BB = Node->getBlock();
-    EnterScope(BB);
-    Changed |= ProcessBlock(BB);
-    // If it's a leaf node, it's done. Traverse upwards to pop ancestors.
-    ExitScopeIfDone(Node, OpenChildren, ParentMap);
-  }
-  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI){
-    BasicBlock *BB = FI;
-    if (!reachableBlocks.count(BB)) {
-      DEBUG(dbgs() << "We believe block " << getBlockName(BB) << " is unreachable\n");
-      DeleteInstructionInBlock(BB);
-      Changed = true;
-    }
-  }
-
-  //TODO: Perform PRE.
-  for (DenseSet<Instruction*>::iterator DI = instrsToErase_.begin(), DE = instrsToErase_.end(); DI != DE;) {
-    Instruction *toErase = *DI;
-    ++DI;
-    // if (!toErase->use_empty()) {
-    //   for (Value::use_iterator UI = toErase->use_begin(), UE = toErase->use_end();
-    // 	 UI != UE; ++UI) {
-    // 	assert (instrsToErase_.count(cast<Instruction>(*UI)) && "trying to removing something without also deleting it's uses");
-    //   }
-    // }
-    
-    // toErase->eraseFromParent();
-  }
-#else
 
   // This is a mildly crazy eliminator. The normal way to eliminate is
   // to walk the dominator tree in order, keeping track of available
@@ -3607,6 +3410,7 @@ bool GVN::runOnFunction(Function& F) {
 	   }
 #endif
 	   std::set<ValueDFS> DFSOrderedSet;
+	   
 	   convertDenseToDFSOrdered(CC->members, DFSOrderedSet);
 	   
 	   for (std::set<ValueDFS>::iterator CI = DFSOrderedSet.begin(), CE = DFSOrderedSet.end(); CI != CE;) {
@@ -3685,9 +3489,6 @@ bool GVN::runOnFunction(Function& F) {
  }
  
        
-#endif
- ScopeMap.clear();
- Scopes.clear();
  valueToClass.clear();
  for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
    delete congruenceClass[i];
