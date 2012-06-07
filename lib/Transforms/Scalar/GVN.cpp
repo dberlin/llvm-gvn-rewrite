@@ -1310,6 +1310,8 @@ namespace {
     SmallVector<std::pair<TerminatorInst*, unsigned>, 4> toSplit;
 
     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+      AU.addRequiredID(BreakCriticalEdgesID);
+      AU.addPreservedID(BreakCriticalEdgesID);
       AU.addRequired<DominatorTree>();
       AU.addRequired<TargetLibraryInfo>();
       if (!noLoads)
@@ -1323,11 +1325,11 @@ namespace {
     // Helper fuctions
     // FIXME: eliminate or document these better
     void dump(DenseMap<uint32_t, Value*> &d);
-    Value *findLeader(BasicBlock *BB, uint32_t num);
+    Value *findPRELeader(BasicBlock*, Value*);
     bool splitCriticalEdges();
-    unsigned replaceAllDominatedUsesWith(Value *From, Value *To,
-                                         BasicBlock *Root);
-    bool propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root);
+    bool performPRE(Function &F);
+    unsigned replaceAllDominatedUsesWith(Value*, Value*, BasicBlock*);
+    bool propagateEquality(Value*, Value*, BasicBlock*);
   };
 
   char GVN::ID = 0;
@@ -1340,6 +1342,7 @@ FunctionPass *llvm::createGVNPass(bool noLoads) {
 }
 
 INITIALIZE_PASS_BEGIN(GVN, "gvn", "Global Value Numbering", false, false)
+INITIALIZE_PASS_DEPENDENCY(BreakCriticalEdges)
 INITIALIZE_PASS_DEPENDENCY(MemoryDependenceAnalysis)
 INITIALIZE_PASS_DEPENDENCY(DominatorTree)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfo)
@@ -1883,7 +1886,8 @@ Expression *GVN::performSymbolicCallEvaluation(Instruction *I, BasicBlock *B) {
   }
 }
 
-// performSymbolicPHIEvaluation - Evaluate PHI nodes symbolically, and create an expression result
+// performSymbolicPHIEvaluation - Evaluate PHI nodes symbolically, and
+// create an expression result 
 Expression *GVN::performSymbolicPHIEvaluation(Instruction *I, BasicBlock *B) {
   PHIExpression *E = cast<PHIExpression>(createPHIExpression(I));
   E->setOpcode(I->getOpcode());
@@ -1903,8 +1907,10 @@ Expression *GVN::performSymbolicPHIEvaluation(Instruction *I, BasicBlock *B) {
   }
   //
   if (AllSameValue) {
-    // It's possible to have mutually recursive phi nodes, especially in weird CFG's.
-    // This can cause infinite loops (even if you disable the recursion below, you will ping-pong between congruence classes)
+    // It's possible to have mutually recursive phi nodes, especially
+    // in weird CFG's. 
+    // This can cause infinite loops (even if you disable the
+    // recursion below, you will ping-pong between congruence classes) 
     // If a phi node evaluates to another phi node, just leave it alone
     if (isa<PHINode>(AllSameValue))
       return E;
@@ -1918,7 +1924,8 @@ Expression *GVN::performSymbolicPHIEvaluation(Instruction *I, BasicBlock *B) {
 }
 
 
-/// performSymbolicEvaluation - Substitute and symbolize the value before value numbering
+/// performSymbolicEvaluation - Substitute and symbolize the value
+/// before value numbering 
 Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
   Expression *E = NULL;
   if (Constant *C = dyn_cast<Constant>(V))
@@ -1955,7 +1962,8 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
 	E = performSymbolicLoadEvaluation(I, B);
       break;
     case Instruction::BitCast: {
-      //Pointer bitcasts are noops, we can just make them out of whole cloth if we need to.
+      // Pointer bitcasts are noops, we can just make them out of whole
+      // cloth if we need to. 
       if (I->getType()->isPointerTy()){
 	if (Instruction *I0 = dyn_cast<Instruction>(I->getOperand(0)))
 	  return performSymbolicEvaluation(I0, I0->getParent());
@@ -2018,9 +2026,9 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
 }
 
 
-/// replaceAllDominatedUsesWith - Replace all uses of 'From' with 'To' if the
-/// use is dominated by the given basic block.  Returns the number of uses that
-/// were replaced.
+/// replaceAllDominatedUsesWith - Replace all uses of 'From' with 'To'
+/// if the use is dominated by the given basic block.  Returns the
+/// number of uses that were replaced.
 unsigned GVN::replaceAllDominatedUsesWith(Value *From, Value *To,
                                           BasicBlock *Root) {
   unsigned Count = 0;
@@ -2049,9 +2057,10 @@ unsigned GVN::replaceAllDominatedUsesWith(Value *From, Value *To,
   return Count;
 }
 
-/// propagateEquality - The given values are known to be equal in every block
-/// dominated by 'Root'.  Exploit this, for example by replacing 'LHS' with
-/// 'RHS' everywhere in the scope.  Returns whether a change was made.
+/// propagateEquality - The given values are known to be equal in
+/// every block dominated by 'Root'.  Exploit this, for example by
+/// replacing 'LHS' with 'RHS' everywhere in the scope.  Returns
+/// whether a change was made. 
 bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
   SmallVector<std::pair<Value*, Value*>, 4> Worklist;
   Worklist.push_back(std::make_pair(LHS, RHS));
@@ -2073,10 +2082,10 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
     assert((isa<Argument>(LHS) || isa<Instruction>(LHS)) && "Unexpected value!");
     //TODO: Improve equality propagation
 #if 0
-    // If there is no obvious reason to prefer the left-hand side over the right-
-    // hand side, ensure the longest lived term is on the right-hand side, so the
-    // shortest lived term will be replaced by the longest lived.  This tends to
-    // expose more simplifications.
+    // If there is no obvious reason to prefer the left-hand side over
+    // the right-hand side, ensure the longest lived term is on the
+    // right-hand side, so the shortest lived term will be replaced by
+    // the longest lived.  This tends to expose more simplifications.
     uint32_t LVN = VN.lookup_or_add(LHS);
     if ((isa<Argument>(LHS) && isa<Argument>(RHS)) ||
         (isa<Instruction>(LHS) && isa<Instruction>(RHS))) {
@@ -2094,23 +2103,25 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
            "Instruction doesn't dominate scope!");
     //TODO: Improve equality propagation
 #if 0
-    // If value numbering later deduces that an instruction in the scope is equal
-    // to 'LHS' then ensure it will be turned into 'RHS'.
+    // If value numbering later deduces that an instruction in the
+    // scope is equal to 'LHS' then ensure it will be turned into 'RHS'.
     addToLeaderTable(LVN, RHS, Root);
 #endif
-    // Replace all occurrences of 'LHS' with 'RHS' everywhere in the scope.  As
-    // LHS always has at least one use that is not dominated by Root, this will
-    // never do anything if LHS has only one use.
+    // Replace all occurrences of 'LHS' with 'RHS' everywhere in the
+    // scope.  As LHS always has at least one use that is not
+    // dominated by Root, this will never do anything if LHS has only
+    // one use.
     if (!LHS->hasOneUse()) {
       unsigned NumReplacements = replaceAllDominatedUsesWith(LHS, RHS, Root);
       Changed |= NumReplacements > 0;
       NumGVNEqProp += NumReplacements;
     }
 
-    // Now try to deduce additional equalities from this one.  For example, if the
-    // known equality was "(A != B)" == "false" then it follows that A and B are
-    // equal in the scope.  Only boolean equalities with an explicit true or false
-    // RHS are currently supported.
+    // Now try to deduce additional equalities from this one.  For
+    // example, if the known equality was "(A != B)" == "false" then
+    // it follows that A and B are equal in the scope.  Only boolean
+    // equalities with an explicit true or false RHS are currently
+    // supported.
     if (!RHS->getType()->isIntegerTy(1))
       // Not a boolean equality - bail out.
       continue;
@@ -2122,8 +2133,8 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
     bool isKnownTrue = CI->isAllOnesValue();
     bool isKnownFalse = !isKnownTrue;
 
-    // If "A && B" is known true then both A and B are known true.  If "A || B"
-    // is known false then both A and B are known false.
+    // If "A && B" is known true then both A and B are known true.  If
+    // "A || B" is known false then both A and B are known false.
     Value *A, *B;
     if ((isKnownTrue && match(LHS, m_And(m_Value(A), m_Value(B)))) ||
         (isKnownFalse && match(LHS, m_Or(m_Value(A), m_Value(B))))) {
@@ -2132,9 +2143,10 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       continue;
     }
     //TODO Multi propagation
-    // If we are propagating an equality like "(A == B)" == "true" then also
-    // propagate the equality A == B.  When propagating a comparison such as
-    // "(A >= B)" == "true", replace all instances of "A < B" with "false".
+    // If we are propagating an equality like "(A == B)" == "true"
+    // then also propagate the equality A == B.  When propagating a
+    // comparison such as "(A >= B)" == "true", replace all instances
+    // of "A < B" with "false".
     if (ICmpInst *Cmp = dyn_cast<ICmpInst>(LHS)) {
       Value *Op0 = Cmp->getOperand(0), *Op1 = Cmp->getOperand(1);
 
@@ -2147,9 +2159,9 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       // If "A >= B" is known true, replace "A < B" with false everywhere.
       CmpInst::Predicate NotPred = Cmp->getInversePredicate();
       Constant *NotVal = ConstantInt::get(Cmp->getType(), isKnownFalse);
-      // Since we don't have the instruction "A < B" immediately to hand, work out
-      // the value number that it would have and use that to find an appropriate
-      // instruction (if any).
+      // Since we don't have the instruction "A < B" immediately to
+      // hand, work out the value number that it would have and use
+      // that to find an appropriate instruction (if any).
       uint32_t NextNum = VN.getNextUnusedValueNumber();
       uint32_t Num = VN.lookup_or_add_cmp(Cmp->getOpcode(), NotPred, Op0, Op1);
       // If the number we were assigned was brand new then there is no point in
@@ -2163,8 +2175,8 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
           NumGVNEqProp += NumReplacements;
         }
       }
-      // Ensure that any instruction in scope that gets the "A < B" value number
-      // is replaced with false.
+      // Ensure that any instruction in scope that gets the "A < B"
+      // value number is replaced with false.
       addToLeaderTable(Num, NotVal, Root);
 #endif
       continue;
@@ -2191,7 +2203,8 @@ static bool isOnlyReachableViaThisEdge(BasicBlock *Src, BasicBlock *Dst,
   return Pred != 0;
 }
 
-/// performCongruenceFinding - Perform congruence finding on a given value numbering expression
+/// performCongruenceFinding - Perform congruence finding on a given
+/// value numbering expression
 void GVN::performCongruenceFinding(Value *V, Expression *E) {
   // This is guaranteed to return something, since it will at least find INITIAL
   CongruenceClass *VClass = valueToClass[V];
@@ -2199,9 +2212,11 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
   assert (!VClass->dead && "Found a dead class");
   
 
-  //TODO(dannyb): Double check algorithm where we are ignoring copy check of "if e is a variable"
+  //TODO(dannyb): Double check algorithm where we are ignoring copy
+  //check of "if e is a variable"
   CongruenceClass *EClass;
-  // Expressions we can't symbolize are always in their own unique congruence class
+  // Expressions we can't symbolize are always in their own unique
+  // congruence class
   if (E == NULL) {
     // We may have already made a unique class
     if (VClass->members.size() != 1 || VClass->leader != V) {
@@ -2391,19 +2406,20 @@ void GVN::processOutgoingEdges(TerminatorInst *TI) {
 // incoming edges at once.
 //
 void GVN::propagateChangeInEdge(BasicBlock *Dest) {
-  // The algorithm states that you only need to touch blocks that are confluence nodes.
-  // I also can't see why you would need to touch any instructions that aren't PHI
-  // nodes.  Because we don't use predicates right now, they are the ones whose
-  // value could have changed as a result of a new edge becoming live,
-  // and any changes to their value should propagate appropriately
-  // through the rest of the block.
+  // The algorithm states that you only need to touch blocks that are
+  // confluence nodes.  I also can't see why you would need to touch
+  // any instructions that aren't PHI nodes.  Because we don't use
+  // predicates right now, they are the ones whose value could have
+  // changed as a result of a new edge becoming live, and any changes
+  // to their value should propagate appropriately through the rest of
+  // the block.
   DomTreeNode *DTN = DT->getNode(Dest);
-  //TODO(dannyb): This differs slightly from the published algorithm, verify it
-  //The published algorithm touches all instructions, we only touch the phi nodes.
-  // This is because there should be no other values that can
-  //*directly* change as a result of edge reachability. If the phi
-  //node ends up producing a new value, it's users will be marked as
-  //touched anyway
+  //TODO(dannyb): This differs slightly from the published algorithm,
+  //verify it The published algorithm touches all instructions, we
+  //only touch the phi nodes.  This is because there should be no
+  //other values that can *directly* change as a result of edge
+  //reachability. If the phi node ends up producing a new value, it's
+  //users will be marked as touched anyway
   for (df_iterator<DomTreeNode*> DI = df_begin(DTN), DE = df_end(DTN); DI != DE; ++DI) {
     BasicBlock *B = DI->getBlock();
     if (!B->getUniquePredecessor()) {
@@ -2504,8 +2520,9 @@ struct AvailableValueInBlock {
     return cast<MemIntrinsic>(Val.getPointer());
   }
 
-  /// MaterializeAdjustedValue - Emit code into this block to adjust the value
-  /// defined here to the specified type.  This handles various coercion cases.
+  /// MaterializeAdjustedValue - Emit code into this block to adjust
+  /// the value defined here to the specified type.  This handles
+  /// various coercion cases.
   Value *MaterializeAdjustedValue(Type *LoadTy, GVN &gvn) const {
     Value *Res;
     if (isSimpleValue()) {
@@ -2548,9 +2565,10 @@ struct AvailableValueInBlock {
 } // end anonymous namespace
 
 
-/// ConstructSSAForLoadSet - Given a set of loads specified by ValuesPerBlock,
-/// construct SSA form, allowing us to eliminate LI.  This returns the value
-/// that should be used at LI's definition site.
+/// ConstructSSAForLoadSet - Given a set of loads specified by
+/// ValuesPerBlock, construct SSA form, allowing us to eliminate LI.
+/// This returns the value that should be used at LI's definition
+/// site.
 static Value *ConstructSSAForLoadSet(LoadInst *LI,
 				     SmallVectorImpl<AvailableValueInBlock> &ValuesPerBlock,
                                      GVN &gvn) {
@@ -2657,9 +2675,10 @@ static bool IsValueFullyAvailableInBlock(BasicBlock *BB,
 
   return true;
 
-// SpeculationFailure - If we get here, we found out that this is not, after
-// all, a fully-available block.  We have a problem if we speculated on this and
-// used the speculation to mark other blocks as available.
+// SpeculationFailure - If we get here, we found out that this is not,
+// after all, a fully-available block.  We have a problem if we
+// speculated on this and used the speculation to mark other blocks as
+// available.
 SpeculationFailure:
   char &BBVal = FullyAvailableBlocks[BB];
 
@@ -2669,9 +2688,9 @@ SpeculationFailure:
     return false;
   }
 
-  // If we did speculate on this value, we could have blocks set to 1 that are
-  // incorrect.  Walk the (transitive) successors of this block and mark them as
-  // 0 if set to one.
+  // If we did speculate on this value, we could have blocks set to 1
+  // that are incorrect.  Walk the (transitive) successors of this
+  // block and mark them as 0 if set to one.
   SmallVector<BasicBlock*, 32> BBWorklist;
   BBWorklist.push_back(BB);
 
@@ -2710,6 +2729,8 @@ void GVN::handleNewInstruction(Instruction *I) {
 /// processNonLocalLoad - Attempt to eliminate a load whose dependencies are
 /// non-local by performing PHI construction.
 bool GVN::processNonLocalLoad(LoadInst *LI) {
+  return false;
+  
   // Find the non-local dependencies of the load.
   SmallVector<NonLocalDepResult, 64> Deps;
   AliasAnalysis::Location Loc = AA->getLocation(LI);
@@ -3154,12 +3175,222 @@ bool GVN::splitCriticalEdges() {
     return false;
   do {
     std::pair<TerminatorInst*, unsigned> Edge = toSplit.pop_back_val();
-    SplitCriticalEdge(Edge.first, Edge.second, this);
+    BasicBlock *NewBB = SplitCriticalEdge(Edge.first, Edge.second, this);
+    reachableBlocks.insert(NewBB);
   } while (!toSplit.empty());
   if (MD) MD->invalidateCachedPredecessors();
   return true;
 }
 
+Value *GVN::findPRELeader(BasicBlock *BB, Value *Op) {
+  CongruenceClass *CC = valueToClass[Op];
+  if (!CC || CC == InitialClass)
+    return 0;
+  if (CC->leader && (isa<Argument>(CC->leader) || isa<Constant>(CC->leader) || isa<GlobalValue>(CC->leader)))
+    return CC->leader;
+  for (DenseSet<Value*>::iterator SI = CC->members.begin(), SE = CC->members.end(); SI != SE; ++SI)
+    if (Instruction *I = dyn_cast<Instruction>(*SI))
+      if (DT->dominates(I, BB))
+	return I;
+  return 0;  
+}
+
+/// performPRE - Perform a purely local form of PRE that looks for diamond
+/// control flow patterns and attempts to perform simple PRE at the join point.
+bool GVN::performPRE(Function &F) {
+  bool Changed = false;
+  for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
+    CongruenceClass *CC = congruenceClass[i];
+    if (CC == InitialClass || CC->members.size() == 1 || CC->dead)
+      continue;
+    std::set<ValueDFS> DFSOrderedSet;
+    convertDenseToDFSOrdered(CC->members, DFSOrderedSet);
+    DenseMap<BasicBlock*, Value*> predMap;
+    for (std::set<ValueDFS>::iterator II = DFSOrderedSet.begin(), IE = DFSOrderedSet.end(); II != IE;) {
+      Value *Member = II->value;
+      int MemberDFSIn = II->dfs_in;
+      int MemberDFSOut = II->dfs_out;
+      ++II;
+      
+      if (Instruction *CurInst = dyn_cast<Instruction>(Member)) {
+	BasicBlock *BB = CurInst->getParent();
+	// Nothing to PRE in the entry block.
+	if (BB == &F.getEntryBlock()) continue;
+	// Don't perform PRE on a landing pad.
+	if (BB->isLandingPad()) continue;
+	// Don't do PRE on compares. The PHI would prevent CodeGenPrepare from
+	// sinking the compare again, and it would force the code generator to
+	// move the i1 from processor flags or predicate registers into a general
+	// purpose register.
+	if (isa<CmpInst>(CurInst))
+	  continue;
+	if (isa<AllocaInst>(CurInst) ||
+	    isa<TerminatorInst>(CurInst) || isa<PHINode>(CurInst) ||
+	    CurInst->getType()->isVoidTy() ||
+	    CurInst->mayReadFromMemory() || CurInst->mayHaveSideEffects() ||
+	    isa<DbgInfoIntrinsic>(CurInst))
+	  continue;
+	// Look for the predecessors for PRE opportunities.  We're
+	// only trying to solve the basic diamond case, where
+	// a value is computed in the successor and one predecessor,
+	// but not the other.  We also explicitly disallow cases
+	// where the successor is its own predecessor, because they're
+	// more complicated to get right.
+	unsigned NumWith = 0;
+	unsigned NumWithout = 0;
+	BasicBlock *PREPred = 0;
+	int PREPredDFSIn = 0;
+	int PREPredDFSOut = 0;
+	predMap.clear();
+
+	for (pred_iterator PI = pred_begin(BB), PE = pred_end(BB); PI != PE; ++PI) {
+	  BasicBlock *P = *PI;
+	  // We're not interested in PRE where the block is its
+	  // own predecessor, or in blocks with predecessors
+	  // that are not reachable.
+	  if (P == BB) {
+	    NumWithout = 2;
+	    break;
+	  } else if (!reachableBlocks.count(P)) {
+	    NumWithout = 2;
+	    break;
+	  }
+	  std::pair<int, int> DFSPair = DFSBBMap[P];
+	  ValueDFS LookupTemp;
+	  LookupTemp.dfs_in = DFSPair.first;
+	  LookupTemp.dfs_out = DFSPair.second;
+	  LookupTemp.localnum = -1;
+	    
+	  std::set<ValueDFS>::iterator ResultLookup = DFSOrderedSet.lower_bound(LookupTemp);
+	  Value *predV = 0;
+	  if (ResultLookup != DFSOrderedSet.end()) {
+	    // Make sure our result dominates the predecessor
+	    if (ResultLookup->value != Member 
+		&& ResultLookup->dfs_in <= DFSPair.first 
+		&& ResultLookup->dfs_out >= DFSPair.second)
+	      predV = ResultLookup->value;
+	  }
+	  
+	  if (predV == 0) {
+	    PREPred = P;
+	    PREPredDFSIn = DFSPair.first;
+	    PREPredDFSOut = DFSPair.second;
+	    ++NumWithout;
+	  } else if (predV == CurInst) {
+	    NumWithout = 2;
+	  } else {
+	    predMap[P] = predV;
+	    ++NumWith;
+	  }
+	}
+
+      // Don't do PRE when it might increase code size, i.e. when
+      // we would need to insert instructions in more than one pred.
+      if (NumWithout != 1 || NumWith == 0)
+        continue;
+      
+      // Don't do PRE across indirect branch.
+      if (isa<IndirectBrInst>(PREPred->getTerminator()))
+        continue;
+
+
+      // We can't do PRE safely on a critical edge, so instead we schedule
+      // the edge to be split and perform the PRE the next time we iterate
+      // on the function.
+      unsigned SuccNum = GetSuccessorNumber(PREPred, BB);
+      if (isCriticalEdge(PREPred->getTerminator(), SuccNum)) {
+        toSplit.push_back(std::make_pair(PREPred->getTerminator(), SuccNum));
+        continue;
+      }
+
+      // Instantiate the expression in the predecessor that lacked it.
+      // Because we are going top-down through the block, all value numbers
+      // will be available in the predecessor by the time we need them.  Any
+      // that weren't originally present will have been instantiated earlier
+      // in this loop.
+      Instruction *PREInstr = CurInst->clone();
+      bool success = true;
+      for (unsigned i = 0, e = CurInst->getNumOperands(); i != e; ++i) {
+        Value *Op = PREInstr->getOperand(i);
+        if (isa<Argument>(Op) || isa<Constant>(Op) || isa<GlobalValue>(Op))
+          continue;
+
+        if (Value *V = findPRELeader(PREPred, Op)) {
+          PREInstr->setOperand(i, V);
+        } else {
+          success = false;
+          break;
+        }
+      }
+
+      // Fail out if we encounter an operand that is not available in
+      // the PRE predecessor.  This is typically because of loads which
+      // are not value numbered precisely.
+      if (!success) {
+        delete PREInstr;
+        DEBUG(verifyRemoved(PREInstr));
+        continue;
+      }
+      DEBUG(dbgs() << "Inserting instruction " << *PREInstr << " into " << getBlockName(PREPred) << "\n");
+      
+      PREInstr->insertBefore(PREPred->getTerminator());
+      PREInstr->setName(CurInst->getName() + ".pre");
+      PREInstr->setDebugLoc(CurInst->getDebugLoc());
+      predMap[PREPred] = PREInstr;
+
+      valueToClass[PREInstr] = CC;
+      CC->members.insert(PREInstr);
+      ++NumGVNPRE;
+      ValueDFS VDFS;
+      VDFS.value = PREInstr;
+      VDFS.dfs_in = PREPredDFSIn;
+      VDFS.dfs_out = PREPredDFSOut;
+      DFSOrderedSet.insert(VDFS);
+      
+      // // Update the availability map to include the new instruction.
+      // addToLeaderTable(ValNo, PREInstr, PREPred);
+
+      // Create a PHI to make the value available in this block.
+      pred_iterator PB = pred_begin(BB), PE = pred_end(BB);
+      PHINode* Phi = PHINode::Create(CurInst->getType(), std::distance(PB, PE),
+                                     CurInst->getName() + ".pre-phi",
+                                     BB->begin());
+      for (pred_iterator PI = PB; PI != PE; ++PI) {
+        BasicBlock *P = *PI;
+        Phi->addIncoming(predMap[P], P);
+      }
+      VDFS.value = Phi;
+      VDFS.dfs_in = MemberDFSIn;
+      VDFS.dfs_out = MemberDFSOut;
+      DFSOrderedSet.insert(VDFS);
+      Phi->setDebugLoc(CurInst->getDebugLoc());
+      replaceInstruction(CurInst, Phi, CC);
+      if (Phi->getType()->isPointerTy()) {
+        // Because we have added a PHI-use of the pointer value, it has now
+        // "escaped" from alias analysis' perspective.  We need to inform
+        // AA of this.
+        for (unsigned ii = 0, ee = Phi->getNumIncomingValues(); ii != ee;
+             ++ii) {
+          unsigned jj = PHINode::getOperandNumForIncomingValue(ii);
+          AA->addEscapingUse(Phi->getOperandUse(jj));
+        }
+        
+        if (MD)
+          MD->invalidateCachedPointerInfo(Phi);
+      }
+      DEBUG(dbgs() << "GVN PRE removed: " << *Member << '\n');
+      // PRE breaks leaders, so this may fail
+      // DEBUG(verifyRemoved(CurInst));
+      Changed = true;
+      }
+    }
+  }
+  
+  if (splitCriticalEdges())
+    Changed = true;
+
+  return Changed;
+}
 
 void GVN::convertDenseToDFSOrdered(DenseSet<Value*> &Dense, std::set<ValueDFS> &DFSOrderedSet) {
   for (DenseSet<Value*>::iterator DI = Dense.begin(), DE = Dense.end(); DI != DE; ++DI) {
@@ -3398,10 +3629,12 @@ bool GVN::runOnFunction(Function& F) {
 	       }
 	     }
 	   }
+	   continue;
 	 } else {
+#if 0
 	   MemoryExpression *ME;
 	   if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
-	     if (ME->hadNonLocal()) {
+	     if (0|| ME->hadNonLocal()) {
 	       Value *member = *(CC->members.begin());
 	       if (LoadInst *LI = dyn_cast<LoadInst>(member)){
 		 processNonLocalLoad(LI);
@@ -3409,8 +3642,8 @@ bool GVN::runOnFunction(Function& F) {
 	     }
 	   }
 #endif
-	   std::set<ValueDFS> DFSOrderedSet;
-	   
+#endif
+	   std::set<ValueDFS> DFSOrderedSet;	   
 	   convertDenseToDFSOrdered(CC->members, DFSOrderedSet);
 	   
 	   for (std::set<ValueDFS>::iterator CI = DFSOrderedSet.begin(), CE = DFSOrderedSet.end(); CI != CE;) {
@@ -3464,6 +3697,14 @@ bool GVN::runOnFunction(Function& F) {
  }
  
 #endif
+  if (EnablePRE) {
+    bool PREChanged = true;
+    while (PREChanged) {
+      PREChanged = performPRE(F);
+      Changed |= PREChanged;
+    }
+  }
+
   for (DenseSet<Instruction*>::iterator DI = instrsToErase_.begin(), DE = instrsToErase_.end(); DI != DE;) {
     Instruction *toErase = *DI;
     ++DI;
@@ -3511,6 +3752,7 @@ bool GVN::runOnFunction(Function& F) {
   touchedInstructions.clear();
   processedCount.clear();
   expressionAllocator.Reset();
+  // mapAllocator.Reset();
   instrsToErase_.clear();
   depQueryCache.clear();
   depIQueryCache.clear();
