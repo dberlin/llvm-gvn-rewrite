@@ -20,6 +20,7 @@
 #include "llvm/GlobalVariable.h"
 #include "llvm/IntrinsicInst.h"
 #include "llvm/LLVMContext.h"
+#include "llvm/Metadata.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/CFGPrinter.h"
 #include "llvm/Analysis/ConstantFolding.h"
