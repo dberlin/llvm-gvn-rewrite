@@ -378,6 +378,9 @@ class SDI<bits<8> o, Format F, dag outs, dag ins, string asm,
 class SDIi8<bits<8> o, Format F, dag outs, dag ins, string asm,
             list<dag> pattern, InstrItinClass itin = IIC_DEFAULT>
       : Ii8<o, F, outs, ins, asm, pattern, itin>, XD, Requires<[HasSSE2]>;
+class SSDI<bits<8> o, Format F, dag outs, dag ins, string asm,
+          list<dag> pattern, InstrItinClass itin = IIC_DEFAULT>
+      : I<o, F, outs, ins, asm, pattern, itin>, XS, Requires<[HasSSE2]>;
 class SSDIi8<bits<8> o, Format F, dag outs, dag ins, string asm,
              list<dag> pattern, InstrItinClass itin = IIC_DEFAULT>
       : Ii8<o, F, outs, ins, asm, pattern>, XS, Requires<[HasSSE2]>;
@@ -526,7 +529,7 @@ class AVXPCLMULIi8<bits<8> o, Format F, dag outs, dag ins, string asm,
 class FMA3<bits<8> o, Format F, dag outs, dag ins, string asm,
            list<dag>pattern, InstrItinClass itin = IIC_DEFAULT>
       : I<o, F, outs, ins, asm, pattern, itin>, T8,
-        OpSize, VEX_4V, Requires<[HasFMA3]>;
+        OpSize, VEX_4V, Requires<[HasFMA]>;
 
 // FMA4 Instruction Templates
 class FMA4<bits<8> o, Format F, dag outs, dag ins, string asm,

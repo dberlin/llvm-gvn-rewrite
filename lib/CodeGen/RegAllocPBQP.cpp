@@ -291,15 +291,11 @@ std::auto_ptr<PBQPRAProblem> PBQPBuilder::build(MachineFunction *mf,
       }
 
       // Also remove any aliases.
-      const uint16_t *aliasItr = tri->getAliasSet(preg);
-      if (aliasItr != 0) {
-        for (; *aliasItr != 0; ++aliasItr) {
-          VRAllowed::iterator eraseItr =
-            std::find(vrAllowed.begin(), vrAllowed.end(), *aliasItr);
-
-          if (eraseItr != vrAllowed.end()) {
-            vrAllowed.erase(eraseItr);
-          }
+      for (MCRegAliasIterator AI(preg, tri, false); AI.isValid(); ++AI) {
+        VRAllowed::iterator eraseItr =
+          std::find(vrAllowed.begin(), vrAllowed.end(), *AI);
+        if (eraseItr != vrAllowed.end()) {
+          vrAllowed.erase(eraseItr);
         }
       }
     }
@@ -379,7 +375,7 @@ std::auto_ptr<PBQPRAProblem> PBQPBuilderWithCoalescing::build(
   PBQP::Graph &g = p->getGraph();
 
   const TargetMachine &tm = mf->getTarget();
-  CoalescerPair cp(*tm.getInstrInfo(), *tm.getRegisterInfo());
+  CoalescerPair cp(*tm.getRegisterInfo());
 
   // Scan the machine function and add a coalescing cost whenever CoalescerPair
   // gives the Ok.
@@ -598,51 +594,6 @@ void RegAllocPBQP::finalizeAlloc() const {
 
     vrm->assignVirt2Phys(li->reg, physReg);
   }
-
-  // Finally iterate over the basic blocks to compute and set the live-in sets.
-  SmallVector<MachineBasicBlock*, 8> liveInMBBs;
-  MachineBasicBlock *entryMBB = &*mf->begin();
-
-  for (LIIterator liItr = lis->begin(), liEnd = lis->end();
-       liItr != liEnd; ++liItr) {
-
-    const LiveInterval *li = liItr->second;
-    unsigned reg = 0;
-
-    // Get the physical register for this interval
-    if (TargetRegisterInfo::isPhysicalRegister(li->reg)) {
-      reg = li->reg;
-    } else if (vrm->isAssignedReg(li->reg)) {
-      reg = vrm->getPhys(li->reg);
-    } else {
-      // Ranges which are assigned a stack slot only are ignored.
-      continue;
-    }
-
-    if (reg == 0) {
-      // Filter out zero regs - they're for intervals that were spilled.
-      continue;
-    }
-
-    // Iterate over the ranges of the current interval...
-    for (LRIterator lrItr = li->begin(), lrEnd = li->end();
-         lrItr != lrEnd; ++lrItr) {
-
-      // Find the set of basic blocks which this range is live into...
-      if (lis->findLiveInMBBs(lrItr->start, lrItr->end,  liveInMBBs)) {
-        // And add the physreg for this interval to their live-in sets.
-        for (unsigned i = 0; i != liveInMBBs.size(); ++i) {
-          if (liveInMBBs[i] != entryMBB) {
-            if (!liveInMBBs[i]->isLiveIn(reg)) {
-              liveInMBBs[i]->addLiveIn(reg);
-            }
-          }
-        }
-        liveInMBBs.clear();
-      }
-    }
-  }
-
 }
 
 bool RegAllocPBQP::runOnMachineFunction(MachineFunction &MF) {
@@ -727,14 +678,6 @@ bool RegAllocPBQP::runOnMachineFunction(MachineFunction &MF) {
   emptyIntervalVRegs.clear();
 
   DEBUG(dbgs() << "Post alloc VirtRegMap:\n" << *vrm << "\n");
-
-  // Run rewriter
-  vrm->rewrite(lis->getSlotIndexes());
-
-  // All machine operands and other references to virtual registers have been
-  // replaced. Remove the virtual registers.
-  vrm->clearAllVirt();
-  mri->clearVirtRegs();
 
   return true;
 }

@@ -2239,7 +2239,7 @@ public:
   /// getNumClauses - Get the number of clauses for this landing pad.
   unsigned getNumClauses() const { return getNumOperands() - 1; }
 
-  /// reserveClauses - Grow the size of the operand list to accomodate the new
+  /// reserveClauses - Grow the size of the operand list to accommodate the new
   /// number of clauses.
   void reserveClauses(unsigned Size) { growOperands(Size); }
 
@@ -2552,13 +2552,13 @@ public:
   /// that it is handled by the default handler.
   CaseIt findCaseValue(const ConstantInt *C) {
     for (CaseIt i = case_begin(), e = case_end(); i != e; ++i)
-      if (i.getCaseValueEx().isSatisfies(C->getValue()))
+      if (i.getCaseValueEx().isSatisfies(IntItem::fromConstantInt(C)))
         return i;
     return case_default();
   }
   ConstCaseIt findCaseValue(const ConstantInt *C) const {
     for (ConstCaseIt i = case_begin(), e = case_end(); i != e; ++i)
-      if (i.getCaseValueEx().isSatisfies(C->getValue()))
+      if (i.getCaseValueEx().isSatisfies(IntItem::fromConstantInt(C)))
         return i;
     return case_default();
   }    
@@ -2660,7 +2660,7 @@ public:
       
       // FIXME: Currently we work with ConstantInt based cases.
       // So return CaseValue as ConstantInt.
-      return R.Low.toConstantInt();
+      return R.getLow().toConstantInt();
     }
 
     /// Resolves case value for current case.

@@ -173,7 +173,7 @@ bool llvm::ConstantFoldTerminator(BasicBlock *BB, bool DeleteDeadConditions) {
       if (CaseRanges.getNumItems() == 1 && CaseRanges.isSingleNumber(0)) {
         // FIXME: Currently work with ConstantInt based numbers.
         Value *Cond = Builder.CreateICmpEQ(SI->getCondition(),
-            CaseRanges.getItem(0).Low.toConstantInt(),
+            CaseRanges.getItem(0).getLow().toConstantInt(),
             "cond");
 
         // Insert the new branch.
@@ -706,7 +706,7 @@ bool llvm::EliminateDuplicatePHINodes(BasicBlock *BB) {
         CollisionMap[PN] = Old;
         break;
       }
-      // Procede to the next PHI in the list.
+      // Proceed to the next PHI in the list.
       OtherPN = I->second;
     }
   }

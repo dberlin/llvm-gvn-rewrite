@@ -1227,8 +1227,7 @@ X86TargetLowering::X86TargetLowering(X86TargetMachine &TM)
   setTargetDAGCombine(ISD::FP_TO_SINT);
   if (Subtarget->is64Bit())
     setTargetDAGCombine(ISD::MUL);
-  if (Subtarget->hasBMI())
-    setTargetDAGCombine(ISD::XOR);
+  setTargetDAGCombine(ISD::XOR);
 
   computeRegisterProperties();
 
@@ -3191,7 +3190,7 @@ static bool isUndefOrEqual(int Val, int CmpVal) {
   return false;
 }
 
-/// isSequentialOrUndefInRange - Return true if every element in Mask, begining
+/// isSequentialOrUndefInRange - Return true if every element in Mask, beginning
 /// from position Pos and ending in Pos+Size, falls within the specified
 /// sequential range (L, L+Pos]. or is undef.
 static bool isSequentialOrUndefInRange(ArrayRef<int> Mask,
@@ -6333,7 +6332,7 @@ SDValue getMOVLP(SDValue &Op, DebugLoc &dl, SelectionDAG &DAG, bool HasSSE2) {
       return getTargetShuffleNode(X86ISD::MOVLPD, dl, VT, V1, V2, DAG);
 
     if (NumElems == 4)
-      // If we don't care about the second element, procede to use movss.
+      // If we don't care about the second element, proceed to use movss.
       if (SVOp->getMaskElt(1) != -1)
         return getTargetShuffleNode(X86ISD::MOVLPS, dl, VT, V1, V2, DAG);
   }
@@ -7263,7 +7262,7 @@ X86TargetLowering::LowerGlobalAddress(SDValue Op, SelectionDAG &DAG) const {
 static SDValue
 GetTLSADDR(SelectionDAG &DAG, SDValue Chain, GlobalAddressSDNode *GA,
            SDValue *InFlag, const EVT PtrVT, unsigned ReturnReg,
-           unsigned char OperandFlags) {
+           unsigned char OperandFlags, bool LocalDynamic = false) {
   MachineFrameInfo *MFI = DAG.getMachineFunction().getFrameInfo();
   SDVTList NodeTys = DAG.getVTList(MVT::Other, MVT::Glue);
   DebugLoc dl = GA->getDebugLoc();
@@ -7271,12 +7270,16 @@ GetTLSADDR(SelectionDAG &DAG, SDValue Chain, GlobalAddressSDNode *GA,
                                            GA->getValueType(0),
                                            GA->getOffset(),
                                            OperandFlags);
+
+  X86ISD::NodeType CallType = LocalDynamic ? X86ISD::TLSBASEADDR
+                                           : X86ISD::TLSADDR;
+
   if (InFlag) {
     SDValue Ops[] = { Chain,  TGA, *InFlag };
-    Chain = DAG.getNode(X86ISD::TLSADDR, dl, NodeTys, Ops, 3);
+    Chain = DAG.getNode(CallType, dl, NodeTys, Ops, 3);
   } else {
     SDValue Ops[]  = { Chain, TGA };
-    Chain = DAG.getNode(X86ISD::TLSADDR, dl, NodeTys, Ops, 2);
+    Chain = DAG.getNode(CallType, dl, NodeTys, Ops, 2);
   }
 
   // TLSADDR will be codegen'ed as call. Inform MFI that function has calls.
@@ -7306,6 +7309,45 @@ LowerToTLSGeneralDynamicModel64(GlobalAddressSDNode *GA, SelectionDAG &DAG,
                                 const EVT PtrVT) {
   return GetTLSADDR(DAG, DAG.getEntryNode(), GA, NULL, PtrVT,
                     X86::RAX, X86II::MO_TLSGD);
+}
+
+static SDValue LowerToTLSLocalDynamicModel(GlobalAddressSDNode *GA,
+                                           SelectionDAG &DAG,
+                                           const EVT PtrVT,
+                                           bool is64Bit) {
+  DebugLoc dl = GA->getDebugLoc();
+
+  // Get the start address of the TLS block for this module.
+  X86MachineFunctionInfo* MFI = DAG.getMachineFunction()
+      .getInfo<X86MachineFunctionInfo>();
+  MFI->incNumLocalDynamicTLSAccesses();
+
+  SDValue Base;
+  if (is64Bit) {
+    Base = GetTLSADDR(DAG, DAG.getEntryNode(), GA, NULL, PtrVT, X86::RAX,
+                      X86II::MO_TLSLD, /*LocalDynamic=*/true);
+  } else {
+    SDValue InFlag;
+    SDValue Chain = DAG.getCopyToReg(DAG.getEntryNode(), dl, X86::EBX,
+        DAG.getNode(X86ISD::GlobalBaseReg, DebugLoc(), PtrVT), InFlag);
+    InFlag = Chain.getValue(1);
+    Base = GetTLSADDR(DAG, Chain, GA, &InFlag, PtrVT, X86::EAX,
+                      X86II::MO_TLSLDM, /*LocalDynamic=*/true);
+  }
+
+  // Note: the CleanupLocalDynamicTLSPass will remove redundant computations
+  // of Base.
+
+  // Build x@dtpoff.
+  unsigned char OperandFlags = X86II::MO_DTPOFF;
+  unsigned WrapperKind = X86ISD::Wrapper;
+  SDValue TGA = DAG.getTargetGlobalAddress(GA->getGlobal(), dl,
+                                           GA->getValueType(0),
+                                           GA->getOffset(), OperandFlags);
+  SDValue Offset = DAG.getNode(WrapperKind, dl, PtrVT, TGA);
+
+  // Add x@dtpoff with the base.
+  return DAG.getNode(ISD::ADD, dl, PtrVT, Offset, Base);
 }
 
 // Lower ISD::GlobalTLSAddress using the "initial exec" or "local exec" model.
@@ -7372,8 +7414,6 @@ X86TargetLowering::LowerGlobalTLSAddress(SDValue Op, SelectionDAG &DAG) const {
   const GlobalValue *GV = GA->getGlobal();
 
   if (Subtarget->isTargetELF()) {
-    // TODO: implement the "local dynamic" model
-
     // If GV is an alias then use the aliasee for determining
     // thread-localness.
     if (const GlobalAlias *GA = dyn_cast<GlobalAlias>(GV))
@@ -7383,11 +7423,12 @@ X86TargetLowering::LowerGlobalTLSAddress(SDValue Op, SelectionDAG &DAG) const {
 
     switch (model) {
       case TLSModel::GeneralDynamic:
-      case TLSModel::LocalDynamic: // not implemented
         if (Subtarget->is64Bit())
           return LowerToTLSGeneralDynamicModel64(GA, DAG, getPointerTy());
         return LowerToTLSGeneralDynamicModel32(GA, DAG, getPointerTy());
-
+      case TLSModel::LocalDynamic:
+        return LowerToTLSLocalDynamicModel(GA, DAG, getPointerTy(),
+                                           Subtarget->is64Bit());
       case TLSModel::InitialExec:
       case TLSModel::LocalExec:
         return LowerToTLSExecModel(GA, DAG, getPointerTy(), model,
@@ -8229,7 +8270,13 @@ SDValue X86TargetLowering::EmitTest(SDValue Op, unsigned X86CC,
     // Otherwise use a regular EFLAGS-setting instruction.
     switch (Op.getNode()->getOpcode()) {
     default: llvm_unreachable("unexpected operator!");
-    case ISD::SUB: Opcode = X86ISD::SUB; break;
+    case ISD::SUB:
+      // If the only use of SUB is EFLAGS, use CMP instead.
+      if (Op.hasOneUse())
+        Opcode = X86ISD::CMP;
+      else
+        Opcode = X86ISD::SUB;
+      break;
     case ISD::OR:  Opcode = X86ISD::OR;  break;
     case ISD::XOR: Opcode = X86ISD::XOR; break;
     case ISD::AND: Opcode = X86ISD::AND; break;
@@ -8254,6 +8301,14 @@ SDValue X86TargetLowering::EmitTest(SDValue Op, unsigned X86CC,
     // Emit a CMP with 0, which is the TEST pattern.
     return DAG.getNode(X86ISD::CMP, dl, MVT::i32, Op,
                        DAG.getConstant(0, Op.getValueType()));
+
+  if (Opcode == X86ISD::CMP) {
+    SDValue New = DAG.getNode(Opcode, dl, MVT::i32, Op.getOperand(0),
+                              Op.getOperand(1));
+    // We can't replace usage of SUB with CMP.
+    // The SUB node will be removed later because there is no use of it.
+    return SDValue(New.getNode(), 0);
+  }
 
   SDVTList VTs = DAG.getVTList(Op.getValueType(), MVT::i32);
   SmallVector<SDValue, 4> Ops;
@@ -9479,196 +9534,6 @@ X86TargetLowering::LowerINTRINSIC_WO_CHAIN(SDValue Op, SelectionDAG &DAG) const 
                                 DAG.getConstant(X86CC, MVT::i8), Cond);
     return DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i32, SetCC);
   }
-  // XOP comparison intrinsics
-  case Intrinsic::x86_xop_vpcomltb:
-  case Intrinsic::x86_xop_vpcomltw:
-  case Intrinsic::x86_xop_vpcomltd:
-  case Intrinsic::x86_xop_vpcomltq:
-  case Intrinsic::x86_xop_vpcomltub:
-  case Intrinsic::x86_xop_vpcomltuw:
-  case Intrinsic::x86_xop_vpcomltud:
-  case Intrinsic::x86_xop_vpcomltuq:
-  case Intrinsic::x86_xop_vpcomleb:
-  case Intrinsic::x86_xop_vpcomlew:
-  case Intrinsic::x86_xop_vpcomled:
-  case Intrinsic::x86_xop_vpcomleq:
-  case Intrinsic::x86_xop_vpcomleub:
-  case Intrinsic::x86_xop_vpcomleuw:
-  case Intrinsic::x86_xop_vpcomleud:
-  case Intrinsic::x86_xop_vpcomleuq:
-  case Intrinsic::x86_xop_vpcomgtb:
-  case Intrinsic::x86_xop_vpcomgtw:
-  case Intrinsic::x86_xop_vpcomgtd:
-  case Intrinsic::x86_xop_vpcomgtq:
-  case Intrinsic::x86_xop_vpcomgtub:
-  case Intrinsic::x86_xop_vpcomgtuw:
-  case Intrinsic::x86_xop_vpcomgtud:
-  case Intrinsic::x86_xop_vpcomgtuq:
-  case Intrinsic::x86_xop_vpcomgeb:
-  case Intrinsic::x86_xop_vpcomgew:
-  case Intrinsic::x86_xop_vpcomged:
-  case Intrinsic::x86_xop_vpcomgeq:
-  case Intrinsic::x86_xop_vpcomgeub:
-  case Intrinsic::x86_xop_vpcomgeuw:
-  case Intrinsic::x86_xop_vpcomgeud:
-  case Intrinsic::x86_xop_vpcomgeuq:
-  case Intrinsic::x86_xop_vpcomeqb:
-  case Intrinsic::x86_xop_vpcomeqw:
-  case Intrinsic::x86_xop_vpcomeqd:
-  case Intrinsic::x86_xop_vpcomeqq:
-  case Intrinsic::x86_xop_vpcomequb:
-  case Intrinsic::x86_xop_vpcomequw:
-  case Intrinsic::x86_xop_vpcomequd:
-  case Intrinsic::x86_xop_vpcomequq:
-  case Intrinsic::x86_xop_vpcomneb:
-  case Intrinsic::x86_xop_vpcomnew:
-  case Intrinsic::x86_xop_vpcomned:
-  case Intrinsic::x86_xop_vpcomneq:
-  case Intrinsic::x86_xop_vpcomneub:
-  case Intrinsic::x86_xop_vpcomneuw:
-  case Intrinsic::x86_xop_vpcomneud:
-  case Intrinsic::x86_xop_vpcomneuq:
-  case Intrinsic::x86_xop_vpcomfalseb:
-  case Intrinsic::x86_xop_vpcomfalsew:
-  case Intrinsic::x86_xop_vpcomfalsed:
-  case Intrinsic::x86_xop_vpcomfalseq:
-  case Intrinsic::x86_xop_vpcomfalseub:
-  case Intrinsic::x86_xop_vpcomfalseuw:
-  case Intrinsic::x86_xop_vpcomfalseud:
-  case Intrinsic::x86_xop_vpcomfalseuq:
-  case Intrinsic::x86_xop_vpcomtrueb:
-  case Intrinsic::x86_xop_vpcomtruew:
-  case Intrinsic::x86_xop_vpcomtrued:
-  case Intrinsic::x86_xop_vpcomtrueq:
-  case Intrinsic::x86_xop_vpcomtrueub:
-  case Intrinsic::x86_xop_vpcomtrueuw:
-  case Intrinsic::x86_xop_vpcomtrueud:
-  case Intrinsic::x86_xop_vpcomtrueuq: {
-    unsigned CC = 0;
-    unsigned Opc = 0;
-
-    switch (IntNo) {
-    default: llvm_unreachable("Impossible intrinsic");  // Can't reach here.
-    case Intrinsic::x86_xop_vpcomltb:
-    case Intrinsic::x86_xop_vpcomltw:
-    case Intrinsic::x86_xop_vpcomltd:
-    case Intrinsic::x86_xop_vpcomltq:
-      CC = 0;
-      Opc = X86ISD::VPCOM;
-      break;
-    case Intrinsic::x86_xop_vpcomltub:
-    case Intrinsic::x86_xop_vpcomltuw:
-    case Intrinsic::x86_xop_vpcomltud:
-    case Intrinsic::x86_xop_vpcomltuq:
-      CC = 0;
-      Opc = X86ISD::VPCOMU;
-      break;
-    case Intrinsic::x86_xop_vpcomleb:
-    case Intrinsic::x86_xop_vpcomlew:
-    case Intrinsic::x86_xop_vpcomled:
-    case Intrinsic::x86_xop_vpcomleq:
-      CC = 1;
-      Opc = X86ISD::VPCOM;
-      break;
-    case Intrinsic::x86_xop_vpcomleub:
-    case Intrinsic::x86_xop_vpcomleuw:
-    case Intrinsic::x86_xop_vpcomleud:
-    case Intrinsic::x86_xop_vpcomleuq:
-      CC = 1;
-      Opc = X86ISD::VPCOMU;
-      break;
-    case Intrinsic::x86_xop_vpcomgtb:
-    case Intrinsic::x86_xop_vpcomgtw:
-    case Intrinsic::x86_xop_vpcomgtd:
-    case Intrinsic::x86_xop_vpcomgtq:
-      CC = 2;
-      Opc = X86ISD::VPCOM;
-      break;
-    case Intrinsic::x86_xop_vpcomgtub:
-    case Intrinsic::x86_xop_vpcomgtuw:
-    case Intrinsic::x86_xop_vpcomgtud:
-    case Intrinsic::x86_xop_vpcomgtuq:
-      CC = 2;
-      Opc = X86ISD::VPCOMU;
-      break;
-    case Intrinsic::x86_xop_vpcomgeb:
-    case Intrinsic::x86_xop_vpcomgew:
-    case Intrinsic::x86_xop_vpcomged:
-    case Intrinsic::x86_xop_vpcomgeq:
-      CC = 3;
-      Opc = X86ISD::VPCOM;
-      break;
-    case Intrinsic::x86_xop_vpcomgeub:
-    case Intrinsic::x86_xop_vpcomgeuw:
-    case Intrinsic::x86_xop_vpcomgeud:
-    case Intrinsic::x86_xop_vpcomgeuq:
-      CC = 3;
-      Opc = X86ISD::VPCOMU;
-      break;
-    case Intrinsic::x86_xop_vpcomeqb:
-    case Intrinsic::x86_xop_vpcomeqw:
-    case Intrinsic::x86_xop_vpcomeqd:
-    case Intrinsic::x86_xop_vpcomeqq:
-      CC = 4;
-      Opc = X86ISD::VPCOM;
-      break;
-    case Intrinsic::x86_xop_vpcomequb:
-    case Intrinsic::x86_xop_vpcomequw:
-    case Intrinsic::x86_xop_vpcomequd:
-    case Intrinsic::x86_xop_vpcomequq:
-      CC = 4;
-      Opc = X86ISD::VPCOMU;
-      break;
-    case Intrinsic::x86_xop_vpcomneb:
-    case Intrinsic::x86_xop_vpcomnew:
-    case Intrinsic::x86_xop_vpcomned:
-    case Intrinsic::x86_xop_vpcomneq:
-      CC = 5;
-      Opc = X86ISD::VPCOM;
-      break;
-    case Intrinsic::x86_xop_vpcomneub:
-    case Intrinsic::x86_xop_vpcomneuw:
-    case Intrinsic::x86_xop_vpcomneud:
-    case Intrinsic::x86_xop_vpcomneuq:
-      CC = 5;
-      Opc = X86ISD::VPCOMU;
-      break;
-    case Intrinsic::x86_xop_vpcomfalseb:
-    case Intrinsic::x86_xop_vpcomfalsew:
-    case Intrinsic::x86_xop_vpcomfalsed:
-    case Intrinsic::x86_xop_vpcomfalseq:
-      CC = 6;
-      Opc = X86ISD::VPCOM;
-      break;
-    case Intrinsic::x86_xop_vpcomfalseub:
-    case Intrinsic::x86_xop_vpcomfalseuw:
-    case Intrinsic::x86_xop_vpcomfalseud:
-    case Intrinsic::x86_xop_vpcomfalseuq:
-      CC = 6;
-      Opc = X86ISD::VPCOMU;
-      break;
-    case Intrinsic::x86_xop_vpcomtrueb:
-    case Intrinsic::x86_xop_vpcomtruew:
-    case Intrinsic::x86_xop_vpcomtrued:
-    case Intrinsic::x86_xop_vpcomtrueq:
-      CC = 7;
-      Opc = X86ISD::VPCOM;
-      break;
-    case Intrinsic::x86_xop_vpcomtrueub:
-    case Intrinsic::x86_xop_vpcomtrueuw:
-    case Intrinsic::x86_xop_vpcomtrueud:
-    case Intrinsic::x86_xop_vpcomtrueuq:
-      CC = 7;
-      Opc = X86ISD::VPCOMU;
-      break;
-    }
-
-    SDValue LHS = Op.getOperand(1);
-    SDValue RHS = Op.getOperand(2);
-    return DAG.getNode(Opc, dl, Op.getValueType(), LHS, RHS,
-                       DAG.getConstant(CC, MVT::i8));
-  }
-
   // Arithmetic intrinsics.
   case Intrinsic::x86_sse2_pmulu_dq:
   case Intrinsic::x86_avx2_pmulu_dq:
@@ -11257,6 +11122,7 @@ const char *X86TargetLowering::getTargetNodeName(unsigned Opcode) const {
   case X86ISD::FRSQRT:             return "X86ISD::FRSQRT";
   case X86ISD::FRCP:               return "X86ISD::FRCP";
   case X86ISD::TLSADDR:            return "X86ISD::TLSADDR";
+  case X86ISD::TLSBASEADDR:        return "X86ISD::TLSBASEADDR";
   case X86ISD::TLSCALL:            return "X86ISD::TLSCALL";
   case X86ISD::EH_RETURN:          return "X86ISD::EH_RETURN";
   case X86ISD::TC_RETURN:          return "X86ISD::TC_RETURN";
@@ -13464,8 +13330,6 @@ static SDValue PerformEXTRACT_VECTOR_ELTCombine(SDNode *N, SelectionDAG &DAG,
 static SDValue PerformSELECTCombine(SDNode *N, SelectionDAG &DAG,
                                     TargetLowering::DAGCombinerInfo &DCI,
                                     const X86Subtarget *Subtarget) {
-
-
   DebugLoc DL = N->getDebugLoc();
   SDValue Cond = N->getOperand(0);
   // Get the LHS/RHS of the select.
@@ -13747,9 +13611,13 @@ static SDValue PerformSELECTCombine(SDNode *N, SelectionDAG &DAG,
   // to simplify previous instructions.
   const TargetLowering &TLI = DAG.getTargetLoweringInfo();
   if (N->getOpcode() == ISD::VSELECT && DCI.isBeforeLegalizeOps() &&
-      !DCI.isBeforeLegalize() &&
-      TLI.isOperationLegal(ISD::VSELECT, VT)) {
+      !DCI.isBeforeLegalize() && TLI.isOperationLegal(ISD::VSELECT, VT)) {
     unsigned BitWidth = Cond.getValueType().getScalarType().getSizeInBits();
+
+    // Don't optimize vector selects that map to mask-registers.
+    if (BitWidth == 1)
+      return SDValue();
+
     assert(BitWidth >= 8 && BitWidth <= 64 && "Invalid mask size");
     APInt DemandedMask = APInt::getHighBitsSet(BitWidth, 1);
 
@@ -14448,11 +14316,56 @@ static SDValue PerformOrCombine(SDNode *N, SelectionDAG &DAG,
   return SDValue();
 }
 
+// Generate NEG and CMOV for integer abs.
+static SDValue performIntegerAbsCombine(SDNode *N, SelectionDAG &DAG) {
+  EVT VT = N->getValueType(0);
+
+  // Since X86 does not have CMOV for 8-bit integer, we don't convert
+  // 8-bit integer abs to NEG and CMOV.
+  if (VT.isInteger() && VT.getSizeInBits() == 8)
+    return SDValue();
+
+  SDValue N0 = N->getOperand(0);
+  SDValue N1 = N->getOperand(1);
+  DebugLoc DL = N->getDebugLoc();
+
+  // Check pattern of XOR(ADD(X,Y), Y) where Y is SRA(X, size(X)-1)
+  // and change it to SUB and CMOV.
+  if (VT.isInteger() && N->getOpcode() == ISD::XOR &&
+      N0.getOpcode() == ISD::ADD &&
+      N0.getOperand(1) == N1 &&
+      N1.getOpcode() == ISD::SRA &&
+      N1.getOperand(0) == N0.getOperand(0))
+    if (ConstantSDNode *Y1C = dyn_cast<ConstantSDNode>(N1.getOperand(1)))
+      if (Y1C->getAPIntValue() == VT.getSizeInBits()-1) {
+        // Generate SUB & CMOV.
+        SDValue Neg = DAG.getNode(X86ISD::SUB, DL, DAG.getVTList(VT, MVT::i32),
+                                  DAG.getConstant(0, VT), N0.getOperand(0));
+
+        SDValue Ops[] = { N0.getOperand(0), Neg,
+                          DAG.getConstant(X86::COND_GE, MVT::i8),
+                          SDValue(Neg.getNode(), 1) };
+        return DAG.getNode(X86ISD::CMOV, DL, DAG.getVTList(VT, MVT::Glue),
+                           Ops, array_lengthof(Ops));
+      }
+  return SDValue();
+}
+
 // PerformXorCombine - Attempts to turn XOR nodes into BLSMSK nodes
 static SDValue PerformXorCombine(SDNode *N, SelectionDAG &DAG,
                                  TargetLowering::DAGCombinerInfo &DCI,
                                  const X86Subtarget *Subtarget) {
   if (DCI.isBeforeLegalizeOps())
+    return SDValue();
+
+  if (Subtarget->hasCMov()) {
+    SDValue RV = performIntegerAbsCombine(N, DAG);
+    if (RV.getNode())
+      return RV;
+  }
+
+  // Try forming BMI if it is available.
+  if (!Subtarget->hasBMI())
     return SDValue();
 
   EVT VT = N->getValueType(0);

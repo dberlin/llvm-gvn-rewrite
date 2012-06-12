@@ -324,33 +324,6 @@ public:
     return operator[](RegNo);
   }
 
-  /// getAliasSet - Return the set of registers aliased by the specified
-  /// register, or a null list of there are none.  The list returned is zero
-  /// terminated.
-  ///
-  const uint16_t *getAliasSet(unsigned RegNo) const {
-    // The Overlaps set always begins with Reg itself.
-    return RegLists + get(RegNo).Overlaps + 1;
-  }
-
-  /// getOverlaps - Return a list of registers that overlap Reg, including
-  /// itself. This is the same as the alias set except Reg is included in the
-  /// list.
-  /// These are exactly the registers in { x | regsOverlap(x, Reg) }.
-  ///
-  const uint16_t *getOverlaps(unsigned RegNo) const {
-    return RegLists + get(RegNo).Overlaps;
-  }
-
-  /// getSubRegisters - Return the list of registers that are sub-registers of
-  /// the specified register, or a null list of there are none. The list
-  /// returned is zero terminated and sorted according to super-sub register
-  /// relations. e.g. X86::RAX's sub-register list is EAX, AX, AL, AH.
-  ///
-  const uint16_t *getSubRegisters(unsigned RegNo) const {
-    return RegLists + get(RegNo).SubRegs;
-  }
-
   /// getSubReg - Returns the physical register number of sub-register "Index"
   /// for physical register RegNo. Return zero if the sub-register does not
   /// exist.
@@ -361,12 +334,7 @@ public:
   /// getMatchingSuperReg - Return a super-register of the specified register
   /// Reg so its sub-register of index SubIdx is Reg.
   unsigned getMatchingSuperReg(unsigned Reg, unsigned SubIdx,
-                               const MCRegisterClass *RC) const {
-    for (const uint16_t *SRs = getSuperRegisters(Reg); unsigned SR = *SRs;++SRs)
-      if (Reg == getSubReg(SR, SubIdx) && RC->contains(SR))
-        return SR;
-    return 0;
-  }
+                               const MCRegisterClass *RC) const;
 
   /// getSubRegIndex - For a given register pair, return the sub-register index
   /// if the second register is a sub-register of the first. Return zero
@@ -376,15 +344,6 @@ public:
       if (getSubReg(RegNo, I) == SubRegNo)
         return I;
     return 0;
-  }
-
-  /// getSuperRegisters - Return the list of registers that are super-registers
-  /// of the specified register, or a null list of there are none. The list
-  /// returned is zero terminated and sorted according to super-sub register
-  /// relations. e.g. X86::AL's super-register list is AX, EAX, RAX.
-  ///
-  const uint16_t *getSuperRegisters(unsigned RegNo) const {
-    return RegLists + get(RegNo).SuperRegs;
   }
 
   /// getName - Return the human-readable symbolic target-specific name for the
@@ -493,6 +452,15 @@ public:
     : RegListIterator(MCRI->RegLists + MCRI->get(Reg).Overlaps + !IncludeSelf)
   {}
 };
+
+inline
+unsigned MCRegisterInfo::getMatchingSuperReg(unsigned Reg, unsigned SubIdx,
+                                             const MCRegisterClass *RC) const {
+    for (MCSuperRegIterator Supers(Reg, this); Supers.isValid(); ++Supers)
+      if (Reg == getSubReg(*Supers, SubIdx) && RC->contains(*Supers))
+        return *Supers;
+    return 0;
+}
 
 //===----------------------------------------------------------------------===//
 //                               Register Units

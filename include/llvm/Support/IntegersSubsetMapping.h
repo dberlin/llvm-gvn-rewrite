@@ -1,4 +1,4 @@
-//===- CRSBuilder.h - ConstantRangesSet Builder -----------------*- C++ -*-===//
+//===- IntegersSubsetMapping.h - Mapping subset ==> Successor ---*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -8,11 +8,12 @@
 //===----------------------------------------------------------------------===//
 //
 /// @file
-/// CRSBuilder allows to build and parse ConstantRangesSet objects.
-/// There is such features like add/remove range, or combine
-/// Two ConstantRangesSet object with neighboring ranges merging.
-/// Set IsReadonly=true if you want to operate with "const ConstantInt" and
-/// "const ConstantRangesSet" objects.
+/// IntegersSubsetMapping is mapping from A to B, where
+/// Items in A is subsets of integers,
+/// Items in B some pointers (Successors).
+/// If user which to add another subset for successor that is already
+/// exists in mapping, IntegersSubsetMapping merges existing subset with
+/// added one.
 //
 //===----------------------------------------------------------------------===//
 
@@ -26,19 +27,20 @@
 
 namespace llvm {
 
-template <class SuccessorClass>
+template <class SuccessorClass,
+          class IntegersSubsetTy = IntegersSubset,
+          class IntTy = IntItem>
 class IntegersSubsetMapping {
 public:
   
-  typedef IntegersSubset::Range RangeTy;
+  typedef IntRange<IntTy> RangeTy;
   
   struct RangeEx : public RangeTy {
-    typedef IntegersSubset::Range RangeTy;
     RangeEx() : Weight(1) {}
-    RangeEx(const RangeTy &R) : RangeTy(R.Low, R.High), Weight(1) {}
-    RangeEx(const IntItem &C) : RangeTy(C), Weight(1) {}
-    RangeEx(const IntItem &L, const IntItem &H) : RangeTy(L, H), Weight(1) {}
-    RangeEx(const IntItem &L, const IntItem &H, unsigned W) :
+    RangeEx(const RangeTy &R) : RangeTy(R), Weight(1) {}
+    RangeEx(const IntTy &C) : RangeTy(C), Weight(1) {}
+    RangeEx(const IntTy &L, const IntTy &H) : RangeTy(L, H), Weight(1) {}
+    RangeEx(const IntTy &L, const IntTy &H, unsigned W) :
       RangeTy(L, H), Weight(W) {}
     unsigned Weight;
   };
@@ -47,13 +49,14 @@ public:
 
 protected:
 
-  typedef std::vector<Cluster> CaseItems;
+  typedef std::list<Cluster> CaseItems;
   typedef typename CaseItems::iterator CaseItemIt;
   typedef typename CaseItems::const_iterator CaseItemConstIt;
   
   typedef std::list<RangeTy> RangesCollection;
   typedef typename RangesCollection::iterator RangesCollectionIt;
   
+  // TODO: Change unclean CRS prefixes to SubsetMap for example.
   typedef std::map<SuccessorClass*, RangesCollection > CRSMap;
   typedef typename CRSMap::iterator CRSMapIt;
 
@@ -63,11 +66,17 @@ protected:
     }
   };
   
+  struct ClusterLefterThan {
+    bool operator()(const Cluster &C, const RangeTy &R) {
+      return C.first.getHigh() < R.getLow();
+    }
+  };  
+  
   CaseItems Items;
   bool Sorted;
   
   bool isIntersected(CaseItemIt& LItem, CaseItemIt& RItem) {
-    return LItem->first.High->uge(RItem->first.Low);
+    return LItem->first.getHigh() >= RItem->first.getLow();
   }
 
   bool isJoinable(CaseItemIt& LItem, CaseItemIt& RItem) {
@@ -76,44 +85,58 @@ protected:
              "Intersected items with different successors!");
       return false;
     }
-    APInt RLow = RItem->first.Low;
+    APInt RLow = RItem->first.getLow();
     if (RLow != APInt::getNullValue(RLow.getBitWidth()))
       --RLow;
-    return LItem->first.High->uge(RLow);
+    return LItem->first.getHigh() >= RLow;
   }
   
   void sort() {
     if (!Sorted) {
-      std::sort(Items.begin(), Items.end(), ClustersCmp());
+      std::vector<Cluster> clustersVector;
+      clustersVector.reserve(Items.size());
+      clustersVector.insert(clustersVector.begin(), Items.begin(), Items.end());
+      std::sort(clustersVector.begin(), clustersVector.end(), ClustersCmp());
+      Items.clear();
+      Items.insert(Items.begin(), clustersVector.begin(), clustersVector.end());
       Sorted = true;
     }
   }
-
-  IntegersSubset getCase(RangesCollection& Src) {
-    std::vector<Constant*> Elts;
-    Elts.reserve(Src.size());
-    for (RangesCollectionIt i = Src.begin(), e = Src.end(); i != e; ++i) {
-      RangeTy &R = *i;
-      std::vector<Constant*> r;
-      if (R.isSingleNumber()) {
-        r.reserve(2);
-        // FIXME: Since currently we have ConstantInt based numbers
-        // use hack-conversion of IntItem to ConstantInt
-        r.push_back(R.Low.toConstantInt());
-        r.push_back(R.High.toConstantInt());
-      } else {
-        r.reserve(1);
-        r.push_back(R.Low.toConstantInt());
-      }
-      Constant *CV = ConstantVector::get(r);
-      Elts.push_back(CV);    
-    }
-    ArrayType *ArrTy =
-        ArrayType::get(Elts.front()->getType(), (uint64_t)Elts.size());
-    Constant *Array = ConstantArray::get(ArrTy, Elts);
-    return IntegersSubset(Array);     
-  }  
   
+  void exclude(CaseItemIt &beginIt, RangeTy &R) {
+    
+    std::list<CaseItemIt> ToBeErased;
+
+    CaseItemIt endIt = Items.end();
+    CaseItemIt It =
+          std::lower_bound(beginIt, Items.end(), R, ClusterLefterThan());
+    
+    if (It == endIt)
+      return;
+
+    if (It->first.getLow() < R.getLow())
+      Items.insert(It, std::make_pair(
+          RangeTy(It->first.getLow(), R.getLow()-1),
+          It->second));
+
+    do
+    ToBeErased.push_back(It++);
+    while (It != endIt && It->first.getLow() <= R.getHigh());
+
+    beginIt = It;
+    
+    CaseItemIt &LastRemoved = *(--ToBeErased.end());
+    if (LastRemoved->first.getHigh() > R.getHigh())
+      beginIt = Items.insert(LastRemoved, std::make_pair(
+          RangeTy(R.getHigh() + 1, LastRemoved->first.getHigh()),
+          LastRemoved->second
+          ));
+    
+    for (typename std::list<CaseItemIt>::iterator i = ToBeErased.begin(),
+         e = ToBeErased.end(); i != e; ++i)
+      Items.erase(*i);
+  }   
+
 public:
   
   // Don't public CaseItems itself. Don't allow edit the Items directly. 
@@ -122,11 +145,10 @@ public:
   // factory.
   typedef CaseItemIt RangeIterator;
   
-  typedef std::pair<SuccessorClass*, IntegersSubset> Case;
+  typedef std::pair<SuccessorClass*, IntegersSubsetTy> Case;
   typedef std::list<Case> Cases;
   
   IntegersSubsetMapping() {
-    Items.reserve(32);
     Sorted = false;
   }
   
@@ -134,9 +156,9 @@ public:
     if (Items.empty())
       return true;
     sort();
-    for (CaseItemIt i = Items.begin(), j = i+1, e = Items.end();
+    for (CaseItemIt j = Items.begin(), i = j++, e = Items.end();
          j != e; i = j++) {
-      if (isIntersected(j, i) && j->second != i->second) {
+      if (isIntersected(i, j) && i->second != j->second) {
         errItem = j;
         return false;
       }
@@ -150,22 +172,22 @@ public:
     sort();
     CaseItems OldItems = Items;
     Items.clear();
-    IntItem *Low = &OldItems.begin()->first.Low;
-    IntItem *High = &OldItems.begin()->first.High;
+    const IntTy *Low = &OldItems.begin()->first.getLow();
+    const IntTy *High = &OldItems.begin()->first.getHigh();
     unsigned Weight = 1;
     SuccessorClass *Successor = OldItems.begin()->second;
-    for (CaseItemIt i = OldItems.begin(), j = i+1, e = OldItems.end();
-        j != e; i = j++) {
+    for (CaseItemIt j = OldItems.begin(), i = j++, e = OldItems.end();
+         j != e; i = j++) {
       if (isJoinable(i, j)) {
-        IntItem *CurHigh = &j->first.High;
+        const IntTy *CurHigh = &j->first.getHigh();
         ++Weight;
-        if ((*CurHigh)->ugt(*High))
+        if (*CurHigh > *High)
           High = CurHigh;
       } else {
         RangeEx R(*Low, *High, Weight);
         add(R, Successor);
-        Low = &j->first.Low;
-        High = &j->first.High; 
+        Low = &j->first.getLow();
+        High = &j->first.getHigh(); 
         Weight = 1;
         Successor = j->second;
       }
@@ -177,13 +199,13 @@ public:
   }
   
   /// Adds a constant value.
-  void add(const IntItem &C, SuccessorClass *S = 0) {
+  void add(const IntTy &C, SuccessorClass *S = 0) {
     RangeTy R(C);
     add(R, S);
   }
   
   /// Adds a range.
-  void add(const IntItem &Low, const IntItem &High, SuccessorClass *S = 0) {
+  void add(const IntTy &Low, const IntTy &High, SuccessorClass *S = 0) {
     RangeTy R(Low, High);
     add(R, S);
   }
@@ -197,8 +219,8 @@ public:
   }  
   
   /// Adds all ranges and values from given ranges set to the current
-  /// CRSBuilder object.
-  void add(const IntegersSubset &CRS, SuccessorClass *S = 0) {
+  /// mapping.
+  void add(const IntegersSubsetTy &CRS, SuccessorClass *S = 0) {
     for (unsigned i = 0, e = CRS.getNumItems(); i < e; ++i) {
       RangeTy R = CRS.getItem(i);
       add(R, S);
@@ -208,26 +230,45 @@ public:
   /// Removes items from set.
   void removeItem(RangeIterator i) { Items.erase(i); }
   
+  // Excludes RHS subset from current mapping. RHS should consists of non
+  // overlapped ranges only and sorted from left to the right.
+  // method will have unpredictional behaviour in another case. 
+  void exclude(IntegersSubsetTy &RHS) {
+    CaseItemIt startIt = begin();
+    for (unsigned i = 0, e = RHS.getNumItems();
+         i != e && startIt != end(); ++i) {
+      RangeTy R = RHS.getItem(i);
+      exclude(startIt, R);
+    }
+  }  
+  
   /// Builds the finalized case objects.
   void getCases(Cases& TheCases) {
     CRSMap TheCRSMap;
     for (RangeIterator i = this->begin(); i != this->end(); ++i)
       TheCRSMap[i->second].push_back(i->first);
     for (CRSMapIt i = TheCRSMap.begin(), e = TheCRSMap.end(); i != e; ++i)
-      TheCases.push_back(std::make_pair(i->first, getCase(i->second)));
+      TheCases.push_back(std::make_pair(i->first, IntegersSubsetTy(i->second)));
   }
   
   /// Builds the finalized case objects ignoring successor values, as though
   /// all ranges belongs to the same successor.
-  IntegersSubset getCase() {
+  IntegersSubsetTy getCase() {
     RangesCollection Ranges;
     for (RangeIterator i = this->begin(); i != this->end(); ++i)
       Ranges.push_back(i->first);
-    return getCase(Ranges);
+    return IntegersSubsetTy(Ranges);
   }  
   
   /// Returns true if there is no ranges and values inside.
   bool empty() const { return Items.empty(); }
+  
+  void clear() {
+    Items.clear();
+    // Don't reset Sorted flag:
+    // 1. For empty mapping it matters nothing.
+    // 2. After first item will added Sorted flag will cleared.
+  }  
   
   RangeIterator begin() { return Items.begin(); }
   RangeIterator end() { return Items.end(); }

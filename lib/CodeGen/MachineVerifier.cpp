@@ -89,8 +89,8 @@ namespace {
     void addRegWithSubRegs(RegVector &RV, unsigned Reg) {
       RV.push_back(Reg);
       if (TargetRegisterInfo::isPhysicalRegister(Reg))
-        for (const uint16_t *R = TRI->getSubRegisters(Reg); *R; R++)
-          RV.push_back(*R);
+        for (MCSubRegIterator SubRegs(Reg, TRI); SubRegs.isValid(); ++SubRegs)
+          RV.push_back(*SubRegs);
     }
 
     struct BBInfo {
@@ -191,9 +191,11 @@ namespace {
 
     void visitMachineFunctionBefore();
     void visitMachineBasicBlockBefore(const MachineBasicBlock *MBB);
+    void visitMachineBundleBefore(const MachineInstr *MI);
     void visitMachineInstrBefore(const MachineInstr *MI);
     void visitMachineOperand(const MachineOperand *MO, unsigned MONum);
     void visitMachineInstrAfter(const MachineInstr *MI);
+    void visitMachineBundleAfter(const MachineInstr *MI);
     void visitMachineBasicBlockAfter(const MachineBasicBlock *MBB);
     void visitMachineFunctionAfter();
 
@@ -288,6 +290,8 @@ bool MachineVerifier::runOnMachineFunction(MachineFunction &MF) {
   for (MachineFunction::const_iterator MFI = MF.begin(), MFE = MF.end();
        MFI!=MFE; ++MFI) {
     visitMachineBasicBlockBefore(MFI);
+    // Keep track of the current bundle header.
+    const MachineInstr *CurBundle = 0;
     for (MachineBasicBlock::const_instr_iterator MBBI = MFI->instr_begin(),
            MBBE = MFI->instr_end(); MBBI != MBBE; ++MBBI) {
       if (MBBI->getParent() != MFI) {
@@ -295,15 +299,21 @@ bool MachineVerifier::runOnMachineFunction(MachineFunction &MF) {
         *OS << "Instruction: " << *MBBI;
         continue;
       }
-      // Skip BUNDLE instruction for now. FIXME: We should add code to verify
-      // the BUNDLE's specifically.
-      if (MBBI->isBundle())
-        continue;
+      // Is this a bundle header?
+      if (!MBBI->isInsideBundle()) {
+        if (CurBundle)
+          visitMachineBundleAfter(CurBundle);
+        CurBundle = MBBI;
+        visitMachineBundleBefore(CurBundle);
+      } else if (!CurBundle)
+        report("No bundle header", MBBI);
       visitMachineInstrBefore(MBBI);
       for (unsigned I = 0, E = MBBI->getNumOperands(); I != E; ++I)
         visitMachineOperand(&MBBI->getOperand(I), I);
       visitMachineInstrAfter(MBBI);
     }
+    if (CurBundle)
+      visitMachineBundleAfter(CurBundle);
     visitMachineBasicBlockAfter(MFI);
   }
   visitMachineFunctionAfter();
@@ -384,10 +394,10 @@ void MachineVerifier::visitMachineFunctionBefore() {
   // A sub-register of a reserved register is also reserved
   for (int Reg = regsReserved.find_first(); Reg>=0;
        Reg = regsReserved.find_next(Reg)) {
-    for (const uint16_t *Sub = TRI->getSubRegisters(Reg); *Sub; ++Sub) {
+    for (MCSubRegIterator SubRegs(Reg, TRI); SubRegs.isValid(); ++SubRegs) {
       // FIXME: This should probably be:
-      // assert(regsReserved.test(*Sub) && "Non-reserved sub-register");
-      regsReserved.set(*Sub);
+      // assert(regsReserved.test(*SubRegs) && "Non-reserved sub-register");
+      regsReserved.set(*SubRegs);
     }
   }
 
@@ -554,8 +564,8 @@ MachineVerifier::visitMachineBasicBlockBefore(const MachineBasicBlock *MBB) {
       continue;
     }
     regsLive.insert(*I);
-    for (const uint16_t *R = TRI->getSubRegisters(*I); *R; R++)
-      regsLive.insert(*R);
+    for (MCSubRegIterator SubRegs(*I, TRI); SubRegs.isValid(); ++SubRegs)
+      regsLive.insert(*SubRegs);
   }
   regsLiveInButUnused = regsLive;
 
@@ -564,8 +574,8 @@ MachineVerifier::visitMachineBasicBlockBefore(const MachineBasicBlock *MBB) {
   BitVector PR = MFI->getPristineRegs(MBB);
   for (int I = PR.find_first(); I>0; I = PR.find_next(I)) {
     regsLive.insert(I);
-    for (const uint16_t *R = TRI->getSubRegisters(I); *R; R++)
-      regsLive.insert(*R);
+    for (MCSubRegIterator SubRegs(I, TRI); SubRegs.isValid(); ++SubRegs)
+      regsLive.insert(*SubRegs);
   }
 
   regsKilled.clear();
@@ -573,6 +583,30 @@ MachineVerifier::visitMachineBasicBlockBefore(const MachineBasicBlock *MBB) {
 
   if (Indexes)
     lastIndex = Indexes->getMBBStartIdx(MBB);
+}
+
+// This function gets called for all bundle headers, including normal
+// stand-alone unbundled instructions.
+void MachineVerifier::visitMachineBundleBefore(const MachineInstr *MI) {
+  if (Indexes && Indexes->hasIndex(MI)) {
+    SlotIndex idx = Indexes->getInstructionIndex(MI);
+    if (!(idx > lastIndex)) {
+      report("Instruction index out of order", MI);
+      *OS << "Last instruction was at " << lastIndex << '\n';
+    }
+    lastIndex = idx;
+  }
+
+  // Ensure non-terminators don't follow terminators.
+  // Ignore predicated terminators formed by if conversion.
+  // FIXME: If conversion shouldn't need to violate this rule.
+  if (MI->isTerminator() && !TII->isPredicated(MI)) {
+    if (!FirstTerminator)
+      FirstTerminator = MI;
+  } else if (FirstTerminator) {
+    report("Non-terminator instruction after the first terminator", MI);
+    *OS << "First terminator was:\t" << *FirstTerminator;
+  }
 }
 
 void MachineVerifier::visitMachineInstrBefore(const MachineInstr *MI) {
@@ -606,17 +640,6 @@ void MachineVerifier::visitMachineInstrBefore(const MachineInstr *MI) {
       if (!mapped)
         report("Missing slot index", MI);
     }
-  }
-
-  // Ensure non-terminators don't follow terminators.
-  // Ignore predicated terminators formed by if conversion.
-  // FIXME: If conversion shouldn't need to violate this rule.
-  if (MI->isTerminator() && !TII->isPredicated(MI)) {
-    if (!FirstTerminator)
-      FirstTerminator = MI;
-  } else if (FirstTerminator) {
-    report("Non-terminator instruction after the first terminator", MI);
-    *OS << "First terminator was:\t" << *FirstTerminator;
   }
 
   StringRef ErrorInfo;
@@ -865,6 +888,13 @@ void MachineVerifier::checkLiveness(const MachineOperand *MO, unsigned MONum) {
 }
 
 void MachineVerifier::visitMachineInstrAfter(const MachineInstr *MI) {
+}
+
+// This function gets called after visiting all instructions in a bundle. The
+// argument points to the bundle header.
+// Normal stand-alone instructions are also considered 'bundles', and this
+// function is called for all of them.
+void MachineVerifier::visitMachineBundleAfter(const MachineInstr *MI) {
   BBInfo &MInfo = MBBInfoMap[MI->getParent()];
   set_union(MInfo.regsKilled, regsKilled);
   set_subtract(regsLive, regsKilled); regsKilled.clear();
@@ -878,15 +908,6 @@ void MachineVerifier::visitMachineInstrAfter(const MachineInstr *MI) {
   }
   set_subtract(regsLive, regsDead);   regsDead.clear();
   set_union(regsLive, regsDefined);   regsDefined.clear();
-
-  if (Indexes && Indexes->hasIndex(MI)) {
-    SlotIndex idx = Indexes->getInstructionIndex(MI);
-    if (!(idx > lastIndex)) {
-      report("Instruction index out of order", MI);
-      *OS << "Last instruction was at " << lastIndex << '\n';
-    }
-    lastIndex = idx;
-  }
 }
 
 void
