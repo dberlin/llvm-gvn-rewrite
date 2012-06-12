@@ -3146,6 +3146,29 @@ bool GVN::processNonLocalLoad(LoadInst *LI) {
 static void DeleteInstructionInBlock(BasicBlock *BB) {
   DEBUG(dbgs() << "  BasicBlock Dead:" << *BB);
   ++NumGVNBlocksDeleted;
+
+  // Check to see if there are non-terminating instructions to delete.
+  if (isa<TerminatorInst>(BB->begin()))
+    return;
+
+  // Delete the instructions backwards, as it has a reduced likelihood of having
+  // to update as many def-use and use-def chains.
+  Instruction *EndInst = BB->getTerminator(); // Last not to be deleted.
+  while (EndInst != BB->begin()) {
+    // Delete the next to last instruction.
+    BasicBlock::iterator I = EndInst;
+    Instruction *Inst = --I;
+    if (!Inst->use_empty())
+      Inst->replaceAllUsesWith(UndefValue::get(Inst->getType()));
+    if (isa<LandingPadInst>(Inst)) {
+      EndInst = Inst;
+      continue;
+    }
+    BB->getInstList().erase(Inst);
+    ++NumGVNInstrDeleted;
+  }
+}
+
 static MDNode *getMostGenericTBAA(MDNode *A, MDNode *B) {
   if (!A || !B)
     return NULL;
@@ -3342,33 +3365,6 @@ static void patchAndReplaceAllUsesWith(Value *Repl, Instruction *I) {
   I->replaceAllUsesWith(Repl);
 }
 
-/// processLoad - Attempt to eliminate a load, first by eliminating it
-/// locally, and then attempting non-local elimination if that fails.
-bool GVN::processLoad(LoadInst *L) {
-  if (!MD)
-    return false;
-
-  // Check to see if there are non-terminating instructions to delete.
-  if (isa<TerminatorInst>(BB->begin()))
-    return;
-
-  // Delete the instructions backwards, as it has a reduced likelihood of having
-  // to update as many def-use and use-def chains.
-  Instruction *EndInst = BB->getTerminator(); // Last not to be deleted.
-  while (EndInst != BB->begin()) {
-    // Delete the next to last instruction.
-    BasicBlock::iterator I = EndInst;
-    Instruction *Inst = --I;
-    if (!Inst->use_empty())
-      Inst->replaceAllUsesWith(UndefValue::get(Inst->getType()));
-    if (isa<LandingPadInst>(Inst)) {
-      EndInst = Inst;
-      continue;
-    }
-    BB->getInstList().erase(Inst);
-    ++NumGVNInstrDeleted;
-  }
-}
 
 /// splitCriticalEdges - Split critical edges found during the previous
 /// iteration that may enable further optimization.
