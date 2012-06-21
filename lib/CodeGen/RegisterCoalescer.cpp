@@ -797,12 +797,10 @@ bool RegisterCoalescer::reMaterializeTrivialDef(LiveInterval &SrcInt,
 
   SlotIndex NewMIIdx = LIS->getInstructionIndex(NewMI);
   for (unsigned i = 0, e = NewMIImplDefs.size(); i != e; ++i) {
-    unsigned reg = NewMIImplDefs[i];
-    LiveInterval &li = LIS->getInterval(reg);
-    VNInfo *DeadDefVN = li.getNextValue(NewMIIdx.getRegSlot(),
-                                        LIS->getVNInfoAllocator());
-    LiveRange lr(NewMIIdx.getRegSlot(), NewMIIdx.getDeadSlot(), DeadDefVN);
-    li.addRange(lr);
+    unsigned Reg = NewMIImplDefs[i];
+    for (MCRegUnitIterator Units(Reg, TRI); Units.isValid(); ++Units)
+      if (LiveInterval *LI = LIS->getCachedRegUnit(*Units))
+        LI->createDeadDef(NewMIIdx.getRegSlot(), LIS->getVNInfoAllocator());
   }
 
   CopyMI->eraseFromParent();
@@ -870,7 +868,7 @@ void RegisterCoalescer::updateRegDefsUses(unsigned SrcReg,
                                           unsigned DstReg,
                                           unsigned SubIdx) {
   bool DstIsPhys = TargetRegisterInfo::isPhysicalRegister(DstReg);
-  LiveInterval &DstInt = LIS->getInterval(DstReg);
+  LiveInterval *DstInt = DstIsPhys ? 0 : &LIS->getInterval(DstReg);
 
   // Update LiveDebugVariables.
   LDV->renameRegister(SrcReg, DstReg, SubIdx);
@@ -883,8 +881,8 @@ void RegisterCoalescer::updateRegDefsUses(unsigned SrcReg,
 
     // If SrcReg wasn't read, it may still be the case that DstReg is live-in
     // because SrcReg is a sub-register.
-    if (!Reads && SubIdx)
-      Reads = DstInt.liveAt(LIS->getInstructionIndex(UseMI));
+    if (DstInt && !Reads && SubIdx)
+      Reads = DstInt->liveAt(LIS->getInstructionIndex(UseMI));
 
     // Replace SrcReg with DstReg in all UseMI operands.
     for (unsigned i = 0, e = Ops.size(); i != e; ++i) {
@@ -1102,16 +1100,24 @@ bool RegisterCoalescer::joinReservedPhysReg(CoalescerPair &CP) {
 
   // Deny any overlapping intervals.  This depends on all the reserved
   // register live ranges to look like dead defs.
-  for (MCRegAliasIterator AS(CP.getDstReg(), TRI, true); AS.isValid(); ++AS) {
-    if (!LIS->hasInterval(*AS)) {
-      // Make sure at least DstReg itself exists before attempting a join.
-      if (*AS == CP.getDstReg())
-        LIS->getOrCreateInterval(CP.getDstReg());
-      continue;
-    }
-    if (RHS.overlaps(LIS->getInterval(*AS))) {
-      DEBUG(dbgs() << "\t\tInterference: " << PrintReg(*AS, TRI) << '\n');
-      return false;
+  if (LIS->trackingRegUnits()) {
+    for (MCRegUnitIterator UI(CP.getDstReg(), TRI); UI.isValid(); ++UI)
+      if (RHS.overlaps(LIS->getRegUnit(*UI))) {
+        DEBUG(dbgs() << "\t\tInterference: " << PrintRegUnit(*UI, TRI) << '\n');
+        return false;
+      }
+  } else {
+    for (MCRegAliasIterator AS(CP.getDstReg(), TRI, true); AS.isValid(); ++AS) {
+      if (!LIS->hasInterval(*AS)) {
+        // Make sure at least DstReg itself exists before attempting a join.
+        if (*AS == CP.getDstReg())
+          LIS->getOrCreateInterval(CP.getDstReg());
+        continue;
+      }
+      if (RHS.overlaps(LIS->getInterval(*AS))) {
+        DEBUG(dbgs() << "\t\tInterference: " << PrintReg(*AS, TRI) << '\n');
+        return false;
+      }
     }
   }
   // Skip any value computations, we are not adding new values to the

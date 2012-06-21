@@ -1,4 +1,4 @@
-; RUN: llc < %s -mtriple=armv7-eabi -mattr=+neon,+vfp4 | FileCheck %s
+; RUN: llc < %s -mtriple=armv7-eabi -mattr=+neon,+vfp4 -enable-excess-fp-precision | FileCheck %s
 ; Check generated fused MAC and MLS.
 
 define double @fusedMACTest1(double %d1, double %d2, double %d3) {
@@ -139,6 +139,15 @@ entry:
   %tmp1 = fsub double -0.0, %b
   %tmp2 = tail call double @llvm.fma.f64(double %a, double %tmp1, double %c) nounwind readnone
   ret double %tmp2
+}
+
+define float @test_fnms_f32(float %a, float %b, float* %c) nounwind readnone ssp {
+; CHECK: test_fnms_f32
+; CHECK: vfnms.f32
+  %tmp1 = load float* %c, align 4
+  %tmp2 = fsub float -0.0, %tmp1
+  %tmp3 = tail call float @llvm.fma.f32(float %a, float %b, float %tmp2) nounwind readnone
+  ret float %tmp3 
 }
 
 define double @test_fnms_f64(double %a, double %b, double %c) nounwind readnone ssp {

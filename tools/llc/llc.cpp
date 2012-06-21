@@ -156,8 +156,8 @@ DisableFPElimNonLeaf("disable-non-leaf-fp-elim",
   cl::init(false));
 
 static cl::opt<bool>
-DisableExcessPrecision("disable-excess-fp-precision",
-  cl::desc("Disable optimizations that may increase FP precision"),
+EnableExcessPrecision("enable-excess-fp-precision",
+  cl::desc("Enable optimizations that may increase FP precision"),
   cl::init(false));
 
 static cl::opt<bool>
@@ -244,6 +244,10 @@ SegmentedStacks("segmented-stacks",
   cl::desc("Use segmented stacks if possible."),
   cl::init(false));
 
+static cl::opt<bool>
+UseInitArray("use-init-array",
+  cl::desc("Use .init_array instead of .ctors."),
+  cl::init(false));
 
 // GetFileNameRoot - Helper function to get the basename of a filename.
 static inline std::string
@@ -400,7 +404,7 @@ int main(int argc, char **argv) {
   Options.LessPreciseFPMADOption = EnableFPMAD;
   Options.NoFramePointerElim = DisableFPElim;
   Options.NoFramePointerElimNonLeaf = DisableFPElimNonLeaf;
-  Options.NoExcessFPPrecision = DisableExcessPrecision;
+  Options.AllowExcessFPPrecision = EnableExcessPrecision;
   Options.UnsafeFPMath = EnableUnsafeFPMath;
   Options.NoInfsFPMath = EnableNoInfsFPMath;
   Options.NoNaNsFPMath = EnableNoNaNsFPMath;
@@ -418,6 +422,7 @@ int main(int argc, char **argv) {
   Options.TrapFuncName = TrapFuncName;
   Options.PositionIndependentExecutable = EnablePIE;
   Options.EnableSegmentedStacks = SegmentedStacks;
+  Options.UseInitArray = UseInitArray;
 
   std::auto_ptr<TargetMachine>
     target(TheTarget->createTargetMachine(TheTriple.getTriple(),

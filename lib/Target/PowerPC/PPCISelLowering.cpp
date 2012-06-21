@@ -1105,7 +1105,10 @@ bool PPCTargetLowering::getPreIndexedAddressParts(SDNode *N, SDValue &Base,
   if (VT.isVector())
     return false;
 
-  // TODO: Check reg+reg first.
+  if (SelectAddressRegReg(Ptr, Offset, Base, DAG)) {
+    AM = ISD::PRE_INC;
+    return true;
+  }
 
   // LDU/STU use reg+imm*4, others use reg+imm.
   if (VT != MVT::i64) {

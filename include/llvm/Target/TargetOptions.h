@@ -35,7 +35,7 @@ namespace llvm {
     TargetOptions()
         : PrintMachineCode(false), NoFramePointerElim(false),
           NoFramePointerElimNonLeaf(false), LessPreciseFPMADOption(false),
-          NoExcessFPPrecision(false), UnsafeFPMath(false), NoInfsFPMath(false),
+          AllowExcessFPPrecision(false), UnsafeFPMath(false), NoInfsFPMath(false),
           NoNaNsFPMath(false), HonorSignDependentRoundingFPMathOption(false),
           UseSoftFloat(false), NoZerosInBSS(false), JITExceptionHandling(false),
           JITEmitDebugInfo(false), JITEmitDebugInfoToDisk(false),
@@ -43,7 +43,7 @@ namespace llvm {
           StackAlignmentOverride(0), RealignStack(true),
           DisableJumpTables(false), EnableFastISel(false),
           PositionIndependentExecutable(false), EnableSegmentedStacks(false),
-          TrapFuncName(""), FloatABIType(FloatABI::Default)
+          UseInitArray(false), TrapFuncName(""), FloatABIType(FloatABI::Default)
     {}
 
     /// PrintMachineCode - This flag is enabled when the -print-machineinstrs
@@ -74,13 +74,13 @@ namespace llvm {
     unsigned LessPreciseFPMADOption : 1;
     bool LessPreciseFPMAD() const;
 
-    /// NoExcessFPPrecision - This flag is enabled when the
-    /// -disable-excess-fp-precision flag is specified on the command line.
-    /// When this flag is off (the default), the code generator is allowed to
-    /// produce results that are "more precise" than IEEE allows.  This includes
-    /// use of FMA-like operations and use of the X86 FP registers without
-    /// rounding all over the place.
-    unsigned NoExcessFPPrecision : 1;
+    /// AllowExcessFPPrecision - This flag is enabled when the
+    /// -enable-excess-fp-precision flag is specified on the command line. This
+    /// flag is OFF by default. When it is turned on, the code generator is
+    /// allowed to produce results that are "more precise" than IEEE allows.
+    /// This includes use of FMA-like operations and use of the X86 FP registers
+    /// without rounding all over the place.
+    unsigned AllowExcessFPPrecision : 1;
 
     /// UnsafeFPMath - This flag is enabled when the
     /// -enable-unsafe-fp-math flag is specified on the command line.  When
@@ -171,6 +171,10 @@ namespace llvm {
     unsigned PositionIndependentExecutable : 1;
 
     unsigned EnableSegmentedStacks : 1;
+
+    /// UseInitArray - Use .init_array instead of .ctors for static
+    /// constructors.
+    unsigned UseInitArray : 1;
 
     /// getTrapFunctionName - If this returns a non-empty string, this means
     /// isel should lower Intrinsic::trap to a call to the specified function

@@ -476,8 +476,8 @@ MachineVerifier::visitMachineBasicBlockBefore(const MachineBasicBlock *MBB) {
         report("MBB exits via unconditional fall-through but its successor "
                "differs from its CFG successor!", MBB);
       }
-      if (!MBB->empty() && MBB->back().isBarrier() &&
-          !TII->isPredicated(&MBB->back())) {
+      if (!MBB->empty() && getBundleStart(&MBB->back())->isBarrier() &&
+          !TII->isPredicated(getBundleStart(&MBB->back()))) {
         report("MBB exits via unconditional fall-through but ends with a "
                "barrier instruction!", MBB);
       }
@@ -497,10 +497,10 @@ MachineVerifier::visitMachineBasicBlockBefore(const MachineBasicBlock *MBB) {
       if (MBB->empty()) {
         report("MBB exits via unconditional branch but doesn't contain "
                "any instructions!", MBB);
-      } else if (!MBB->back().isBarrier()) {
+      } else if (!getBundleStart(&MBB->back())->isBarrier()) {
         report("MBB exits via unconditional branch but doesn't end with a "
                "barrier instruction!", MBB);
-      } else if (!MBB->back().isTerminator()) {
+      } else if (!getBundleStart(&MBB->back())->isTerminator()) {
         report("MBB exits via unconditional branch but the branch isn't a "
                "terminator instruction!", MBB);
       }
@@ -520,10 +520,10 @@ MachineVerifier::visitMachineBasicBlockBefore(const MachineBasicBlock *MBB) {
       if (MBB->empty()) {
         report("MBB exits via conditional branch/fall-through but doesn't "
                "contain any instructions!", MBB);
-      } else if (MBB->back().isBarrier()) {
+      } else if (getBundleStart(&MBB->back())->isBarrier()) {
         report("MBB exits via conditional branch/fall-through but ends with a "
                "barrier instruction!", MBB);
-      } else if (!MBB->back().isTerminator()) {
+      } else if (!getBundleStart(&MBB->back())->isTerminator()) {
         report("MBB exits via conditional branch/fall-through but the branch "
                "isn't a terminator instruction!", MBB);
       }
@@ -540,10 +540,10 @@ MachineVerifier::visitMachineBasicBlockBefore(const MachineBasicBlock *MBB) {
       if (MBB->empty()) {
         report("MBB exits via conditional branch/branch but doesn't "
                "contain any instructions!", MBB);
-      } else if (!MBB->back().isBarrier()) {
+      } else if (!getBundleStart(&MBB->back())->isBarrier()) {
         report("MBB exits via conditional branch/branch but doesn't end with a "
                "barrier instruction!", MBB);
-      } else if (!MBB->back().isTerminator()) {
+      } else if (!getBundleStart(&MBB->back())->isTerminator()) {
         report("MBB exits via conditional branch/branch but the branch "
                "isn't a terminator instruction!", MBB);
       }
@@ -1092,20 +1092,21 @@ void MachineVerifier::verifyLiveVariables() {
 
 void MachineVerifier::verifyLiveIntervals() {
   assert(LiveInts && "Don't call verifyLiveIntervals without LiveInts");
-  for (LiveIntervals::const_iterator LVI = LiveInts->begin(),
-       LVE = LiveInts->end(); LVI != LVE; ++LVI) {
-    const LiveInterval &LI = *LVI->second;
+  for (unsigned i = 0, e = MRI->getNumVirtRegs(); i != e; ++i) {
+    unsigned Reg = TargetRegisterInfo::index2VirtReg(i);
 
     // Spilling and splitting may leave unused registers around. Skip them.
-    if (MRI->reg_nodbg_empty(LI.reg))
+    if (MRI->reg_nodbg_empty(Reg))
       continue;
 
-    // Physical registers have much weirdness going on, mostly from coalescing.
-    // We should probably fix it, but for now just ignore them.
-    if (TargetRegisterInfo::isPhysicalRegister(LI.reg))
+    if (!LiveInts->hasInterval(Reg)) {
+      report("Missing live interval for virtual register", MF);
+      *OS << PrintReg(Reg, TRI) << " still has defs or uses\n";
       continue;
+    }
 
-    assert(LVI->first == LI.reg && "Invalid reg to interval mapping");
+    const LiveInterval &LI = LiveInts->getInterval(Reg);
+    assert(Reg == LI.reg && "Invalid reg to interval mapping");
 
     for (LiveInterval::const_vni_iterator I = LI.vni_begin(), E = LI.vni_end();
          I!=E; ++I) {

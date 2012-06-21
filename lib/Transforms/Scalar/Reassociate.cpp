@@ -132,7 +132,7 @@ namespace {
   private:
     void BuildRankMap(Function &F);
     unsigned getRank(Value *V);
-    Value *ReassociateExpression(BinaryOperator *I);
+    void ReassociateExpression(BinaryOperator *I);
     void RewriteExprTree(BinaryOperator *I, SmallVectorImpl<ValueEntry> &Ops);
     Value *OptimizeExpression(BinaryOperator *I,
                               SmallVectorImpl<ValueEntry> &Ops);
@@ -455,6 +455,10 @@ static bool LinearizeExprTree(BinaryOperator *I,
   assert(Instruction::isAssociative(Opcode) &&
          Instruction::isCommutative(Opcode) &&
          "Expected an associative and commutative operation!");
+  // If we see an absorbing element then the entire expression must be equal to
+  // it.  For example, if this is a multiplication expression and zero occurs as
+  // an operand somewhere in it then the result of the expression must be zero.
+  Constant *Absorber = ConstantExpr::getBinOpAbsorber(Opcode, I->getType());
 
   // Visit all operands of the expression, keeping track of their weight (the
   // number of paths from the expression root to the operand, or if you like
@@ -501,6 +505,13 @@ static bool LinearizeExprTree(BinaryOperator *I,
       APInt Weight = P.second; // Number of paths to this operand.
       DEBUG(dbgs() << "OPERAND: " << *Op << " (" << Weight << ")\n");
       assert(!Op->use_empty() && "No uses, so how did we get to it?!");
+
+      // If the expression contains an absorbing element then there is no need
+      // to analyze it further: it must evaluate to the absorbing element.
+      if (Op == Absorber && !Weight.isMinValue()) {
+        Ops.push_back(std::make_pair(Absorber, APInt(Bitwidth, 1)));
+        return MadeChange;
+      }
 
       // If this is a binary operation of the right kind with only one use then
       // add its operands to the expression.
@@ -617,14 +628,20 @@ static bool LinearizeExprTree(BinaryOperator *I,
 
   // Add any constants back into Ops, all globbed together and reduced to having
   // weight 1 for the convenience of users.
-  if (Cst && Cst != ConstantExpr::getBinOpIdentity(Opcode, I->getType()))
+  Constant *Identity = ConstantExpr::getBinOpIdentity(Opcode, I->getType());
+  if (Cst && Cst != Identity) {
+    // If combining multiple constants resulted in the absorber then the entire
+    // expression must evaluate to the absorber.
+    if (Cst == Absorber)
+      Ops.clear();
     Ops.push_back(std::make_pair(Cst, APInt(Bitwidth, 1)));
+  }
 
   // For nilpotent operations or addition there may be no operands, for example
   // because the expression was "X xor X" or consisted of 2^Bitwidth additions:
   // in both cases the weight reduces to 0 causing the value to be skipped.
   if (Ops.empty()) {
-    Constant *Identity = ConstantExpr::getBinOpIdentity(Opcode, I->getType());
+    assert(Identity && "Associative operation without identity!");
     Ops.push_back(std::make_pair(Identity, APInt(Bitwidth, 1)));
   }
 
@@ -1426,44 +1443,6 @@ Value *Reassociate::OptimizeExpression(BinaryOperator *I,
 
   unsigned Opcode = I->getOpcode();
 
-  if (Constant *V1 = dyn_cast<Constant>(Ops[Ops.size()-2].Op))
-    if (Constant *V2 = dyn_cast<Constant>(Ops.back().Op)) {
-      Ops.pop_back();
-      Ops.back().Op = ConstantExpr::get(Opcode, V1, V2);
-      return OptimizeExpression(I, Ops);
-    }
-
-  // Check for destructive annihilation due to a constant being used.
-  if (ConstantInt *CstVal = dyn_cast<ConstantInt>(Ops.back().Op))
-    switch (Opcode) {
-    default: break;
-    case Instruction::And:
-      if (CstVal->isZero())                  // X & 0 -> 0
-        return CstVal;
-      if (CstVal->isAllOnesValue())          // X & -1 -> X
-        Ops.pop_back();
-      break;
-    case Instruction::Mul:
-      if (CstVal->isZero()) {                // X * 0 -> 0
-        ++NumAnnihil;
-        return CstVal;
-      }
-
-      if (cast<ConstantInt>(CstVal)->isOne())
-        Ops.pop_back();                      // X * 1 -> X
-      break;
-    case Instruction::Or:
-      if (CstVal->isAllOnesValue())          // X | -1 -> -1
-        return CstVal;
-      // FALLTHROUGH!
-    case Instruction::Add:
-    case Instruction::Xor:
-      if (CstVal->isZero())                  // X [|^+] 0 -> X
-        Ops.pop_back();
-      break;
-    }
-  if (Ops.size() == 1) return Ops[0].Op;
-
   // Handle destructive annihilation due to identities between elements in the
   // argument list here.
   unsigned NumOps = Ops.size();
@@ -1501,12 +1480,14 @@ void Reassociate::EraseInst(Instruction *I) {
   ValueRankMap.erase(I);
   I->eraseFromParent();
   // Optimize its operands.
+  SmallPtrSet<Instruction *, 8> Visited; // Detect self-referential nodes.
   for (unsigned i = 0, e = Ops.size(); i != e; ++i)
     if (Instruction *Op = dyn_cast<Instruction>(Ops[i])) {
       // If this is a node in an expression tree, climb to the expression root
       // and add that since that's where optimization actually happens.
       unsigned Opcode = Op->getOpcode();
-      while (Op->hasOneUse() && Op->use_back()->getOpcode() == Opcode)
+      while (Op->hasOneUse() && Op->use_back()->getOpcode() == Opcode &&
+             Visited.insert(Op))
         Op = Op->use_back();
       RedoInsts.insert(Op);
     }
@@ -1606,7 +1587,7 @@ void Reassociate::OptimizeInst(Instruction *I) {
   ReassociateExpression(BO);
 }
 
-Value *Reassociate::ReassociateExpression(BinaryOperator *I) {
+void Reassociate::ReassociateExpression(BinaryOperator *I) {
 
   // First, walk the expression tree, linearizing the tree, collecting the
   // operand information.
@@ -1633,6 +1614,9 @@ Value *Reassociate::ReassociateExpression(BinaryOperator *I) {
   // OptimizeExpression - Now that we have the expression tree in a convenient
   // sorted form, optimize it globally if possible.
   if (Value *V = OptimizeExpression(I, Ops)) {
+    if (V == I)
+      // Self-referential expression in unreachable code.
+      return;
     // This expression tree simplified to something that isn't a tree,
     // eliminate it.
     DEBUG(dbgs() << "Reassoc to scalar: " << *V << '\n');
@@ -1641,7 +1625,7 @@ Value *Reassociate::ReassociateExpression(BinaryOperator *I) {
       VI->setDebugLoc(I->getDebugLoc());
     RedoInsts.insert(I);
     ++NumAnnihil;
-    return V;
+    return;
   }
 
   // We want to sink immediates as deeply as possible except in the case where
@@ -1659,19 +1643,22 @@ Value *Reassociate::ReassociateExpression(BinaryOperator *I) {
   DEBUG(dbgs() << "RAOut:\t"; PrintOps(I, Ops); dbgs() << '\n');
 
   if (Ops.size() == 1) {
+    if (Ops[0].Op == I)
+      // Self-referential expression in unreachable code.
+      return;
+
     // This expression tree simplified to something that isn't a tree,
     // eliminate it.
     I->replaceAllUsesWith(Ops[0].Op);
     if (Instruction *OI = dyn_cast<Instruction>(Ops[0].Op))
       OI->setDebugLoc(I->getDebugLoc());
     RedoInsts.insert(I);
-    return Ops[0].Op;
+    return;
   }
 
   // Now that we ordered and optimized the expressions, splat them back into
   // the expression tree, removing any unneeded nodes.
   RewriteExprTree(I, Ops);
-  return I;
 }
 
 bool Reassociate::runOnFunction(Function &F) {

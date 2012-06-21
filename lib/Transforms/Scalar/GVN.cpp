@@ -2845,7 +2845,7 @@ bool GVN::processNonLocalLoad(LoadInst *LI) {
     Instruction *DepInst = DepInfo.getInst();
 
     // Loading the allocation -> undef.
-    if (isa<AllocaInst>(DepInst) || isMalloc(DepInst) ||
+    if (isa<AllocaInst>(DepInst) || isMallocLikeFn(DepInst) ||
         // Loading immediately after lifetime begin -> undef.
         isLifetimeStart(DepInst)) {
       ValuesPerBlock.push_back(AvailableValueInBlock::get(DepBB,
@@ -3345,16 +3345,16 @@ static void patchReplacementInstruction(Value *Repl, Instruction *I) {
       case LLVMContext::MD_dbg:
         llvm_unreachable("getAllMetadataOtherThanDebugLoc returned a MD_dbg");
       case LLVMContext::MD_tbaa:
-        ReplInst->setMetadata(Kind, getMostGenericTBAA(IMD, ReplMD));
+        ReplInst->setMetadata(Kind, MDNode::getMostGenericTBAA(IMD, ReplMD));
         break;
       case LLVMContext::MD_range:
-        ReplInst->setMetadata(Kind, getMostGenericRange(IMD, ReplMD));
+        ReplInst->setMetadata(Kind, MDNode::getMostGenericRange(IMD, ReplMD));
         break;
       case LLVMContext::MD_prof:
         llvm_unreachable("MD_prof in a non terminator instruction");
         break;
       case LLVMContext::MD_fpmath:
-        ReplInst->setMetadata(Kind, getMostGenericFPMath(IMD, ReplMD));
+        ReplInst->setMetadata(Kind, MDNode::getMostGenericFPMath(IMD, ReplMD));
         break;
       }
     }

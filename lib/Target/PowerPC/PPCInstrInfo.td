@@ -323,7 +323,7 @@ def memri : Operand<iPTR> {
 }
 def memrr : Operand<iPTR> {
   let PrintMethod = "printMemRegReg";
-  let MIOperandInfo = (ops ptr_rc, ptr_rc);
+  let MIOperandInfo = (ops ptr_rc:$offreg, ptr_rc:$ptrreg);
 }
 def memrix : Operand<iPTR> {   // memri where the imm is shifted 2 bits.
   let PrintMethod = "printMemRegImmShifted";
@@ -349,10 +349,11 @@ def ixaddr : ComplexPattern<iPTR, 2, "SelectAddrImmShift", [], []>; // "std"
 
 /// This is just the offset part of iaddr, used for preinc.
 def iaddroff : ComplexPattern<iPTR, 1, "SelectAddrImmOffs", [], []>;
+def xaddroff : ComplexPattern<iPTR, 1, "SelectAddrIdxOffs", [], []>;
 
 //===----------------------------------------------------------------------===//
 // PowerPC Instruction Predicate Definitions.
-def FPContractions : Predicate<"!TM.Options.NoExcessFPPrecision">;
+def FPContractions : Predicate<"TM.Options.AllowExcessFPPrecision">;
 def In32BitMode  : Predicate<"!PPCSubTarget.isPPC64()">;
 def In64BitMode  : Predicate<"PPCSubTarget.isPPC64()">;
 def IsBookE  : Predicate<"PPCSubTarget.isBookE()">;
@@ -711,6 +712,44 @@ def LFDU : DForm_1<51, (outs F8RC:$rD, ptr_rc:$ea_result), (ins memri:$addr),
                   "lfd $rD, $addr", LdStLFD,
                   []>, RegConstraint<"$addr.reg = $ea_result">,
                    NoEncode<"$ea_result">;
+
+
+// Indexed (r+r) Loads with Update (preinc).
+def LBZUX : XForm_1<31, 119, (outs GPRC:$rD, ptr_rc:$ea_result),
+                   (ins memrr:$addr),
+                   "lbzux $rD, $addr", LdStLoad,
+                   []>, RegConstraint<"$addr.offreg = $ea_result">,
+                   NoEncode<"$ea_result">;
+
+def LHAUX : XForm_1<31, 375, (outs GPRC:$rD, ptr_rc:$ea_result),
+                   (ins memrr:$addr),
+                   "lhaux $rD, $addr", LdStLoad,
+                   []>, RegConstraint<"$addr.offreg = $ea_result">,
+                   NoEncode<"$ea_result">;
+
+def LHZUX : XForm_1<31, 331, (outs GPRC:$rD, ptr_rc:$ea_result),
+                   (ins memrr:$addr),
+                   "lhzux $rD, $addr", LdStLoad,
+                   []>, RegConstraint<"$addr.offreg = $ea_result">,
+                   NoEncode<"$ea_result">;
+
+def LWZUX : XForm_1<31, 55, (outs GPRC:$rD, ptr_rc:$ea_result),
+                   (ins memrr:$addr),
+                   "lwzux $rD, $addr", LdStLoad,
+                   []>, RegConstraint<"$addr.offreg = $ea_result">,
+                   NoEncode<"$ea_result">;
+
+def LFSUX : XForm_1<31, 567, (outs F4RC:$rD, ptr_rc:$ea_result),
+                   (ins memrr:$addr),
+                   "lfsux $rD, $addr", LdStLoad,
+                   []>, RegConstraint<"$addr.offreg = $ea_result">,
+                   NoEncode<"$ea_result">;
+
+def LFDUX : XForm_1<31, 631, (outs F8RC:$rD, ptr_rc:$ea_result),
+                   (ins memrr:$addr),
+                   "lfdux $rD, $addr", LdStLoad,
+                   []>, RegConstraint<"$addr.offreg = $ea_result">,
+                   NoEncode<"$ea_result">;
 }
 }
 
@@ -822,12 +861,49 @@ def STWX  : XForm_8<31, 151, (outs), (ins GPRC:$rS, memrr:$dst),
                    "stwx $rS, $dst", LdStStore,
                    [(store GPRC:$rS, xaddr:$dst)]>,
                    PPC970_DGroup_Cracked;
-                   
-let mayStore = 1 in {
-def STWUX : XForm_8<31, 183, (outs), (ins GPRC:$rS, GPRC:$rA, GPRC:$rB),
-                   "stwux $rS, $rA, $rB", LdStStore,
-                   []>;
-}
+ 
+def STBUX : XForm_8<31, 247, (outs ptr_rc:$ea_res),
+                             (ins GPRC:$rS, ptr_rc:$ptroff, ptr_rc:$ptrreg),
+                   "stbux $rS, $ptroff, $ptrreg", LdStStore,
+                   [(set ptr_rc:$ea_res,
+                      (pre_truncsti8 GPRC:$rS,
+                                     ptr_rc:$ptrreg, xaddroff:$ptroff))]>,
+                   RegConstraint<"$ptroff = $ea_res">, NoEncode<"$ea_res">,
+                   PPC970_DGroup_Cracked;
+ 
+def STHUX : XForm_8<31, 439, (outs ptr_rc:$ea_res),
+                             (ins GPRC:$rS, ptr_rc:$ptroff, ptr_rc:$ptrreg),
+                   "sthux $rS, $ptroff, $ptrreg", LdStStore,
+                   [(set ptr_rc:$ea_res,
+                      (pre_truncsti16 GPRC:$rS,
+                                      ptr_rc:$ptrreg, xaddroff:$ptroff))]>,
+                   RegConstraint<"$ptroff = $ea_res">, NoEncode<"$ea_res">,
+                   PPC970_DGroup_Cracked;
+                 
+def STWUX : XForm_8<31, 183, (outs ptr_rc:$ea_res),
+                             (ins GPRC:$rS, ptr_rc:$ptroff, ptr_rc:$ptrreg),
+                   "stwux $rS, $ptroff, $ptrreg", LdStStore,
+                   [(set ptr_rc:$ea_res,
+                      (pre_store GPRC:$rS, ptr_rc:$ptrreg, xaddroff:$ptroff))]>,
+                   RegConstraint<"$ptroff = $ea_res">, NoEncode<"$ea_res">,
+                   PPC970_DGroup_Cracked;
+
+def STFSUX : XForm_8<31, 695, (outs ptr_rc:$ea_res),
+                              (ins F4RC:$rS, ptr_rc:$ptroff, ptr_rc:$ptrreg),
+                    "stfsux $rS, $ptroff, $ptrreg", LdStStore,
+                    [(set ptr_rc:$ea_res,
+                       (pre_store F4RC:$rS, ptr_rc:$ptrreg, xaddroff:$ptroff))]>,
+                    RegConstraint<"$ptroff = $ea_res">, NoEncode<"$ea_res">,
+                    PPC970_DGroup_Cracked;
+
+def STFDUX : XForm_8<31, 759, (outs ptr_rc:$ea_res),
+                              (ins F8RC:$rS, ptr_rc:$ptroff, ptr_rc:$ptrreg),
+                    "stfdux $rS, $ptroff, $ptrreg", LdStStore,
+                    [(set ptr_rc:$ea_res,
+                       (pre_store F8RC:$rS, ptr_rc:$ptrreg, xaddroff:$ptroff))]>,
+                    RegConstraint<"$ptroff = $ea_res">, NoEncode<"$ea_res">,
+                    PPC970_DGroup_Cracked;
+
 def STHBRX: XForm_8<31, 918, (outs), (ins GPRC:$rS, memrr:$dst),
                    "sthbrx $rS, $dst", LdStStore,
                    [(PPCstbrx GPRC:$rS, xoaddr:$dst, i16)]>, 
