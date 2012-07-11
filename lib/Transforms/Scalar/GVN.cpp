@@ -52,7 +52,6 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ConstantRange.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/IRBuilder.h"
 #include "llvm/Support/PatternMatch.h"
 #include "llvm/Support/RecyclingAllocator.h"
 #include "llvm/Transforms/Utils/Local.h"
