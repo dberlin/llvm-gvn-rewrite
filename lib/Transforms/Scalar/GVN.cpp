@@ -2436,6 +2436,53 @@ void GVN::propagateChangeInEdge(BasicBlock *Dest) {
 }
 
 
+static void patchReplacementInstruction(Value *Repl, Instruction *I) {
+  // Patch the replacement so that it is not more restrictive than the value
+  // being replaced.
+  BinaryOperator *Op = dyn_cast<BinaryOperator>(I);
+  BinaryOperator *ReplOp = dyn_cast<BinaryOperator>(Repl);
+  if (Op && ReplOp && isa<OverflowingBinaryOperator>(Op) &&
+      isa<OverflowingBinaryOperator>(ReplOp)) {
+    if (ReplOp->hasNoSignedWrap() && !Op->hasNoSignedWrap())
+      ReplOp->setHasNoSignedWrap(false);
+    if (ReplOp->hasNoUnsignedWrap() && !Op->hasNoUnsignedWrap())
+      ReplOp->setHasNoUnsignedWrap(false);
+  }
+  if (Instruction *ReplInst = dyn_cast<Instruction>(Repl)) {
+    SmallVector<std::pair<unsigned, MDNode*>, 4> Metadata;
+    ReplInst->getAllMetadataOtherThanDebugLoc(Metadata);
+    for (int i = 0, n = Metadata.size(); i < n; ++i) {
+      unsigned Kind = Metadata[i].first;
+      MDNode *IMD = I->getMetadata(Kind);
+      MDNode *ReplMD = Metadata[i].second;
+      switch(Kind) {
+      default:
+        ReplInst->setMetadata(Kind, NULL); // Remove unknown metadata
+        break;
+      case LLVMContext::MD_dbg:
+        llvm_unreachable("getAllMetadataOtherThanDebugLoc returned a MD_dbg");
+      case LLVMContext::MD_tbaa:
+        ReplInst->setMetadata(Kind, MDNode::getMostGenericTBAA(IMD, ReplMD));
+        break;
+      case LLVMContext::MD_range:
+        ReplInst->setMetadata(Kind, MDNode::getMostGenericRange(IMD, ReplMD));
+        break;
+      case LLVMContext::MD_prof:
+        llvm_unreachable("MD_prof in a non terminator instruction");
+        break;
+      case LLVMContext::MD_fpmath:
+        ReplInst->setMetadata(Kind, MDNode::getMostGenericFPMath(IMD, ReplMD));
+        break;
+      }
+    }
+  }
+}
+
+static void patchAndReplaceAllUsesWith(Value *Repl, Instruction *I) {
+  patchReplacementInstruction(Repl, I);
+  I->replaceAllUsesWith(Repl);
+}
+
 void GVN::replaceInstruction(Instruction *I, Value *V, CongruenceClass *ReplClass) {
   assert (ReplClass->leader != I && "About to accidentally remove our leader");
   if (V->getType() != I->getType()) {
@@ -2446,7 +2493,7 @@ void GVN::replaceInstruction(Instruction *I, Value *V, CongruenceClass *ReplClas
     assert(V && "Should have been able to coerce types!");
   }
   DEBUG(dbgs() << "Replacing " << *I << " with " << *V << "\n");
-  I->replaceAllUsesWith(V);
+  patchAndReplaceAllUsesWith(V, I);
   // Remove the old instruction from the class member list, so the
   // member size is correct for PRE.
   ReplClass->members.erase(I);
@@ -3168,53 +3215,6 @@ static void DeleteInstructionInBlock(BasicBlock *BB) {
     BB->getInstList().erase(Inst);
     ++NumGVNInstrDeleted;
   }
-}
-
-static void patchReplacementInstruction(Value *Repl, Instruction *I) {
-  // Patch the replacement so that it is not more restrictive than the value
-  // being replaced.
-  BinaryOperator *Op = dyn_cast<BinaryOperator>(I);
-  BinaryOperator *ReplOp = dyn_cast<BinaryOperator>(Repl);
-  if (Op && ReplOp && isa<OverflowingBinaryOperator>(Op) &&
-      isa<OverflowingBinaryOperator>(ReplOp)) {
-    if (ReplOp->hasNoSignedWrap() && !Op->hasNoSignedWrap())
-      ReplOp->setHasNoSignedWrap(false);
-    if (ReplOp->hasNoUnsignedWrap() && !Op->hasNoUnsignedWrap())
-      ReplOp->setHasNoUnsignedWrap(false);
-  }
-  if (Instruction *ReplInst = dyn_cast<Instruction>(Repl)) {
-    SmallVector<std::pair<unsigned, MDNode*>, 4> Metadata;
-    ReplInst->getAllMetadataOtherThanDebugLoc(Metadata);
-    for (int i = 0, n = Metadata.size(); i < n; ++i) {
-      unsigned Kind = Metadata[i].first;
-      MDNode *IMD = I->getMetadata(Kind);
-      MDNode *ReplMD = Metadata[i].second;
-      switch(Kind) {
-      default:
-        ReplInst->setMetadata(Kind, NULL); // Remove unknown metadata
-        break;
-      case LLVMContext::MD_dbg:
-        llvm_unreachable("getAllMetadataOtherThanDebugLoc returned a MD_dbg");
-      case LLVMContext::MD_tbaa:
-        ReplInst->setMetadata(Kind, MDNode::getMostGenericTBAA(IMD, ReplMD));
-        break;
-      case LLVMContext::MD_range:
-        ReplInst->setMetadata(Kind, MDNode::getMostGenericRange(IMD, ReplMD));
-        break;
-      case LLVMContext::MD_prof:
-        llvm_unreachable("MD_prof in a non terminator instruction");
-        break;
-      case LLVMContext::MD_fpmath:
-        ReplInst->setMetadata(Kind, MDNode::getMostGenericFPMath(IMD, ReplMD));
-        break;
-      }
-    }
-  }
-}
-
-static void patchAndReplaceAllUsesWith(Value *Repl, Instruction *I) {
-  patchReplacementInstruction(Repl, I);
-  I->replaceAllUsesWith(Repl);
 }
 
 
