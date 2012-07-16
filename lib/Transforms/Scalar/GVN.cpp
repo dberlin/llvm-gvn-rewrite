@@ -1273,7 +1273,7 @@ namespace {
     DenseSet<Instruction*> instrsToErase_;
     void markInstructionForDeletion(Instruction *I) {
       DEBUG(dbgs() << "Marking " << *I << " for deletion\n");
-      // instrsToErase_.insert(I); 
+      instrsToErase_.insert(I); 
       // CongruenceClass *CC = valueToClass.lookup(I);
       // assert (!CC || CC == InitialClass);
       
@@ -1291,6 +1291,7 @@ namespace {
     }
     
     // Elimination
+    bool eliminateInstructions(Function &);
     void convertDenseToDFSOrdered(DenseSet<Value*>&, std::set<ValueDFS>&);
     void replaceInstruction(Instruction*, Value*, CongruenceClass*);
     DenseMap<BasicBlock*, std::pair<int, int> > DFSBBMap;
@@ -1583,6 +1584,7 @@ Value *GVN::GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     // but then there all of the operations based on it would need to be
     // rehashed.  Just leave the dead load around.
     // FIXME: This is no longer a problem
+    markInstructionForDeletion(SrcVal);
     UpdateMemDepInfo(MD, SrcVal, NULL);
     SrcVal = NewLoad;
   }
@@ -3558,40 +3560,16 @@ bool GVN::runOnFunction(Function& F) {
 	    DEBUG(dbgs() << "Skipping instruction " << *BI  << " because block " << getBlockName(*RI) << " is unreachable\n");
 	    continue;
 	  }
+	  // This is done in case something eliminates the instruction
+	  // along the way.
 	  Instruction *I = BI++;
 	  movedForward = true;
 
-	  // If the instruction can be easily simplified then do so now in preference
-	  // to value numbering it.  Value numbering often exposes redundancies, for
-	  // example if it determines that %y is equal to %x then the instruction
-	  // "%z = and i32 %x, %y" becomes "%z = and i32 %x, %x" which
-	  // we now simplify.
-	  //TODO:This causes us to invalidate memdep for no good
-	  // reason.  The instructions *should* value number the same
-	  // either way, so i'd prefer to do the elimination as a
-	  // post-pass.
-	  if (0)
-	  if (Value *V = SimplifyInstruction(I, TD, TLI, DT)) {
-	    // Mark the uses as touched
-	    for (Value::use_iterator UI = I->use_begin(), UE = I->use_end();
-		 UI != UE; ++UI) {
-	      Instruction *User = cast<Instruction>(*UI);
-	      touchedInstructions.insert(User);
-	    }
-
-	    I->replaceAllUsesWith(V);
-	    DEBUG(dbgs() << "GVN removed: " << *I << '\n');
-	    UpdateMemDepInfo(MD, I, V);
+	  if (I->use_empty()) {
+	    UpdateMemDepInfo(MD, I, NULL);
 	    markInstructionForDeletion(I);
-	    ++NumGVNSimpl;
 	    continue;
 	  }
-
-	  // if (I->use_empty()) {
-	  //   UpdateMemDepInfo(MD, I, NULL);
-	  //   markInstructionForDeletion(I);
-	  //   continue;
-	  // }
 
 	  if (processedCount.count(I) == 0) {
 	    processedCount.insert(std::make_pair(I, 1));
@@ -3599,13 +3577,7 @@ bool GVN::runOnFunction(Function& F) {
 	    processedCount[I] += 1;
 	    assert(processedCount[I] < 100 && "Seem to have processed the same instruction a lot");
 	  }
-	  // if (LoadInst* LI = dyn_cast<LoadInst>(I)){
-	  //   MemDepResult local_dep = MD->getDependency(LI);
-	  //   if (local_dep.isNonLocal())
-	  //     if (processNonLocalLoad(LI))
-	  // 	continue;
-	  // }	  
-
+	 
           if (!I->isTerminator()) {
 	    Expression *Symbolized = performSymbolicEvaluation(I, *RI);
             performCongruenceFinding(I, Symbolized);
@@ -3614,142 +3586,11 @@ bool GVN::runOnFunction(Function& F) {
           }
         }
       }
-      // for (DenseSet<Instruction*>::iterator DI = instrsToErase_.begin(), DE = instrsToErase_.end(); DI != DE;) {
-      // 	Instruction *toErase = *DI;
-      // 	++DI;
-      // 	DEBUG(dbgs() << "GVN removed: " << *toErase << '\n');
-      // 	if (MD) MD->removeInstruction(toErase);
-      // 	DEBUG(verifyRemoved(toErase));
-      // 	toErase->eraseFromParent();
-	
-      // }
-      // instrsToErase_.clear();
     }
   }
+  eliminateInstructions(F);
 
 
-  // This is a mildly crazy eliminator. The normal way to eliminate is
-  // to walk the dominator tree in order, keeping track of available
-  // values, and eliminating them.  However, we keep track of the
-  // dominator tree dfs numbers in each value, and by keeping the set
-  // sorted in dfs number order, we don't need to walk anything to
-  // eliminate
-  // Instead, we walk the congruence class members in order,
-  // and eliminate the ones dominated by the last member.
-  // When we find something not dominated, it becomes the new leader
-  // for elimination purposes
-
-  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
-    DomTreeNode *DTN = DT->getNode(FI);
-    if (!DTN)
-      continue;
-    DFSBBMap[FI] = std::make_pair(DTN->getDFSNumIn(), DTN->getDFSNumOut());
-  }
-  
- for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
-   CongruenceClass *CC = congruenceClass[i];
-   if (CC != InitialClass && !CC->dead) {
-     
-     int lastdfs_in = 0;
-     int lastdfs_out = 0;
-     Value *lastval = NULL;
-     if (0 && CC->members.size() == 1)
-       continue;
-     if (CC->expression && CC->leader) {
-       if (isa<Constant>(CC->leader) || isa<Argument>(CC->leader)) {
-	 
-	 for (DenseSet<Value*>::iterator CI = CC->members.begin(), CE = CC->members.end(); CI != CE; ) {
-	   Value *member = *CI;
-	   ++CI;
-	   
-	   if (member != CC->leader) {
-	     //TODO: eliminate duplicate bitcasts but not valid bitcast
-	     if (isa<StoreInst>(member) || isa<BitCastInst>(member))
-	       continue;
-	     DEBUG(dbgs() << "Found replacement " << *(CC->leader) << " for " << *member << "\n");
-	     replaceInstruction(cast<Instruction>(member), CC->leader, CC);
-	   }
-	 }
-       } else {
-#if 1
-	 if (CC->members.size() == 1) {
-	   MemoryExpression *ME;
-	   if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
-	     if (ME->hadNonLocal()) {
-	       Value *member = *(CC->members.begin());
-	       if (LoadInst *LI = dyn_cast<LoadInst>(member)){
-		 processNonLocalLoad(LI);
-	       }
-	     }
-	   }
-	   continue;
-	 } else {
-#if 0
-	   MemoryExpression *ME;
-	   if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
-	     if (0|| ME->hadNonLocal()) {
-	       Value *member = *(CC->members.begin());
-	       if (LoadInst *LI = dyn_cast<LoadInst>(member)){
-		 processNonLocalLoad(LI);
-	       }
-	     }
-	   }
-#endif
-#endif
-	   std::set<ValueDFS> DFSOrderedSet;	   
-	   convertDenseToDFSOrdered(CC->members, DFSOrderedSet);
-	   
-	   for (std::set<ValueDFS>::iterator CI = DFSOrderedSet.begin(), CE = DFSOrderedSet.end(); CI != CE;) {
-	     int currdfs_in = CI->dfs_in;
-	     int currdfs_out = CI->dfs_out;
-	     Value *member = CI->value;
-	     ++CI;
-	     
-	     //TODO: eliminate duplicate bitcasts but not valid bitcast
-	     if (isa<StoreInst>(member) || isa<BitCastInst>(member))
-	       continue;
-	     
-	     DEBUG(dbgs() << "Last DFS numbers are (" << lastdfs_in << "," << lastdfs_out << ")\n");
-	     DEBUG(dbgs() << "Current DFS numbers are (" << currdfs_in << "," << currdfs_out <<")\n");
-	     // Walk along, processing members who are dominated by each other.
-	     if (lastval == NULL || !(currdfs_in >= lastdfs_in && currdfs_out <= lastdfs_out)) {
-	       lastval = member;
-	       lastdfs_in = currdfs_in;
-	       lastdfs_out = currdfs_out;
-	     } else {
-	       Value *Result = lastval;
-	       DEBUG(dbgs() << "Found replacement " << *lastval << " for " << *member << "\n");
-	       LoadInst *LI;
-	       if (Result->getType() != member->getType() && (LI = dyn_cast<LoadInst>(member))) {
-		 if (LoadInst *LIR = dyn_cast<LoadInst>(Result)) {
-		   int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
-							      LI->getPointerOperand(),
-							      LIR,
-							      *TD);
-		   assert(Offset != -1 && "Should have been able to coerce load");
-		   
-		   Result = GetLoadValueForLoad(LIR, Offset, LI->getType(), LI, *TD);
-		   
-		 } else if (StoreInst *SIR = dyn_cast<StoreInst>(Result)) {
-		   int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
-							       LI->getPointerOperand(),
-							       SIR, *TD);
-		   assert(Offset != -1 && "Should have been able to coerce store");
-		   Result = GetStoreValueForLoad(SIR->getValueOperand(), Offset, LI->getType(), LI, *TD);
-		 }
-	       }
-	       if (member != CC->leader)
-		 replaceInstruction(cast<Instruction>(member), Result, CC);
-	     }
-	   }
-	 }
-       }
-     }
-   }
-#if 1
- }
- 
-#endif
   if (EnablePRE) {
     bool PREChanged = true;
     while (PREChanged) {
@@ -3813,4 +3654,140 @@ bool GVN::runOnFunction(Function& F) {
   DFSBBMap.clear();
   InstrLocalDFS.clear();
   return Changed;
+}
+
+
+// Return true if V is a value that will always be available in the function
+static bool alwaysAvailable(Value *V) {
+  return isa<Constant>(V) || isa<Argument>(V);
+}
+
+bool GVN::eliminateInstructions(Function &F) {
+  // This is a mildly crazy eliminator. The normal way to eliminate is
+  // to walk the dominator tree in order, keeping track of available
+  // values, and eliminating them.  However, this is mildly
+  // pointless. It requires doing lookups on every instruction,
+  // regardless of whether we will ever eliminate it.  For
+  // instructions part of a singleton congruence class, we know we
+  // will never eliminate it. 
+
+  // Instead, this eliminator looks at the congruence classes, sorts
+  // them into a DFS ordering of the dominator tree, and then we just
+  // perform eliminate straight on the sets by walking the congruence
+  // class members in order,   and eliminate the ones dominated by the
+  // last member. 
+  // When we find something not dominated, it becomes the new leader
+  // for elimination purposes
+
+  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
+    DomTreeNode *DTN = DT->getNode(FI);
+    if (!DTN)
+      continue;
+    DFSBBMap[FI] = std::make_pair(DTN->getDFSNumIn(), DTN->getDFSNumOut());
+  }
+  
+ for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
+   CongruenceClass *CC = congruenceClass[i];
+   // FIXME: We should eventually be able to replace everything still
+   // in the initial class with undef, as they should be unreachable. 
+   // Right now, initial still contains some things we skip value
+   // numbering of.
+   if (CC == InitialClass || CC->dead)
+     continue;
+   
+   int lastdfs_in = 0;
+   int lastdfs_out = 0;
+   Value *lastval = NULL;
+   
+   if (!CC->expression || !CC->leader)
+     continue;
+   if (alwaysAvailable(CC->leader)) { 
+     for (DenseSet<Value*>::iterator CI = CC->members.begin(), CE = CC->members.end(); CI != CE; ) {
+       Value *member = *CI;
+       ++CI;
+       
+       if (member != CC->leader) {
+	 //TODO: eliminate duplicate bitcasts but not valid bitcast
+	 if (isa<StoreInst>(member) || isa<BitCastInst>(member))
+	   continue;
+	 DEBUG(dbgs() << "Found replacement " << *(CC->leader) << " for " << *member << "\n");
+	 replaceInstruction(cast<Instruction>(member), CC->leader, CC);
+       }
+     }
+   } else {
+#if 1
+     if (CC->members.size() == 1) {
+       MemoryExpression *ME;
+       if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
+	 if (ME->hadNonLocal()) {
+	   Value *member = *(CC->members.begin());
+	   if (LoadInst *LI = dyn_cast<LoadInst>(member)){
+	     processNonLocalLoad(LI);
+	   }
+	 }
+       }
+       continue;
+     } else {
+#if 0
+       MemoryExpression *ME;
+       if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
+	 if (0|| ME->hadNonLocal()) {
+	   Value *member = *(CC->members.begin());
+	   if (LoadInst *LI = dyn_cast<LoadInst>(member)){
+	     processNonLocalLoad(LI);
+	   }
+	 }
+       }
+#endif
+#endif
+       std::set<ValueDFS> DFSOrderedSet;	   
+       convertDenseToDFSOrdered(CC->members, DFSOrderedSet);
+       
+       for (std::set<ValueDFS>::iterator CI = DFSOrderedSet.begin(), CE = DFSOrderedSet.end(); CI != CE;) {
+	 int currdfs_in = CI->dfs_in;
+	 int currdfs_out = CI->dfs_out;
+	 Value *member = CI->value;
+	 ++CI;
+	 
+	 //TODO: eliminate duplicate bitcasts but not valid bitcast
+	 if (isa<StoreInst>(member) || isa<BitCastInst>(member))
+	   continue;
+	 
+	 DEBUG(dbgs() << "Last DFS numbers are (" << lastdfs_in << "," << lastdfs_out << ")\n");
+	 DEBUG(dbgs() << "Current DFS numbers are (" << currdfs_in << "," << currdfs_out <<")\n");
+	 // Walk along, processing members who are dominated by each other.
+	 if (lastval == NULL || !(currdfs_in >= lastdfs_in && currdfs_out <= lastdfs_out)) {
+	   lastval = member;
+	   lastdfs_in = currdfs_in;
+	   lastdfs_out = currdfs_out;
+	 } else {
+	   Value *Result = lastval;
+	   DEBUG(dbgs() << "Found replacement " << *lastval << " for " << *member << "\n");
+	   LoadInst *LI;
+	   if (Result->getType() != member->getType() && (LI = dyn_cast<LoadInst>(member))) {
+	     if (LoadInst *LIR = dyn_cast<LoadInst>(Result)) {
+	       int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
+							  LI->getPointerOperand(),
+							  LIR, *TD);
+	       assert(Offset != -1 && "Should have been able to coerce load");
+	       
+	       Result = GetLoadValueForLoad(LIR, Offset, LI->getType(), LI, *TD);
+	       
+	     } else if (StoreInst *SIR = dyn_cast<StoreInst>(Result)) {
+	       int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
+							   LI->getPointerOperand(),
+							   SIR, *TD);
+	       assert(Offset != -1 && "Should have been able to coerce store");
+	       Result = GetStoreValueForLoad(SIR->getValueOperand(), Offset, LI->getType(), LI, *TD);
+	     }
+	   }
+	   if (member != CC->leader)
+	     replaceInstruction(cast<Instruction>(member), Result, CC);
+	 }
+       }
+     }
+   }
+ }
+//FIXME: Calculate changed for real
+ return true;
 }
