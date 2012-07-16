@@ -3565,12 +3565,6 @@ bool GVN::runOnFunction(Function& F) {
 	  Instruction *I = BI++;
 	  movedForward = true;
 
-	  if (I->use_empty()) {
-	    UpdateMemDepInfo(MD, I, NULL);
-	    markInstructionForDeletion(I);
-	    continue;
-	  }
-
 	  if (processedCount.count(I) == 0) {
 	    processedCount.insert(std::make_pair(I, 1));
 	  } else {
@@ -3579,9 +3573,19 @@ bool GVN::runOnFunction(Function& F) {
 	  }
 	 
           if (!I->isTerminator()) {
+	    // This is inside the terminator check because otherwise,
+	    // we will remove unreachable marks, since they have no
+	    // uses. 
+	    if (I->use_empty()) {
+	      UpdateMemDepInfo(MD, I, NULL);
+	      markInstructionForDeletion(I);
+	      continue;
+	    }
+
 	    Expression *Symbolized = performSymbolicEvaluation(I, *RI);
             performCongruenceFinding(I, Symbolized);
           } else {
+
             processOutgoingEdges(dyn_cast<TerminatorInst>(I));
           }
         }
@@ -3663,19 +3667,23 @@ static bool alwaysAvailable(Value *V) {
 }
 
 bool GVN::eliminateInstructions(Function &F) {
-  // This is a mildly crazy eliminator. The normal way to eliminate is
+  // This is a non-standard eliminator. The normal way to eliminate is
   // to walk the dominator tree in order, keeping track of available
   // values, and eliminating them.  However, this is mildly
   // pointless. It requires doing lookups on every instruction,
   // regardless of whether we will ever eliminate it.  For
   // instructions part of a singleton congruence class, we know we
-  // will never eliminate it. 
+  // will never eliminate it.   The dominator tree method is actually
+  // fairly expensive if you use a scoped hash table that performs
+  // deletion on scope exit (as LLVM's does),  as it's possible your scope exiting
+  // could cause removal of O(instructions) elements.
 
-  // Instead, this eliminator looks at the congruence classes, sorts
+  // Instead, this eliminator looks at the congruence classes directly, sorts
   // them into a DFS ordering of the dominator tree, and then we just
   // perform eliminate straight on the sets by walking the congruence
-  // class members in order,   and eliminate the ones dominated by the
-  // last member. 
+  // class members in order, and eliminate the ones dominated by the
+  // last member.   This is technically O(N log N) where N = number of
+  // instructions.  However, we skip singleton sets, and we could make it O(
   // When we find something not dominated, it becomes the new leader
   // for elimination purposes
 
@@ -3698,9 +3706,11 @@ bool GVN::eliminateInstructions(Function &F) {
    int lastdfs_in = 0;
    int lastdfs_out = 0;
    Value *lastval = NULL;
+   assert (CC->leader && "We should have had a leader");
    
-   if (!CC->expression || !CC->leader)
-     continue;
+   // // It's possible to end up with a null leader
+   // if (!CC->expression || !CC->leader)
+   //   continue;
    if (alwaysAvailable(CC->leader)) { 
      for (DenseSet<Value*>::iterator CI = CC->members.begin(), CE = CC->members.end(); CI != CE; ) {
        Value *member = *CI;
