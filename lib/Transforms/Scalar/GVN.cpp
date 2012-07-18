@@ -64,6 +64,62 @@
 using namespace llvm;
 using namespace PatternMatch;
 
+// Overview of GVN algorithm
+// This algorithm is based on "A sparse algorithm for predicated
+// global value numbering" by Karthik Gargi (PLDI 2002).
+// The algorithm is modified somewhat.
+// We do not perform value inference (expensive, not shown to be worth
+// it)
+// We do not perform the standard form of predication (ditto).
+
+
+// The basic algorithm works like so:
+// Create an initial congruence class
+// For each instruction in the program
+//   Place instruction in the initial congruence class
+// Mark all blocks as unreachable
+// Mark entry block as reachable
+// Mark instructions in entry block as touched
+
+//  While there are still touched instructions
+//   If the touched instruction is not in a reachable block, skip it.
+//   If the touched instruction is a block terminator
+//      Evaluate edge reachability
+//      Mark BB's with reachable edges as reachable.
+//      If block is newly reachable
+//        Mark instructions in block as touched
+//      else if we made a new reachable edge to a block
+//        Mark phi nodes in block as touched.
+//      
+//      Propagate edge based equalities to newly reachable edge
+//   else 
+//     Perform symbolic evaluation on the instruction
+//     Lookup a congruence class for the symbolically evaluated instruction
+//     If we didn't find a congruence class
+//        Make a new congruence class for the instruction
+//        Assign a leader to the congruence class
+//     else
+//        Add the instruction to the congruence class
+//     If the congruence class of the instructionc changed
+//       Remove the instruction from any old congruence class
+//       (including updating leaders, etc)
+//       Mark all users of the instruction as touched.
+//
+//
+
+// Once our touched instruction queue is empty, we are done.
+// We then eliminate instructions in favor of instructions with the
+// same value that dominate them.
+
+// Lastly, we perform a local type of PRE to eliminate some
+// redundancies.
+
+// Large TODO list
+// 1. Make PRE a little saner
+// 2. Fix pointer dependency caching in memdep 
+// 3. Use load + store value numbering + iteration, instead of
+// equality hacks.
+
 STATISTIC(NumGVNInstrDeleted,  "Number of instructions deleted");
 STATISTIC(NumGVNBlocksDeleted, "Number of blocks deleted");
 STATISTIC(NumGVNLoad,   "Number of loads deleted");
@@ -88,12 +144,6 @@ MaxRecurseDepth("max-recurse-depth", cl::Hidden, cl::init(1000), cl::ZeroOrMore,
                 cl::desc("Max recurse depth (default = 1000)"));
 
 //===----------------------------------------------------------------------===//
-//                         ValueTable Class
-//===----------------------------------------------------------------------===//
-
-/// This class holds the mapping between values and value numbers.  It is used
-/// as an efficient mechanism to determine the expression-wise equivalence of
-/// two values.
 namespace {
   typedef DenseMap<std::pair<std::pair<Value*, Value*>, BasicBlock*>, bool> DepBBQueryMap;
   DepBBQueryMap depQueryCache;
@@ -101,7 +151,6 @@ namespace {
   DepIQueryMap depIQueryCache;
   typedef DenseMap<Value *, SmallVector<NonLocalDepResult, 64> > LocDepMap;
   LocDepMap locDepCache;
-  
 
   static void UpdateMemDepInfo(MemoryDependenceAnalysis *MD, Instruction *I, Value *V) {
     if (MD && V && V->getType()->isPointerTy())
@@ -2216,11 +2265,12 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
   // This is guaranteed to return something, since it will at least find INITIAL
   CongruenceClass *VClass = valueToClass[V];
   assert (VClass && "Should have found a vclass");
+  // Dead classes should have been eliminated from the mapping
   assert (!VClass->dead && "Found a dead class");
   
-
   //TODO(dannyb): Double check algorithm where we are ignoring copy
-  //check of "if e is a variable"
+  //check of "if e is a SSA variable", as LLVM has no copies.
+
   CongruenceClass *EClass;
   // Expressions we can't symbolize are always in their own unique
   // congruence class
@@ -2234,7 +2284,6 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
       NewClass->leader = V;
       EClass = NewClass;
       DEBUG(dbgs() << "Created new congruence class for " << V << " due to NULL expression\n");
-
     } else {
       EClass = VClass;
     }
@@ -2243,12 +2292,11 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
     ExpressionClassMap *lookupMap = isa<MemoryExpression>(E) ? &memoryExpressionToClass : &expressionToClass;
     std::pair<ExpressionClassMap::iterator, bool> lookupResult =
       lookupMap->insert(std::make_pair(E, (CongruenceClass*)NULL));
+
     // If it's not in the value table, create a new congruence class
     if (lookupResult.second) {
       CongruenceClass *NewClass = new CongruenceClass();
       congruenceClass.push_back(NewClass);
-      // We should always be adding it below
-      // NewClass->members.push_back(V);
       NewClass->expression = E;
       ExpressionClassMap::iterator place = lookupResult.first;
       place->second = NewClass;
@@ -2267,7 +2315,8 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
         NewClass->leader = V;
 
       EClass = NewClass;
-      DEBUG(dbgs() << "Created new congruence class for " << V << " using expression " << *E << " at " << NewClass->id << "\n");
+      DEBUG(dbgs() << "Created new congruence class for " << V << 
+	    " using expression " << *E << " at " << NewClass->id << "\n");
     } else {
       EClass = lookupResult.first->second;
       assert(EClass && "Somehow don't have an eclass");
@@ -2683,6 +2732,7 @@ static bool isLifetimeStart(const Instruction *Inst) {
     return II->getIntrinsicID() == Intrinsic::lifetime_start;
   return false;
 }
+
 /// IsValueFullyAvailableInBlock - Return true if we can prove that the value
 /// we're analyzing is fully available in the specified block.  As we go, keep
 /// track of which blocks we know are fully alive in FullyAvailableBlocks.  This
@@ -3237,12 +3287,15 @@ bool GVN::splitCriticalEdges() {
   return true;
 }
 
+
+// Find a leader for OP in BB.
 Value *GVN::findPRELeader(BasicBlock *BB, Value *Op) {
   CongruenceClass *CC = valueToClass[Op];
   if (!CC || CC == InitialClass)
     return 0;
   if (CC->leader && (isa<Argument>(CC->leader) || isa<Constant>(CC->leader) || isa<GlobalValue>(CC->leader)))
     return CC->leader;
+
   for (DenseSet<Value*>::iterator SI = CC->members.begin(), SE = CC->members.end(); SI != SE; ++SI)
     if (Instruction *I = dyn_cast<Instruction>(*SI))
       if (DT->dominates(I, BB))
@@ -3254,10 +3307,13 @@ Value *GVN::findPRELeader(BasicBlock *BB, Value *Op) {
 /// control flow patterns and attempts to perform simple PRE at the join point.
 bool GVN::performPRE(Function &F) {
   bool Changed = false;
+
   for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
     CongruenceClass *CC = congruenceClass[i];
+    // Skip the INITIAL class, singletons, and dead classes
     if (CC == InitialClass || CC->members.size() == 1 || CC->dead)
       continue;
+
     std::set<ValueDFS> DFSOrderedSet;
     convertDenseToDFSOrdered(CC->members, DFSOrderedSet);
     DenseMap<BasicBlock*, Value*> predMap;
@@ -3347,7 +3403,6 @@ bool GVN::performPRE(Function &F) {
       // Don't do PRE across indirect branch.
       if (isa<IndirectBrInst>(PREPred->getTerminator()))
         continue;
-
 
       // We can't do PRE safely on a critical edge, so instead we schedule
       // the edge to be split and perform the PRE the next time we iterate
@@ -3470,10 +3525,6 @@ bool GVN::runOnFunction(Function& F) {
   TD = getAnalysisIfAvailable<TargetData>();
   TLI = &getAnalysis<TargetLibraryInfo>();
 
-  // Split all critical edges to ensure maximal removal
-  splitCriticalEdges();
-
-
   bool Changed = false;
   
   DEBUG(dbgs() << "Starting GVN on new function " << F.getName() << "\n");
@@ -3539,11 +3590,10 @@ bool GVN::runOnFunction(Function& F) {
     }
 
 
-
   while (!touchedInstructions.empty()) {
-    //TODO: or Use two worklist method to keep ordering straight
+    //TODO: Use two worklist method to keep ordering straight
     //TODO: or Investigate RPO numbering both blocks and instructions in the same pass,
-    //  and walknig both lists at the same time, processing whichever has the next number in order.
+    //  and walking both lists at the same time, processing whichever has the next number in order.
     ReversePostOrderTraversal<Function*> rpoT(&F);
     for (ReversePostOrderTraversal<Function*>::rpo_iterator RI = rpoT.begin(),
            RE = rpoT.end(); RI != RE; ++RI) {
@@ -3650,7 +3700,6 @@ bool GVN::runOnFunction(Function& F) {
   touchedInstructions.clear();
   processedCount.clear();
   expressionAllocator.Reset();
-  // mapAllocator.Reset();
   instrsToErase_.clear();
   depQueryCache.clear();
   depIQueryCache.clear();
@@ -3661,7 +3710,9 @@ bool GVN::runOnFunction(Function& F) {
 }
 
 
-// Return true if V is a value that will always be available in the function
+// Return true if V is a value that will always be available (IE can
+// be placed anywhere) in the function.  
+// We avoid mentioning global value
 static bool alwaysAvailable(Value *V) {
   return isa<Constant>(V) || isa<Argument>(V);
 }
@@ -3699,23 +3750,26 @@ bool GVN::eliminateInstructions(Function &F) {
    // FIXME: We should eventually be able to replace everything still
    // in the initial class with undef, as they should be unreachable. 
    // Right now, initial still contains some things we skip value
-   // numbering of.
+   // numbering of (UNREACHABLE's, for example)
    if (CC == InitialClass || CC->dead)
      continue;
    
    int lastdfs_in = 0;
    int lastdfs_out = 0;
    Value *lastval = NULL;
+
    assert (CC->leader && "We should have had a leader");
    
-   // // It's possible to end up with a null leader
    // if (!CC->expression || !CC->leader)
    //   continue;
+   
+   // If this is a leader that is always available, just replace
+   // everything with it
    if (alwaysAvailable(CC->leader)) { 
      for (DenseSet<Value*>::iterator CI = CC->members.begin(), CE = CC->members.end(); CI != CE; ) {
        Value *member = *CI;
        ++CI;
-       
+       // Skip the member that is also us :)
        if (member != CC->leader) {
 	 //TODO: eliminate duplicate bitcasts but not valid bitcast
 	 if (isa<StoreInst>(member) || isa<BitCastInst>(member))
@@ -3725,10 +3779,22 @@ bool GVN::eliminateInstructions(Function &F) {
        }
      }
    } else {
+
 #if 1
+
+     // If this is a singleton, the only thing we do is process
+     // non-local loads.  
+     // TODO: processNonLocalLoad still does PRE of loads,
+     // and looking or store based eliminations, and this happens
+     // nowhere else.  Once that is fixed, this should be removed.
      if (CC->members.size() == 1) {
        MemoryExpression *ME;
        if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
+       // This looks like a weird test, because of where hadNonLocal
+       // is set (depEquals), but it will trigger if we at least
+       // *compared* it with something, causing non-local to be set
+       // appropriately.  If nothing else in the function was even
+       // compared to this, it's probably not worth trying to eliminate.
 	 if (ME->hadNonLocal()) {
 	   Value *member = *(CC->members.begin());
 	   if (LoadInst *LI = dyn_cast<LoadInst>(member)){
@@ -3750,6 +3816,7 @@ bool GVN::eliminateInstructions(Function &F) {
        }
 #endif
 #endif
+       // 
        std::set<ValueDFS> DFSOrderedSet;	   
        convertDenseToDFSOrdered(CC->members, DFSOrderedSet);
        
@@ -3759,26 +3826,44 @@ bool GVN::eliminateInstructions(Function &F) {
 	 Value *member = CI->value;
 	 ++CI;
 	 
-	 //TODO: eliminate duplicate bitcasts but not valid bitcast
+	 //TODO: eliminate duplicate bitcasts but not valid bitcasts.
+	 // Bitcasts are always going to value number to their values
+	 // (because of type ignoring above), so we will think we can
+	 // eliminate every bitcast, but we can't. We could eliminate
+	 // bitcasts that value number to *other bitcasts*, however.
 	 if (isa<StoreInst>(member) || isa<BitCastInst>(member))
 	   continue;
 	 
 	 DEBUG(dbgs() << "Last DFS numbers are (" << lastdfs_in << "," << lastdfs_out << ")\n");
 	 DEBUG(dbgs() << "Current DFS numbers are (" << currdfs_in << "," << currdfs_out <<")\n");
+
 	 // Walk along, processing members who are dominated by each other.
 	 if (lastval == NULL || !(currdfs_in >= lastdfs_in && currdfs_out <= lastdfs_out)) {
 	   lastval = member;
 	   lastdfs_in = currdfs_in;
 	   lastdfs_out = currdfs_out;
 	 } else {
+       // We can
+           // Skip the case of trying to eliminate the leader.  
+           if (member == CC->leader)
+	     continue;
+
 	   Value *Result = lastval;
 	   DEBUG(dbgs() << "Found replacement " << *lastval << " for " << *member << "\n");
+	   
+
+	   // If we find a load or a store as a replacement, make sure
+	   // to correct the type.  This should *always* work, since
+	   // we tested whether it was possible before value numbering
+	   // the same. 
 	   LoadInst *LI;
 	   if (Result->getType() != member->getType() && (LI = dyn_cast<LoadInst>(member))) {
 	     if (LoadInst *LIR = dyn_cast<LoadInst>(Result)) {
 	       int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
 							  LI->getPointerOperand(),
 							  LIR, *TD);
+	       // If this assert is triggered, something is broken in
+	       // value numbering, not elimination.
 	       assert(Offset != -1 && "Should have been able to coerce load");
 	       
 	       Result = GetLoadValueForLoad(LIR, Offset, LI->getType(), LI, *TD);
@@ -3787,10 +3872,14 @@ bool GVN::eliminateInstructions(Function &F) {
 	       int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
 							   LI->getPointerOperand(),
 							   SIR, *TD);
+	       // If this assert is triggered, something is broken in
+	       // value numbering, not elimination.
 	       assert(Offset != -1 && "Should have been able to coerce store");
 	       Result = GetStoreValueForLoad(SIR->getValueOperand(), Offset, LI->getType(), LI, *TD);
 	     }
 	   }
+
+	   // Perform actual replacement
 	   if (member != CC->leader)
 	     replaceInstruction(cast<Instruction>(member), Result, CC);
 	 }
