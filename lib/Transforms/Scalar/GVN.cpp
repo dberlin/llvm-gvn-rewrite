@@ -383,10 +383,31 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     }
   };
     
+  // Congruence classes represent the set of expressions/instructions
+  // that are all the same *during some scope in the function*.
+  // It is very slightly flow-sensitive.
+  // That is, because of the way we perform equality propagation, and
+  // because of memory value numbering,  it is not correct to assume
+  // you can willy-nilly replace any member with any other at any
+  // point in the function.
+  // For any tuple (Value, BB) in the members set, it is correct to
+  // assume the congruence class is represented by Value in all blocks
+  // dominated by BB
+  
+  // Every congruence class has a leader, and the leader is used to
+  // symbolize instructions in a canonical way (IE every operand of an
+  // instruction that is a member of the same congruence class will
+  // always be replaced with leader during symbolization).
+  // Each congruence class also has a canonical value expression,
+  // though the expression may be null.  The expression is simply an
+  // easy 
+
   static uint32_t nextCongruenceNum = 0;
   struct CongruenceClass {
     uint32_t id;
     Value* leader;
+    // TODO: Do we actually need this? It's not clear what purpose it
+    // really serves
     Expression* expression;
     DenseSet<std::pair<Value*, BasicBlock*> > members;
     bool dead;
@@ -1959,11 +1980,16 @@ Expression *GVN::performSymbolicPHIEvaluation(Instruction *I, BasicBlock *B) {
   }
   //
   if (AllSameValue) {
-    // It's possible to have mutually recursive phi nodes, especially
-    // in weird CFG's. 
-    // This can cause infinite loops (even if you disable the
-    // recursion below, you will ping-pong between congruence classes) 
-    // If a phi node evaluates to another phi node, just leave it alone
+    // It's possible to have phi nodes with cycles (IE dependent on
+    // other phis that are .... dependent on the original phi node), especially
+    // in weird CFG's where some arguments are unreachable, or
+    // uninitialized along certain paths.
+    // This can cause infinite loops  during evaluation (even if you disable the
+    // recursion below, you will simply ping-pong between congruence classes) 
+    // If a phi node symbolically evaluates to another phi node, just
+    // leave it alone
+    // If they are really the same, we will still eliminate them in
+    // favor of each other.
     if (isa<PHINode>(AllSameValue))
       return E;
     NumGVNPhisAllSame++;
@@ -2154,7 +2180,12 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
             DT->properlyDominates(cast<Instruction>(RHS)->getParent(), Root)) &&
            "Instruction doesn't dominate scope!");
     //TODO: Improve equality propagation
+    CongruenceClass *CC = valueToClass[LHS];
+    assert (CC && "Should have found a congruence class");
+    CC->members.insert(std::make_pair(RHS, Root));
+    
 #if 0
+    
     // If value numbering later deduces that an instruction in the
     // scope is equal to 'LHS' then ensure it will be turned into 'RHS'.
     addToLeaderTable(LVN, RHS, Root);
@@ -2337,11 +2368,16 @@ void GVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
       if (VClass->members.empty() && VClass != InitialClass) {
 	if (VClass->expression) {
 	  VClass->dead = true;
+	  // TODO: I think this may be wrong.
+	  // I think we should be keeping track of the expression for
+	  // each instruction, not for each class, and erase the old
+	  // expression for the instruction when the class dies.
 	  expressionToClass.erase(VClass->expression);
 	  memoryExpressionToClass.erase(VClass->expression);
 	}
 	// delete VClass;
       } else if (VClass->leader == V) {
+	// TODO: Check what happens if expression represented the leader
 	VClass->leader = VClass->members.begin()->first;
 	for (DenseSet<std::pair<Value*,BasicBlock*> >::iterator LI = VClass->members.begin(),
 	       LE = VClass->members.end();
@@ -3892,8 +3928,9 @@ bool GVN::eliminateInstructions(Function &F) {
 	   }
 
 	   // Perform actual replacement
-	   if (member != CC->leader)
-	     replaceInstruction(cast<Instruction>(member), Result, CC);
+	   Instruction *I;
+	   if ((I = dyn_cast<Instruction>(member)) && member != CC->leader)
+	     replaceInstruction(I, Result, CC);
 	 }
        }
      }
