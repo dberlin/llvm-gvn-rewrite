@@ -388,10 +388,9 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     uint32_t id;
     Value* leader;
     Expression* expression;
-    DenseSet<Value *> members;
+    DenseSet<std::pair<Value*, BasicBlock*> > members;
     bool dead;
     CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0), dead(false) {};
-
   };
 
   DenseMap<Value*, CongruenceClass*> valueToClass;
@@ -884,9 +883,6 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 	depQueryCache[cacheKey] = false;
 	return false;
       }
-      int numcallclobbers = 0;
-      int numstoreclobbers = 0;
-      int numloadclobbers = 0;
       for (unsigned i = 0, e = NumDeps; i != e; ++i) {
 	BasicBlock *DepBB = Deps[i].getBB();
 
@@ -1335,13 +1331,13 @@ namespace {
 	  continue;
 	CongruenceClass *CC = congruenceClass[i];
 	assert (CC->leader != I && "Leader is messed up");
-	assert (CC->members.count(I) == 0 && "Removed instruction still a member");
+	assert (CC->members.count(std::make_pair(I, I->getParent())) == 0 && "Removed instruction still a member");
       }
     }
     
     // Elimination
     bool eliminateInstructions(Function &);
-    void convertDenseToDFSOrdered(DenseSet<Value*>&, std::set<ValueDFS>&);
+    void convertDenseToDFSOrdered(DenseSet<std::pair<Value*, BasicBlock*> >&, std::set<ValueDFS>&);
     void replaceInstruction(Instruction*, Value*, CongruenceClass*);
     DenseMap<BasicBlock*, std::pair<int, int> > DFSBBMap;
     DenseMap<Instruction*, uint32_t> InstrLocalDFS;
@@ -1353,7 +1349,7 @@ namespace {
     Expression *performSymbolicCallEvaluation(Instruction*, BasicBlock*);
     Expression *performSymbolicPHIEvaluation(Instruction*, BasicBlock*);
     // Congruence findin
-    void performCongruenceFinding(Value*, Expression*);
+    void performCongruenceFinding(Value*, BasicBlock*, Expression*);
     // Predicate and reachability handling
     void updateReachableEdge(BasicBlock*, BasicBlock*);
     void processOutgoingEdges(TerminatorInst* TI);
@@ -2261,7 +2257,7 @@ static bool isOnlyReachableViaThisEdge(BasicBlock *Src, BasicBlock *Dst,
 
 /// performCongruenceFinding - Perform congruence finding on a given
 /// value numbering expression
-void GVN::performCongruenceFinding(Value *V, Expression *E) {
+void GVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
   // This is guaranteed to return something, since it will at least find INITIAL
   CongruenceClass *VClass = valueToClass[V];
   assert (VClass && "Should have found a vclass");
@@ -2333,9 +2329,9 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
       changedValues.erase(DI);
     if (VClass != EClass) {
       DEBUG(dbgs() << "New congruence class for " << V << " is " << EClass->id << "\n");
-      VClass->members.erase(V);
+      VClass->members.erase(std::make_pair(V, BB));
       // assert(std::find(EClass->members.begin(), EClass->members.end(), V) == EClass->members.end() && "Tried to add something to members twice!");
-      EClass->members.insert(V);
+      EClass->members.insert(std::make_pair(V, BB));
       valueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
       if (VClass->members.empty() && VClass != InitialClass) {
@@ -2346,13 +2342,13 @@ void GVN::performCongruenceFinding(Value *V, Expression *E) {
 	}
 	// delete VClass;
       } else if (VClass->leader == V) {
-	VClass->leader = *(VClass->members.begin());
-	for (DenseSet<Value*>::iterator LI = VClass->members.begin(),
+	VClass->leader = VClass->members.begin()->first;
+	for (DenseSet<std::pair<Value*,BasicBlock*> >::iterator LI = VClass->members.begin(),
 	       LE = VClass->members.end();
 	     LI != LE; ++LI) {
-	  if (Instruction *I = dyn_cast<Instruction>(*LI))
+	  if (Instruction *I = dyn_cast<Instruction>(LI->first))
 	    touchedInstructions.insert(I);
-	  changedValues.insert(*LI);
+	  changedValues.insert(LI->first);
 	}
       }
     }
@@ -2539,18 +2535,19 @@ static void patchAndReplaceAllUsesWith(Value *Repl, Instruction *I) {
 
 void GVN::replaceInstruction(Instruction *I, Value *V, CongruenceClass *ReplClass) {
   assert (ReplClass->leader != I && "About to accidentally remove our leader");
+  BasicBlock *IBB = I->getParent();
   if (V->getType() != I->getType()) {
     Instruction *insertPlace = I;
     if (isa<PHINode>(I))
-      insertPlace = I->getParent()->getFirstNonPHI();
+      insertPlace = IBB->getFirstNonPHI();
     V = CoerceAvailableValueToLoadType(V, I->getType(), insertPlace, *TD);
     assert(V && "Should have been able to coerce types!");
   }
   DEBUG(dbgs() << "Replacing " << *I << " with " << *V << "\n");
   patchAndReplaceAllUsesWith(V, I);
-  // Remove the old instruction from the class member list, so the
+  // Remove the old instruction from the class member list, if it is there, so the
   // member size is correct for PRE.
-  ReplClass->members.erase(I);
+  ReplClass->members.erase(std::make_pair(I, IBB));
   // We save the actual erasing to avoid invalidating memory
   // dependencies until we are done with everything.
   UpdateMemDepInfo(MD, I, V);
@@ -2827,7 +2824,7 @@ void GVN::markUsersTouched(Value *V) {
 void GVN::handleNewInstruction(Instruction *I) {
   valueToClass[I] = InitialClass;
   touchedInstructions.insert(I);
-  InitialClass->members.insert(I);
+  InitialClass->members.insert(std::make_pair(I, I->getParent()));
 }
 
 /// processNonLocalLoad - Attempt to eliminate a load whose dependencies are
@@ -3296,10 +3293,10 @@ Value *GVN::findPRELeader(BasicBlock *BB, Value *Op) {
   if (CC->leader && (isa<Argument>(CC->leader) || isa<Constant>(CC->leader) || isa<GlobalValue>(CC->leader)))
     return CC->leader;
 
-  for (DenseSet<Value*>::iterator SI = CC->members.begin(), SE = CC->members.end(); SI != SE; ++SI)
-    if (Instruction *I = dyn_cast<Instruction>(*SI))
-      if (DT->dominates(I, BB))
-	return I;
+  for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator SI = CC->members.begin(),
+	 SE = CC->members.end(); SI != SE; ++SI)
+    if (DT->dominates(SI->second, BB))
+      return SI->first;
   return 0;  
 }
 
@@ -3449,7 +3446,7 @@ bool GVN::performPRE(Function &F) {
       predMap[PREPred] = PREInstr;
 
       valueToClass[PREInstr] = CC;
-      CC->members.insert(PREInstr);
+      CC->members.insert(std::make_pair(PREInstr, PREPred));
       ++NumGVNPRE;
       ValueDFS VDFS;
       VDFS.value = PREInstr;
@@ -3502,16 +3499,26 @@ bool GVN::performPRE(Function &F) {
   return Changed;
 }
 
-void GVN::convertDenseToDFSOrdered(DenseSet<Value*> &Dense, std::set<ValueDFS> &DFSOrderedSet) {
-  for (DenseSet<Value*>::iterator DI = Dense.begin(), DE = Dense.end(); DI != DE; ++DI) {
-    Instruction *I = dyn_cast<Instruction>(*DI);
-    assert (I && "Not an instruction in our member set");
-    std::pair<int, int> DFSPair = DFSBBMap[I->getParent()];
+void GVN::convertDenseToDFSOrdered(DenseSet<std::pair<Value*, BasicBlock*> > &Dense,
+				   std::set<ValueDFS> &DFSOrderedSet) {
+  for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator DI = Dense.begin(), DE = Dense.end(); 
+       DI != DE; ++DI) {
+    std::pair<int, int> DFSPair = DFSBBMap[DI->second];
     ValueDFS VD;
     VD.dfs_in = DFSPair.first;
     VD.dfs_out = DFSPair.second;
-    VD.localnum = InstrLocalDFS[I];
-    VD.value = I;
+
+    // If it's an instruction, use the real local dfs number.
+    // If it's a value, it *must* have come from equality propagation,
+    // and thus we know it is valid for the entire block.  By giving
+    // the local number as 0, it should sort before the instructions
+    // in that block.
+    if (Instruction *I = dyn_cast<Instruction>(DI->first))
+      VD.localnum = InstrLocalDFS[I];
+    else
+      VD.localnum = 0;
+    
+    VD.value = DI->first;
     DFSOrderedSet.insert(VD);
   }
 }
@@ -3565,17 +3572,18 @@ bool GVN::runOnFunction(Function& F) {
   reachableBlocks.insert(&F.getEntryBlock());
 
   // Init the INITIAL class
-  DenseSet<Value*> InitialValues;
+  DenseSet<std::pair<Value*, BasicBlock*> > InitialValues;
   for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI)  {
     for (BasicBlock::iterator BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
-      InitialValues.insert(BI);
+      InitialValues.insert(std::make_pair(BI, FI));
     }
   }
 
   InitialClass = new CongruenceClass();
-  for (DenseSet<Value*>::iterator LI = InitialValues.begin(), LE = InitialValues.end();
+  for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator LI = InitialValues.begin(),
+	 LE = InitialValues.end();
        LI != LE; ++LI)
-    valueToClass[*LI] = InitialClass;
+    valueToClass[LI->first] = InitialClass;
   InitialClass->members.swap(InitialValues);
   congruenceClass.push_back(InitialClass);
   if (!noLoads)
@@ -3633,7 +3641,7 @@ bool GVN::runOnFunction(Function& F) {
 	    }
 
 	    Expression *Symbolized = performSymbolicEvaluation(I, *RI);
-            performCongruenceFinding(I, Symbolized);
+            performCongruenceFinding(I, *RI, Symbolized);
           } else {
 
             processOutgoingEdges(dyn_cast<TerminatorInst>(I));
@@ -3766,8 +3774,8 @@ bool GVN::eliminateInstructions(Function &F) {
    // If this is a leader that is always available, just replace
    // everything with it
    if (alwaysAvailable(CC->leader)) { 
-     for (DenseSet<Value*>::iterator CI = CC->members.begin(), CE = CC->members.end(); CI != CE; ) {
-       Value *member = *CI;
+     for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator CI = CC->members.begin(), CE = CC->members.end(); CI != CE; ) {
+       Value *member = CI->first;
        ++CI;
        // Skip the member that is also us :)
        if (member != CC->leader) {
@@ -3775,7 +3783,11 @@ bool GVN::eliminateInstructions(Function &F) {
 	 if (isa<StoreInst>(member) || isa<BitCastInst>(member))
 	   continue;
 	 DEBUG(dbgs() << "Found replacement " << *(CC->leader) << " for " << *member << "\n");
-	 replaceInstruction(cast<Instruction>(member), CC->leader, CC);
+	 // Due to equality propagation, these may not always be
+	 // instructions, they may be real values.  We don't really
+	 // care about trying to replace the non-instructions.
+	 if (Instruction *I = dyn_cast<Instruction>(member))
+	   replaceInstruction(I, CC->leader, CC);
        }
      }
    } else {
@@ -3796,7 +3808,7 @@ bool GVN::eliminateInstructions(Function &F) {
        // appropriately.  If nothing else in the function was even
        // compared to this, it's probably not worth trying to eliminate.
 	 if (ME->hadNonLocal()) {
-	   Value *member = *(CC->members.begin());
+	   Value *member = CC->members.begin()->first;
 	   if (LoadInst *LI = dyn_cast<LoadInst>(member)){
 	     processNonLocalLoad(LI);
 	   }
@@ -3808,7 +3820,7 @@ bool GVN::eliminateInstructions(Function &F) {
        MemoryExpression *ME;
        if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
 	 if (0|| ME->hadNonLocal()) {
-	   Value *member = *(CC->members.begin());
+	   Value *member = CC->members.begin()->first;
 	   if (LoadInst *LI = dyn_cast<LoadInst>(member)){
 	     processNonLocalLoad(LI);
 	   }
