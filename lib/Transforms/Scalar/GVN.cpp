@@ -159,12 +159,10 @@ namespace {
       MD->removeInstruction(I);
   }
 
-  struct CongruenceClass;
   MemoryDependenceAnalysis *MD;
   const TargetData *TD;
   AliasAnalysis *AA;
   DenseSet<BasicBlock*> reachableBlocks;
-
 
 
 /// CanCoerceMustAliasedValueToLoad - Return true if
@@ -401,9 +399,8 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
   // Each congruence class also has a canonical value expression,
   // though the expression may be null.  The expression is simply an
   // easy 
-
-  static uint32_t nextCongruenceNum = 0;
   struct CongruenceClass {
+    static uint32_t nextCongruenceNum;
     uint32_t id;
     Value* leader;
     // TODO: Do we actually need this? It's not clear what purpose it
@@ -411,7 +408,7 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     Expression* expression;
     DenseSet<std::pair<Value*, BasicBlock*> > members;
     bool dead;
-    CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0), dead(false) {};
+    explicit CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0), dead(false) {};
   };
 
   DenseMap<Value*, CongruenceClass*> valueToClass;
@@ -1261,7 +1258,7 @@ namespace {
     DenseSet<Instruction*> touchedInstructions;
     DenseMap<Instruction*, uint32_t> processedCount;
     std::vector<CongruenceClass*> congruenceClass;
-
+    
     struct ComparingExpressionInfo {
       static inline Expression* getEmptyKey() {
         intptr_t Val = -1;
@@ -1336,6 +1333,21 @@ namespace {
 				  Instruction*, const TargetData&);
 
   private:
+    // Congruence class handling
+    CongruenceClass *createCongruenceClass() {
+      CongruenceClass *result = new CongruenceClass();
+      congruenceClass.push_back(result);;
+      return result;
+    }
+
+    CongruenceClass *createSingletonCongruenceClass(Value *Member, BasicBlock *BB) {
+      CongruenceClass *CClass = createCongruenceClass();
+      CClass->leader = Member;
+      CClass->members.insert(std::make_pair(Member, BB));
+      valueToClass[Member] = CClass;
+      return CClass;
+    }
+
     DenseSet<Instruction*> instrsToErase_;
     void markInstructionForDeletion(Instruction *I) {
       DEBUG(dbgs() << "Marking " << *I << " for deletion\n");
@@ -2304,8 +2316,7 @@ void GVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
   if (E == NULL) {
     // We may have already made a unique class
     if (VClass->members.size() != 1 || VClass->leader != V) {
-      CongruenceClass *NewClass = new CongruenceClass();
-      congruenceClass.push_back(NewClass);
+      CongruenceClass *NewClass = createCongruenceClass();
       // We should always be adding the member in the below code
       NewClass->expression = NULL;
       NewClass->leader = V;
@@ -2322,8 +2333,7 @@ void GVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
 
     // If it's not in the value table, create a new congruence class
     if (lookupResult.second) {
-      CongruenceClass *NewClass = new CongruenceClass();
-      congruenceClass.push_back(NewClass);
+      CongruenceClass *NewClass = createCongruenceClass();
       NewClass->expression = E;
       ExpressionClassMap::iterator place = lookupResult.first;
       place->second = NewClass;
@@ -3559,7 +3569,7 @@ void GVN::convertDenseToDFSOrdered(DenseSet<std::pair<Value*, BasicBlock*> > &De
   }
 }
   
-// uint32_t GVN::nextCongruenceNum = 0;
+uint32_t CongruenceClass::nextCongruenceNum = 0;
 
 /// runOnFunction - This is the main transformation entry point for a function.
 bool GVN::runOnFunction(Function& F) {
@@ -3584,7 +3594,7 @@ bool GVN::runOnFunction(Function& F) {
   }
   uint32_t ICount = 0;
 
-  nextCongruenceNum = 2;
+  CongruenceClass::nextCongruenceNum = 2;
   // Count number of instructions for sizing of hash tables
   unsigned NumBasicBlocks = F.size();
   DEBUG(dbgs() << "Found " << NumBasicBlocks <<  " basic blocks\n");
@@ -3607,7 +3617,13 @@ bool GVN::runOnFunction(Function& F) {
     touchedInstructions.insert(BI);
   reachableBlocks.insert(&F.getEntryBlock());
 
-  // Init the INITIAL class
+  // Initialize arguments to be in their own unique congruence classes
+  // in an IPA-GVN, this would not be done
+  for (Function::arg_iterator FAI = F.arg_begin(), FAE= F.arg_end(); FAI != FAE; ++FAI) {
+    createSingletonCongruenceClass(FAI, &F.getEntryBlock());
+  }
+  
+  // Initialize all other instructions to be in INITIAL class
   DenseSet<std::pair<Value*, BasicBlock*> > InitialValues;
   for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI)  {
     for (BasicBlock::iterator BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
@@ -3615,13 +3631,12 @@ bool GVN::runOnFunction(Function& F) {
     }
   }
 
-  InitialClass = new CongruenceClass();
+  InitialClass = createCongruenceClass();
   for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator LI = InitialValues.begin(),
 	 LE = InitialValues.end();
        LI != LE; ++LI)
     valueToClass[LI->first] = InitialClass;
   InitialClass->members.swap(InitialValues);
-  congruenceClass.push_back(InitialClass);
   if (!noLoads)
     {
       MD = &getAnalysis<MemoryDependenceAnalysis>();
@@ -3891,7 +3906,6 @@ bool GVN::eliminateInstructions(Function &F) {
 	   lastdfs_in = currdfs_in;
 	   lastdfs_out = currdfs_out;
 	 } else {
-       // We can
            // Skip the case of trying to eliminate the leader.  
            if (member == CC->leader)
 	     continue;
