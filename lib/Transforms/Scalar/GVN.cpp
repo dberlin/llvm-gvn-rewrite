@@ -408,7 +408,11 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     Expression* expression;
     DenseSet<std::pair<Value*, BasicBlock*> > members;
     bool dead;
-    explicit CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0), dead(false) {};
+    explicit CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0),
+			       dead(false) {};
+    CongruenceClass(Value *Leader, Expression *E):id(nextCongruenceNum++), 
+						  leader(Leader), expression(E),
+						  dead(false) {};
   };
 
   DenseMap<Value*, CongruenceClass*> valueToClass;
@@ -1334,15 +1338,14 @@ namespace {
 
   private:
     // Congruence class handling
-    CongruenceClass *createCongruenceClass() {
-      CongruenceClass *result = new CongruenceClass();
+    CongruenceClass *createCongruenceClass(Value *Leader, Expression* E) {
+      CongruenceClass *result = new CongruenceClass(Leader, E);
       congruenceClass.push_back(result);;
       return result;
     }
 
     CongruenceClass *createSingletonCongruenceClass(Value *Member, BasicBlock *BB) {
-      CongruenceClass *CClass = createCongruenceClass();
-      CClass->leader = Member;
+      CongruenceClass *CClass = createCongruenceClass(Member, NULL);
       CClass->members.insert(std::make_pair(Member, BB));
       valueToClass[Member] = CClass;
       return CClass;
@@ -2316,10 +2319,8 @@ void GVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
   if (E == NULL) {
     // We may have already made a unique class
     if (VClass->members.size() != 1 || VClass->leader != V) {
-      CongruenceClass *NewClass = createCongruenceClass();
+      CongruenceClass *NewClass = createCongruenceClass(V, NULL);
       // We should always be adding the member in the below code
-      NewClass->expression = NULL;
-      NewClass->leader = V;
       EClass = NewClass;
       DEBUG(dbgs() << "Created new congruence class for " << V << " due to NULL expression\n");
     } else {
@@ -2333,8 +2334,7 @@ void GVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
 
     // If it's not in the value table, create a new congruence class
     if (lookupResult.second) {
-      CongruenceClass *NewClass = createCongruenceClass();
-      NewClass->expression = E;
+      CongruenceClass *NewClass = createCongruenceClass(NULL, E);
       ExpressionClassMap::iterator place = lookupResult.first;
       place->second = NewClass;
 
@@ -3619,9 +3619,9 @@ bool GVN::runOnFunction(Function& F) {
 
   // Initialize arguments to be in their own unique congruence classes
   // in an IPA-GVN, this would not be done
-  for (Function::arg_iterator FAI = F.arg_begin(), FAE= F.arg_end(); FAI != FAE; ++FAI) {
+  for (Function::arg_iterator FAI = F.arg_begin(), FAE= F.arg_end(); FAI != FAE; ++FAI)
     createSingletonCongruenceClass(FAI, &F.getEntryBlock());
-  }
+  
   
   // Initialize all other instructions to be in INITIAL class
   DenseSet<std::pair<Value*, BasicBlock*> > InitialValues;
@@ -3631,7 +3631,7 @@ bool GVN::runOnFunction(Function& F) {
     }
   }
 
-  InitialClass = createCongruenceClass();
+  InitialClass = createCongruenceClass(NULL, NULL);
   for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator LI = InitialValues.begin(),
 	 LE = InitialValues.end();
        LI != LE; ++LI)
