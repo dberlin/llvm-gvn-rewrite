@@ -1021,7 +1021,8 @@ namespace {
 	  continue;
 	CongruenceClass *CC = congruenceClass[i];
 	assert (CC->leader != I && "Leader is messed up");
-	assert (CC->members.count(std::make_pair(I, I->getParent())) == 0 && "Removed instruction still a member");
+	assert (CC->members.count(std::make_pair(I, I->getParent())) == 0
+		&& "Removed instruction still a member");
       }
     }
     
@@ -1125,7 +1126,8 @@ bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
     MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
     locDepCache[LI] = Deps;
   }
-  // If we had to process more than one hundred blocks to find the
+
+  // If we had to process more than one hundred deps to find the
   // dependencies, this load isn't worth worrying about.  Optimizing
   // it will be too expensive.
   unsigned NumDeps = Deps.size();
@@ -1193,6 +1195,7 @@ bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
 	    depQueryCache[cacheKey] = false;
 	    return false;
 	  }
+	  continue;
 	}
       }
       
@@ -1209,12 +1212,12 @@ bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
 	  int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
 						     LI->getPointerOperand(),
 						     DepLI, *TD);
-	  
 	  if (Offset == -1) {
 	    depIQueryCache[iCacheKey] = false;
 	    depQueryCache[cacheKey] = false;
 	    return false;
 	  }
+	  continue;
 	}
       }
       // If the clobbering value is a memset/memcpy/memmove, see if we can forward
@@ -1228,6 +1231,7 @@ bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
 	  depQueryCache[cacheKey] = false;
 	  return false;
 	}
+	continue;
       }
       depIQueryCache[iCacheKey] = false;
       depQueryCache[cacheKey] = false;
@@ -1351,7 +1355,7 @@ bool MemoryExpression::depequals(const Expression &other)
 	}
 	return true;
       }	    
-      //TODO: memintrisic case
+      //TODO: memintrinsic case
       return false;
     }
     return true;
@@ -1491,21 +1495,19 @@ Value *GVN::CoerceAvailableValueToLoadType(Value *StoredVal,
     if (TypeToCastTo->isPointerTy())
       TypeToCastTo = TD.getIntPtrType(StoredValTy->getContext());
 
-    if (StoredValTy != TypeToCastTo) 
-      {
-         Instruction *I = new BitCastInst(StoredVal, TypeToCastTo, "", InsertPt);
-	 StoredVal = I;
-	 handleNewInstruction(I);
-      }
+    if (StoredValTy != TypeToCastTo) {
+      Instruction *I = new BitCastInst(StoredVal, TypeToCastTo, "", InsertPt);
+      StoredVal = I;
+      handleNewInstruction(I);
+    }
     
 
     // Cast to pointer if the load needs a pointer type.
-    if (LoadedTy->isPointerTy()) 
-      {
-	Instruction *I = new IntToPtrInst(StoredVal, LoadedTy, "", InsertPt);
-	StoredVal = I;
-	handleNewInstruction(I);
-      }
+    if (LoadedTy->isPointerTy()) {
+      Instruction *I = new IntToPtrInst(StoredVal, LoadedTy, "", InsertPt);
+      StoredVal = I;
+      handleNewInstruction(I);
+    }
     return StoredVal;
   }
 
@@ -1549,12 +1551,11 @@ Value *GVN::CoerceAvailableValueToLoadType(Value *StoredVal,
     return StoredVal;
 
   // If the result is a pointer, inttoptr.
-  if (LoadedTy->isPointerTy())
-    {
-      I = new IntToPtrInst(StoredVal, LoadedTy, "inttoptr", InsertPt);
-      handleNewInstruction(I);
-      return I;
-    }
+  if (LoadedTy->isPointerTy()) {
+    I = new IntToPtrInst(StoredVal, LoadedTy, "inttoptr", InsertPt);
+    handleNewInstruction(I);
+    return I;
+  }
   
 
   // Otherwise, bitcast.
@@ -2510,6 +2511,7 @@ void GVN::processOutgoingEdges(TerminatorInst *TI) {
 /// propagateChangeInEdge - Propagate a change in edge reachability
 // When we discover a new edge to an existing reachable block, that
 // can affect the value of blocks containing phi nodes downstream.
+// These blocks/instructions need to be marked for re-processing.
 //
 // However, it can *only* impact blocks that contain phi nodes, as
 // those are the only values that would be carried from multiple
@@ -2528,8 +2530,10 @@ void GVN::propagateChangeInEdge(BasicBlock *Dest) {
   //verify it The published algorithm touches all instructions, we
   //only touch the phi nodes.  This is because there should be no
   //other values that can *directly* change as a result of edge
-  //reachability. If the phi node ends up producing a new value, it's
-  //users will be marked as touched anyway
+  //reachability. If the phi node ends up changing congruence classes,
+  //the users will be marked as touched anyway.  If we moved to using
+  //value inferencing, there are cases we may need to touch more than
+  //phi nodes. 
   for (df_iterator<DomTreeNode*> DI = df_begin(DTN), DE = df_end(DTN); DI != DE; ++DI) {
     BasicBlock *B = DI->getBlock();
     if (!B->getUniquePredecessor()) {
@@ -3649,16 +3653,13 @@ bool GVN::runOnFunction(Function& F) {
        LI != LE; ++LI)
     valueToClass[LI->first] = InitialClass;
   InitialClass->members.swap(InitialValues);
-  if (!noLoads)
-    {
-      MD = &getAnalysis<MemoryDependenceAnalysis>();
-      AA = &getAnalysis<AliasAnalysis>();
-    }
-  else
-    {
-      MD = NULL;
-      AA = NULL;
-    }
+  if (!noLoads) {
+    MD = &getAnalysis<MemoryDependenceAnalysis>();
+    AA = &getAnalysis<AliasAnalysis>();
+  } else {
+    MD = NULL;
+    AA = NULL;
+  }
 
 
   while (!touchedInstructions.empty()) {
@@ -3706,7 +3707,6 @@ bool GVN::runOnFunction(Function& F) {
 	    Expression *Symbolized = performSymbolicEvaluation(I, *RI);
             performCongruenceFinding(I, *RI, Symbolized);
           } else {
-
             processOutgoingEdges(dyn_cast<TerminatorInst>(I));
           }
         }
@@ -3827,8 +3827,12 @@ bool GVN::eliminateInstructions(Function &F) {
    
    int lastdfs_in = 0;
    int lastdfs_out = 0;
-   Value *lastval = NULL;
-
+   // This is a stack because equality replacement/etc may place
+   // constants in the middle of the member list, and we want to use
+   // those constant values in preference to the current leader, over
+   // the scope of those constants.
+   SmallVector<Value*, 4> ValueStack;
+   SmallVector<std::pair<int, int>, 64> DFSStack;
    assert (CC->leader && "We should have had a leader");
    
    // if (!CC->expression || !CC->leader)
@@ -3911,10 +3915,12 @@ bool GVN::eliminateInstructions(Function &F) {
 	 
 	 DEBUG(dbgs() << "Last DFS numbers are (" << lastdfs_in << "," << lastdfs_out << ")\n");
 	 DEBUG(dbgs() << "Current DFS numbers are (" << currdfs_in << "," << currdfs_out <<")\n");
-
+	 // TODO: Fix push/pop
+	 // We should push whenever it's empty or there is a constant
+	 // We should pop until we are back within the right DFS scope
 	 // Walk along, processing members who are dominated by each other.
-	 if (lastval == NULL || !(currdfs_in >= lastdfs_in && currdfs_out <= lastdfs_out)) {
-	   lastval = member;
+	 if (ValueStack.empty() || !(currdfs_in >= lastdfs_in && currdfs_out <= lastdfs_out)) {
+	   ValueStack.push_back(member);
 	   lastdfs_in = currdfs_in;
 	   lastdfs_out = currdfs_out;
 	 } else {
@@ -3922,8 +3928,8 @@ bool GVN::eliminateInstructions(Function &F) {
            if (member == CC->leader)
 	     continue;
 
-	   Value *Result = lastval;
-	   DEBUG(dbgs() << "Found replacement " << *lastval << " for " << *member << "\n");
+	   Value *Result = ValueStack.back();
+	   DEBUG(dbgs() << "Found replacement " << *Result << " for " << *member << "\n");
 	   
 
 	   // If we find a load or a store as a replacement, make sure
