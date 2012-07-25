@@ -963,6 +963,8 @@ namespace {
     Expression *createCallExpression(CallInst*, bool, bool);
     Expression *createInsertValueExpression(InsertValueInst*);
     Expression *uniquifyExpression(Expression*);
+    Expression *createCmpExpression(unsigned, Type*,CmpInst::Predicate,
+				    Value*, Value*);
 
   public:
     static char ID; // Pass identification, replacement for typeid
@@ -1795,6 +1797,22 @@ void GVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E) {
     E->varargs.push_back(Operand);
   }
 }
+// This is a special function only used by equality propagation, it
+// should not be called elsewhere
+Expression *GVN::createCmpExpression(unsigned Opcode,
+				     Type *Type,
+				     CmpInst::Predicate Predicate,
+				     Value *LHS, Value *RHS) {  
+  BasicExpression *E = new BasicExpression();
+  E->setType(Type);
+  E->setOpcode((Opcode << 8) | Predicate);
+  LHS = lookupOperandLeader(LHS);
+  E->varargs.push_back(LHS);
+  RHS = lookupOperandLeader(RHS);
+  E->varargs.push_back(RHS);
+  return E;
+}
+
 
 Expression *GVN::createExpression(Instruction *I) {
   BasicExpression *E = new BasicExpression();
@@ -1824,7 +1842,7 @@ Expression *GVN::createExpression(Instruction *I) {
     //simplifying, so that we don't end up simplifying based on a wrong
     //type assumption. We should clean this up so we can use constants of the wrong type
 
-    assert (I->getOperand(0)->getType() == I->getOperand(1)->getType() && "What the fuk");
+    assert (I->getOperand(0)->getType() == I->getOperand(1)->getType() && "Wrong types on cmp instruction");
     if ((E->varargs[0]->getType() == I->getOperand(0)->getType()
 	 && E->varargs[1]->getType() == I->getOperand(1)->getType())) {
       Value *V = SimplifyCmpInst(Predicate, E->varargs[0], E->varargs[1], TD, TLI, DT);
@@ -2207,17 +2225,14 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
     assert((!isa<Instruction>(RHS) ||
             DT->properlyDominates(cast<Instruction>(RHS)->getParent(), Root)) &&
            "Instruction doesn't dominate scope!");
-    //TODO: Improve equality propagation
+
+    // If value numbering later deduces that an instruction in the
+    // scope is equal to 'LHS' then ensure it will be turned into
+    // 'RHS' within the scope Root.
     CongruenceClass *CC = valueToClass[LHS];
     assert (CC && "Should have found a congruence class");
     CC->members.insert(std::make_pair(RHS, Root));
-    
-#if 0
-    
-    // If value numbering later deduces that an instruction in the
-    // scope is equal to 'LHS' then ensure it will be turned into 'RHS'.
-    addToLeaderTable(LVN, RHS, Root);
-#endif
+
     // Replace all occurrences of 'LHS' with 'RHS' everywhere in the
     // scope.  As LHS always has at least one use that is not
     // dominated by Root, this will never do anything if LHS has only
@@ -2266,30 +2281,35 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       if ((isKnownTrue && Cmp->getPredicate() == CmpInst::ICMP_EQ) ||
           (isKnownFalse && Cmp->getPredicate() == CmpInst::ICMP_NE))
         Worklist.push_back(std::make_pair(Op0, Op1));
-#if 0
-      // If "A >= B" is known true, replace "A < B" with false everywhere.
-      CmpInst::Predicate NotPred = Cmp->getInversePredicate();
-      Constant *NotVal = ConstantInt::get(Cmp->getType(), isKnownFalse);
+
+      // If "A >= B" is known true, replace "A < B" with false
+      // everywhere.
       // Since we don't have the instruction "A < B" immediately to
       // hand, work out the value number that it would have and use
       // that to find an appropriate instruction (if any).
-      uint32_t NextNum = VN.getNextUnusedValueNumber();
-      uint32_t Num = VN.lookup_or_add_cmp(Cmp->getOpcode(), NotPred, Op0, Op1);
-      // If the number we were assigned was brand new then there is no point in
-      // looking for an instruction realizing it: there cannot be one!
-      if (Num < NextNum) {
-        Value *NotCmp = findLeader(Root, Num);
-        if (NotCmp && isa<Instruction>(NotCmp)) {
-          unsigned NumReplacements =
-            replaceAllDominatedUsesWith(NotCmp, NotVal, Root);
-          Changed |= NumReplacements > 0;
-          NumGVNEqProp += NumReplacements;
-        }
+      CmpInst::Predicate NotPred = Cmp->getInversePredicate();
+      Constant *NotVal = ConstantInt::get(Cmp->getType(), isKnownFalse);
+      Expression *E = createCmpExpression(Cmp->getOpcode(), Cmp->getType(), NotPred, Op0, Op1);
+
+      // We cannot directly propagate into the congruence class members
+      // unless it is a singleton class.
+      // This is because at least one of the members may later get
+      // split out of the class.
+
+      CongruenceClass *CC = expressionToClass[E];
+      delete E;
+
+      if (CC) {
+	if (CC->members.size() == 1) {
+	  unsigned NumReplacements = 
+	    replaceAllDominatedUsesWith(CC->leader, NotVal, Root);
+	  Changed |= NumReplacements > 0;
+	  NumGVNEqProp += NumReplacements;
+	}
+	// Ensure that any instruction in scope that gets the "A < B"
+	// value number is replaced with false.
+	CC->members.insert(std::make_pair(NotVal, Root));
       }
-      // Ensure that any instruction in scope that gets the "A < B"
-      // value number is replaced with false.
-      addToLeaderTable(Num, NotVal, Root);
-#endif
       continue;
     }
 
@@ -3824,9 +3844,6 @@ bool GVN::eliminateInstructions(Function &F) {
    // numbering of (UNREACHABLE's, for example)
    if (CC == InitialClass || CC->dead)
      continue;
-   
-   int lastdfs_in = 0;
-   int lastdfs_out = 0;
    // This is a stack because equality replacement/etc may place
    // constants in the middle of the member list, and we want to use
    // those constant values in preference to the current leader, over
@@ -3841,7 +3858,8 @@ bool GVN::eliminateInstructions(Function &F) {
    // If this is a leader that is always available, just replace
    // everything with it
    if (alwaysAvailable(CC->leader)) { 
-     for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator CI = CC->members.begin(), CE = CC->members.end(); CI != CE; ) {
+     for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator CI = CC->members.begin(), 
+	    CE = CC->members.end(); CI != CE; ) {
        Value *member = CI->first;
        ++CI;
        // Skip the member that is also us :)
@@ -3860,7 +3878,6 @@ bool GVN::eliminateInstructions(Function &F) {
    } else {
 
 #if 1
-
      // If this is a singleton, the only thing we do is process
      // non-local loads.  
      // TODO: processNonLocalLoad still does PRE of loads,
@@ -3900,9 +3917,9 @@ bool GVN::eliminateInstructions(Function &F) {
        convertDenseToDFSOrdered(CC->members, DFSOrderedSet);
        
        for (std::set<ValueDFS>::iterator CI = DFSOrderedSet.begin(), CE = DFSOrderedSet.end(); CI != CE;) {
-	 int currdfs_in = CI->dfs_in;
-	 int currdfs_out = CI->dfs_out;
-	 Value *member = CI->value;
+	 int MemberDFSIn = CI->dfs_in;
+	 int MemberDFSOut = CI->dfs_out;
+	 Value *Member = CI->value;
 	 ++CI;
 	 
 	 //TODO: eliminate duplicate bitcasts but not valid bitcasts.
@@ -3910,34 +3927,47 @@ bool GVN::eliminateInstructions(Function &F) {
 	 // (because of type ignoring above), so we will think we can
 	 // eliminate every bitcast, but we can't. We could eliminate
 	 // bitcasts that value number to *other bitcasts*, however.
-	 if (isa<StoreInst>(member) || isa<BitCastInst>(member))
+	 if (isa<StoreInst>(Member) || isa<BitCastInst>(Member))
 	   continue;
-	 
-	 DEBUG(dbgs() << "Last DFS numbers are (" << lastdfs_in << "," << lastdfs_out << ")\n");
-	 DEBUG(dbgs() << "Current DFS numbers are (" << currdfs_in << "," << currdfs_out <<")\n");
-	 // TODO: Fix push/pop
+
+	 if (DFSStack.empty()) {
+	   DEBUG(dbgs() << "DFS Stack is empty\n");
+	 } else {
+	   DEBUG(dbgs() << "Stack Top DFS numbers are (" << DFSStack.back().first << "," << DFSStack.back().second << ")\n");
+	 }
+
+	 DEBUG(dbgs() << "Current DFS numbers are (" << MemberDFSIn << "," << MemberDFSOut <<")\n");
 	 // We should push whenever it's empty or there is a constant
 	 // We should pop until we are back within the right DFS scope
 	 // Walk along, processing members who are dominated by each other.
-	 if (ValueStack.empty() || !(currdfs_in >= lastdfs_in && currdfs_out <= lastdfs_out)) {
-	   ValueStack.push_back(member);
-	   lastdfs_in = currdfs_in;
-	   lastdfs_out = currdfs_out;
+	 if ((ValueStack.empty() || isa<Constant>(Member))
+	     || !(MemberDFSIn >= DFSStack.back().first  
+		  && MemberDFSOut <= DFSStack.back().second)) {
+	   assert(ValueStack.size() == DFSStack.size() && "Mismatch between ValueStack and DFSStack");
+	   while (!DFSStack.empty() 
+		  && !(MemberDFSIn >= DFSStack.back().first  && MemberDFSOut <= DFSStack.back().second)){
+	     DFSStack.pop_back();
+	     ValueStack.pop_back();
+	   }
+	   
+	   if (DFSStack.empty() || isa<Constant>(Member)) {    
+	     ValueStack.push_back(Member);
+	     DFSStack.push_back(std::make_pair(MemberDFSIn, MemberDFSOut));
+	   }
 	 } else {
            // Skip the case of trying to eliminate the leader.  
-           if (member == CC->leader)
+           if (Member == CC->leader)
 	     continue;
 
 	   Value *Result = ValueStack.back();
-	   DEBUG(dbgs() << "Found replacement " << *Result << " for " << *member << "\n");
-	   
+	   DEBUG(dbgs() << "Found replacement " << *Result << " for " << *Member << "\n");	   
 
 	   // If we find a load or a store as a replacement, make sure
 	   // to correct the type.  This should *always* work, since
 	   // we tested whether it was possible before value numbering
 	   // the same. 
 	   LoadInst *LI;
-	   if (Result->getType() != member->getType() && (LI = dyn_cast<LoadInst>(member))) {
+	   if (Result->getType() != Member->getType() && (LI = dyn_cast<LoadInst>(Member))) {
 	     if (LoadInst *LIR = dyn_cast<LoadInst>(Result)) {
 	       int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
 							  LI->getPointerOperand(),
@@ -3961,7 +3991,7 @@ bool GVN::eliminateInstructions(Function &F) {
 
 	   // Perform actual replacement
 	   Instruction *I;
-	   if ((I = dyn_cast<Instruction>(member)) && member != CC->leader)
+	   if ((I = dyn_cast<Instruction>(Member)) && Member != CC->leader)
 	     replaceInstruction(I, Result, CC);
 	 }
        }
