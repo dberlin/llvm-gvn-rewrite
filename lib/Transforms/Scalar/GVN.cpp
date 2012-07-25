@@ -593,74 +593,7 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 	return false;
       return true;
     }
-    virtual bool depequals (const Expression &other) {
-      const CallExpression &OE = cast<CallExpression>(other);
-      // Given the same arguments, two calls are equal if the dependency checker says one is dependent
-      // on the other
-      if (callinst_ != OE.callinst_) {
-	MemDepResult local_dep = MD->getDependency(callinst_);
-	if (!local_dep.isDef() && !local_dep.isNonLocal()) {
-	  return false;
-	}
-	if (local_dep.isDef()) {
-	  CallInst* local_cdep = cast<CallInst>(local_dep.getInst());
-	  if (local_cdep != OE.callinst_)
-	    return false;
-	} else {
-	  // True if all of the dependencies are either transparent or loads
-	  bool allTransparent = true;
-	  // Non-local case.
-	  const MemoryDependenceAnalysis::NonLocalDepInfo &deps =
-	    MD->getNonLocalCallDependency(callinst_);
-	  CallInst* cdep = 0;
-	  CongruenceClass *cclass = valueToClass[OE.callinst_];
-	  assert(cclass != NULL && "Somehow got a call instruction without a congruence class into the expressionToClass mapping");
-
-	  // Check to see if all non local dependencies are equal to
-	  // the other call or if all of them are in the same
-	  // congruence class as the other call instruction
-	  for (unsigned i = 0, e = deps.size(); i != e; ++i) {
-	    const NonLocalDepEntry *I = &deps[i];
-	    
-	    if (I->getResult().isNonLocal())
-	      continue;
-
-	    // Ignore clobbers by loads, since they have no impact on the call itself.
-	    if (I->getResult().isClobber() && isa<LoadInst>(I->getResult().getInst()))
-	      continue;
-	      
-	    allTransparent = false;
-	    if (!I->getResult().isDef() || cdep != 0) {
-	      cdep = 0;
-	      break;
-	    }
-	    // We need to ensure that all dependencies are in the same
-	    // congruence class as the other call instruction
-	    CallInst *NonLocalDepCall = dyn_cast<CallInst>(I->getResult().getInst());
-	    if (NonLocalDepCall) {
-	      if (!cdep) {
-		if (NonLocalDepCall == OE.callinst_ || valueToClass[NonLocalDepCall] == cclass)
-		  cdep = NonLocalDepCall;
-		else
-		  break;
-	      } else {
-		CongruenceClass *NLDPClass = valueToClass[NonLocalDepCall];
-		if (cclass != NLDPClass) {
-		  cdep = 0;
-		  break;
-		}
-	      }
-	      continue;
-	    }
-	    cdep = 0;
-	    break;
-	  }
-	  if (!cdep && !allTransparent)
-	    return false;
-	}
-      }
-      return true;
-    }
+    virtual bool depequals(const Expression &other);
 
     virtual hash_code getHashValue() const {
       return hash_combine(etype_, opcode_, type_, nomem_, readonly_,
@@ -748,291 +681,10 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
       return true;
     }
 
-    virtual bool depequals(const Expression &other) {
-      const MemoryExpression &OE = cast<MemoryExpression>(other);
-      if (!isStore_) {
-	LoadInst *LI = inst_.loadinst;
-	Instruction *OI = OE.inst_.inst;
-
-	if (LI != OI) {
-	  MemDepResult Dep = MD->getDependency(LI);
-	  if (Dep.isNonLocal()) {
-	    nonLocal_ = true;
-	    return nonLocalEquals(LI, Dep, OE);
-	  }
-	  // If we weren't dependent on the other load, they aren't equal.
-	  if (Dep.getInst() != OI)
-	    return false;
-	  // If we are dependent, but it's not a straight def, see if they can be made equal.
-	  if (Dep.isClobber() && TD) {
-	    if (StoreInst *DepSI = dyn_cast<StoreInst>(Dep.getInst())) {
-	      int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
-							  varargs[0],
-							  DepSI, *TD);
-	      if (Offset == -1 || !CanCoerceMustAliasedValueToLoad(DepSI->getValueOperand(),
-								   LI->getType(),
-								   *TD))
-		return false;
-	      return true;
-	    }
-	    if (LoadInst *DepLI = dyn_cast<LoadInst>(Dep.getInst())) {
-	      int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
-							 varargs[0],
-							 DepLI, *TD);
-	      if (Offset == -1 || !CanCoerceMustAliasedValueToLoad(DepLI,
-								   LI->getType(),
-								   *TD))
-		return false;
-	      return true;
-	    }
-	    // If the clobbering value is a memset/memcpy/memmove, see if we can forward
-	    // a value on from it.
-	    if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Dep.getInst())) {
-	      int Offset = AnalyzeLoadFromClobberingMemInst(LI->getType(),
-							    LI->getPointerOperand(),
-							    DepMI, *TD);
-	      if (Offset == -1)
-		return false;
-	      return true; 
-	    }
-	    return false;
-	  }
-	  // If the load is def'd, just make sure we can coerce types.
-	  if (!Dep.isDef()) {
-	    return false;
-	  }
-	  Instruction *DepInst = Dep.getInst();
-	  if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
-	    Value *StoredVal = DepSI->getValueOperand();
-
-	    // The store and load are to a must-aliased pointer, but they may not
-	    // actually have the same type.  See if we know how to reuse the stored
-	    // value (depending on its type).
-	    if (StoredVal->getType() != LI->getType()) {
-	      if (!TD || !CanCoerceMustAliasedValueToLoad(StoredVal, LI->getType(), *TD))
-		return false;
-	    }
-	    return true;
-	  }
-	  if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInst)) {
-	    // The loads are of a must-aliased pointer, but they may not
-	    // actually have the same type.  See if we know how to reuse the stored
-	    // value (depending on its type).
-	    if (DepLI->getType() != LI->getType()) {
-	      if (!TD || !CanCoerceMustAliasedValueToLoad(DepLI, LI->getType(), *TD))
-		return false;
-	    }
-	    return true;
-	  }	    
-	  //TODO: memintrisic case
-	  return false;
-	}
-	return true;
-      } else {
-	// Two stores are the same if they store the same value to the same place.
-	// TODO: Use lookup to valueize and store value of store
-	if (OE.isStore_ && OE.inst_.storeinst->getValueOperand() == inst_.storeinst->getValueOperand())
-	  return true;
-	return false;
-      }
-
-      return true;
-    }
-
+    virtual bool depequals(const Expression &other);
     bool nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
-			const MemoryExpression &OE) const {
+			const MemoryExpression &OE) const;
 
-      // Check our two caches.  Note that the caches do not cause us
-      // to lose any equivalences. 
-      // Because this is an optimistic value numbering, things do not
-      // become *more equivalent*, only less equivalent.
-      // As such, we only cache negative results, never positive ones
-      // Positive results may become negative results in cases where
-      // the congruence classes change
-
-
-      DepIQueryMap::key_type iCacheKey(std::make_pair(LI, OE.inst_.inst));
-      DepIQueryMap::const_iterator DII = depIQueryCache.find(iCacheKey);
-      if (DII != depIQueryCache.end()) {
-	DEBUG(dbgs() << "IDep query hit\n");
-	return DII->second;
-      }
-      DepBBQueryMap::key_type cacheKey(std::make_pair(std::make_pair(varargs[0], OE.varargs[0]), LI->getParent()));
-      DepBBQueryMap::const_iterator DQI = depQueryCache.find(cacheKey);
-      if (DQI != depQueryCache.end()) {
-	DEBUG(dbgs() << "Dep query hit\n");
-	return DQI->second;
-      }
-      // Check to see if all of the other deps have the same congruence class
-      // as the load we are asking about, or we can reuse them.
-      CongruenceClass *OIClass = valueToClass[OE.inst_.loadinst];
-      if (!OIClass)
-	return false;
-
-      // We should mark the non-local ones so we can try to PRE them later
-      SmallVector<NonLocalDepResult, 64> Deps;
-      AliasAnalysis::Location Loc = AA->getLocation(LI);
-      // TODO: This should be safe right now (getLocation rips the type info out
-      // before we change it, etc).  It may become unsafe in the future.
-      // We should change the interface and code a bit to make this
-      // explicit
-      // Note that this catches significantly more loads, because we
-      // avoid phi translation failures
-      // 
-      Loc.Ptr = varargs[0];
-      Deps = locDepCache.lookup(LI);
-      if (Deps.size() == 0)  {
-	MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
-	locDepCache[LI] = Deps;
-      }
-      // If we had to process more than one hundred blocks to find the
-      // dependencies, this load isn't worth worrying about.  Optimizing
-      // it will be too expensive.
-      unsigned NumDeps = Deps.size();
-      if (NumDeps > 100) {
-	depIQueryCache[iCacheKey] = false;
-	depQueryCache[cacheKey] = false;
-	return false;
-      }
-      if (NumDeps == 1 &&
-	  !Deps[0].getResult().isDef() && !Deps[0].getResult().isClobber()) {
-	DEBUG(
-	      dbgs() << "GVN: non-local load ";
-	      WriteAsOperand(dbgs(), LI);
-	      dbgs() << " has unknown dependencies\n";
-	      );
-	depIQueryCache[iCacheKey] = false;
-	depQueryCache[cacheKey] = false;
-	return false;
-      }
-      for (unsigned i = 0, e = NumDeps; i != e; ++i) {
-	BasicBlock *DepBB = Deps[i].getBB();
-
-	// We may have dependencies memdep has discovered but are in
-	// unreachable blocks. They don't matter (block reachability
-	// for things reaching this block should be completely
-	// calculated by the time we get here)
-	if (!reachableBlocks.count(DepBB))
-	  continue;
-	MemDepResult DepInfo = Deps[i].getResult();
-	if (!DepInfo.isDef() && !DepInfo.isClobber()) {
-	  depIQueryCache[iCacheKey] = false;
-	  depQueryCache[cacheKey] = false;
-	  return false;
-	}
-	// Make sure all dependencies are in the same congruence
-	// class
-	// TODO: need to be in the same congruence class or they need to be fixable.
-	CongruenceClass *DepClass = valueToClass[DepInfo.getInst()];
-	// It could be an unreachable dependency MemDep doesn't know
-	// about.
-	// If this is the case, it will still have the InitialClass as
-	// its congruence class
-	if (DepClass != OIClass) {
-	  depQueryCache[cacheKey] = false;
-	  return false;
-	}
-
-	if (DepInfo.isClobber()) {
-	  // The address being loaded in this non-local block may
-	  // not be the same as the pointer operand of the load
-	  // if PHI translation occurs.  Make sure to consider
-	  // the right address.
-	  Value *Address = Deps[i].getAddress();
-
-	  // If the dependence is to a store that writes to a
-	  // superset of the bits read by the load, we can
-	  // extract the bits we need for the load from the
-	  // stored value.
-	  if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInfo.getInst())) {
-	    if (TD && Address) {
-	      int Offset = AnalyzeLoadFromClobberingStore(LI->getType(), Address,
-							  DepSI, *TD);
-	      if (Offset == -1) {
-		depIQueryCache[iCacheKey] = false;
-		depQueryCache[cacheKey] = false;
-		return false;
-	      }
-	    }
-	  }
-
-	  // Check to see if we have something like this:
-	  //    load i32* P
-	  //    load i8* (P+1)
-	  // if we have this, we can replace the later with an
-	  // extraction from the former.
-	  if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInfo.getInst())) {
-	    // If this is a clobber and L is the first
-	    // instruction in its block, then we have the first
-	    // instruction in the entry block.
-	    if (DepLI != LI && Address && TD) {
-	      int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
-							 LI->getPointerOperand(),
-							 DepLI, *TD);
-
-	      if (Offset == -1) {
-		depIQueryCache[iCacheKey] = false;
-		depQueryCache[cacheKey] = false;
-		return false;
-	      }
-	    }
-	  }
-	  // If the clobbering value is a memset/memcpy/memmove, see if we can forward
-	  // a value on from it.
-	  if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Dep.getInst())) {
-	    int Offset = AnalyzeLoadFromClobberingMemInst(LI->getType(),
-							  LI->getPointerOperand(),
-							  DepMI, *TD);
-	    if (Offset != -1) {
-	      depIQueryCache[iCacheKey] = false;
-	      depQueryCache[cacheKey] = false;
-	      return false;
-	    }
-	  }
-	  depIQueryCache[iCacheKey] = false;
-	  depQueryCache[cacheKey] = false;
-	  return false;
-	}
-	
-	// DepInfo.isDef() here
-	Instruction *DepInst = DepInfo.getInst();
-
-	if (StoreInst *S = dyn_cast<StoreInst>(DepInst)) {
-	  // Reject loads and stores that are to the same address
-	  // but are of different types if we have to.
-	  if (S->getValueOperand()->getType() != LI->getType()) {
-	    // If the stored value is larger or equal to the
-	    // loaded value, we can reuse it.
-	    if (TD == 0 || !CanCoerceMustAliasedValueToLoad(S->getValueOperand(),
-							    LI->getType(), *TD)) {
-	      depIQueryCache[iCacheKey] = false;
-	      depQueryCache[cacheKey] = false;
-	      return false;
-	    }
-	  }
-	  continue;
-	}
-	// TODO: Better coercion
-	if (LoadInst *LD = dyn_cast<LoadInst>(DepInst)) {
-	  // If the types mismatch and we can't handle it, reject reuse of the load.
-	  if (LD->getType() != LI->getType()) {
-	    // If the stored value is larger or equal to the loaded value, we can
-	    // reuse it.
-	    if (TD == 0 || !CanCoerceMustAliasedValueToLoad(LD, LI->getType(),*TD)) {
-	      depIQueryCache[iCacheKey] = false;
-	      depQueryCache[cacheKey] = false;
-	      return false;
-	    }
-	  }
-	  continue;
-	}
-	depIQueryCache[iCacheKey] = false;
-	depQueryCache[cacheKey] = false;
-	return false;
-      }
-      // If we got through all the dependencies, we are good to go
-      return true;
-    }
 
     virtual hash_code getHashValue() const {
       return hash_combine(etype_, opcode_,
@@ -1181,10 +833,12 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
       return true;
     }
 
-    VariableExpression():Expression(ExpressionTypeVariable), variableValue_(NULL) { }
+    VariableExpression():Expression(ExpressionTypeVariable),
+			 variableValue_(NULL) { }
 
 
-    VariableExpression(Value *variableValue):Expression(ExpressionTypeVariable), variableValue_(variableValue) { }
+    VariableExpression(Value *variableValue):Expression(ExpressionTypeVariable),
+					     variableValue_(variableValue) { }
     virtual hash_code getHashValue() const {
       return hash_combine(etype_, variableValue_->getType(), variableValue_);
     }
@@ -1225,10 +879,12 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
       return true;
     }
 
-    ConstantExpression():Expression(ExpressionTypeConstant), constantValue_(NULL) { }
+    ConstantExpression():Expression(ExpressionTypeConstant),
+			 constantValue_(NULL) { }
 
 
-    ConstantExpression(Constant *constantValue):Expression(ExpressionTypeConstant), constantValue_(constantValue) { }
+    ConstantExpression(Constant *constantValue):Expression(ExpressionTypeConstant),
+						constantValue_(constantValue) { }
     virtual hash_code getHashValue() const {
       return hash_combine(etype_, constantValue_->getType(), constantValue_);
     }
@@ -1276,8 +932,6 @@ namespace {
       }
       static unsigned getHashValue(const Expression *V) {
         return static_cast<unsigned>(V->getHashValue());
-
-
       }
       static bool isEqual(Expression *LHS, const Expression *RHS) {
         if (LHS == RHS)
@@ -1422,6 +1076,364 @@ namespace {
   char GVN::ID = 0;
 }
 
+bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
+				      const MemoryExpression &OE) const {
+  
+  // Check our two caches.  Note that the caches do not cause us
+  // to lose any equivalences. 
+  // Because this is an optimistic value numbering, things do not
+  // become *more equivalent*, only less equivalent.
+  // As such, we only cache negative results, never positive ones
+  // Positive results may become negative results in cases where
+  // the congruence classes change
+  
+  
+  DepIQueryMap::key_type iCacheKey(std::make_pair(LI, OE.inst_.inst));
+  DepIQueryMap::const_iterator DII = depIQueryCache.find(iCacheKey);
+  if (DII != depIQueryCache.end()) {
+    DEBUG(dbgs() << "IDep query hit\n");
+    return DII->second;
+  }
+  
+  DepBBQueryMap::key_type cacheKey(std::make_pair(std::make_pair(varargs[0],
+								 OE.varargs[0]),
+						  LI->getParent()));
+  DepBBQueryMap::const_iterator DQI = depQueryCache.find(cacheKey);
+  if (DQI != depQueryCache.end()) {
+    DEBUG(dbgs() << "Dep query hit\n");
+    return DQI->second;
+  }
+  // Check to see if all of the other deps have the same congruence class
+  // as the load we are asking about, or we can reuse them.
+  CongruenceClass *OIClass = valueToClass[OE.inst_.loadinst];
+  if (!OIClass)
+    return false;
+  
+  // We should mark the non-local ones so we can try to PRE them later
+  SmallVector<NonLocalDepResult, 64> Deps;
+  AliasAnalysis::Location Loc = AA->getLocation(LI);
+  // TODO: This should be safe right now (getLocation rips the type info out
+  // before we change it, etc).  It may become unsafe in the future.
+  // We should change the interface and code a bit to make this
+  // explicit
+  // Note that this catches significantly more loads, because we
+  // avoid phi translation failures
+  // 
+  Loc.Ptr = varargs[0];
+  Deps = locDepCache.lookup(LI);
+  if (Deps.size() == 0)  {
+    MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
+    locDepCache[LI] = Deps;
+  }
+  // If we had to process more than one hundred blocks to find the
+  // dependencies, this load isn't worth worrying about.  Optimizing
+  // it will be too expensive.
+  unsigned NumDeps = Deps.size();
+  if (NumDeps > 100) {
+    depIQueryCache[iCacheKey] = false;
+    depQueryCache[cacheKey] = false;
+    return false;
+  }
+  if (NumDeps == 1 &&
+      !Deps[0].getResult().isDef() && !Deps[0].getResult().isClobber()) {
+    DEBUG(
+	  dbgs() << "GVN: non-local load ";
+	  WriteAsOperand(dbgs(), LI);
+	  dbgs() << " has unknown dependencies\n";
+	  );
+    depIQueryCache[iCacheKey] = false;
+    depQueryCache[cacheKey] = false;
+    return false;
+  }
+  for (unsigned i = 0, e = NumDeps; i != e; ++i) {
+    BasicBlock *DepBB = Deps[i].getBB();
+    
+    // We may have dependencies memdep has discovered but are in
+    // unreachable blocks. They don't matter (block reachability
+    // for things reaching this block should be completely
+    // calculated by the time we get here)
+    if (!reachableBlocks.count(DepBB))
+      continue;
+    MemDepResult DepInfo = Deps[i].getResult();
+    if (!DepInfo.isDef() && !DepInfo.isClobber()) {
+      depIQueryCache[iCacheKey] = false;
+      depQueryCache[cacheKey] = false;
+      return false;
+    }
+    // Make sure all dependencies are in the same congruence
+    // class
+    // TODO: need to be in the same congruence class or they need to be fixable.
+    CongruenceClass *DepClass = valueToClass[DepInfo.getInst()];
+    // It could be an unreachable dependency MemDep doesn't know
+    // about.
+    // If this is the case, it will still have the InitialClass as
+    // its congruence class
+    if (DepClass != OIClass) {
+      depQueryCache[cacheKey] = false;
+      return false;
+    }
+    
+    if (DepInfo.isClobber()) {
+      // The address being loaded in this non-local block may
+      // not be the same as the pointer operand of the load
+      // if PHI translation occurs.  Make sure to consider
+      // the right address.
+      Value *Address = Deps[i].getAddress();
+      
+      // If the dependence is to a store that writes to a
+      // superset of the bits read by the load, we can
+      // extract the bits we need for the load from the
+      // stored value.
+      if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInfo.getInst())) {
+	if (TD && Address) {
+	  int Offset = AnalyzeLoadFromClobberingStore(LI->getType(), Address,
+						      DepSI, *TD);
+	  if (Offset == -1) {
+	    depIQueryCache[iCacheKey] = false;
+	    depQueryCache[cacheKey] = false;
+	    return false;
+	  }
+	}
+      }
+      
+      // Check to see if we have something like this:
+      //    load i32* P
+      //    load i8* (P+1)
+      // if we have this, we can replace the later with an
+      // extraction from the former.
+      if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInfo.getInst())) {
+	// If this is a clobber and L is the first
+	// instruction in its block, then we have the first
+	// instruction in the entry block.
+	if (DepLI != LI && Address && TD) {
+	  int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
+						     LI->getPointerOperand(),
+						     DepLI, *TD);
+	  
+	  if (Offset == -1) {
+	    depIQueryCache[iCacheKey] = false;
+	    depQueryCache[cacheKey] = false;
+	    return false;
+	  }
+	}
+      }
+      // If the clobbering value is a memset/memcpy/memmove, see if we can forward
+      // a value on from it.
+      if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Dep.getInst())) {
+	int Offset = AnalyzeLoadFromClobberingMemInst(LI->getType(),
+						      LI->getPointerOperand(),
+						      DepMI, *TD);
+	if (Offset != -1) {
+	  depIQueryCache[iCacheKey] = false;
+	  depQueryCache[cacheKey] = false;
+	  return false;
+	}
+      }
+      depIQueryCache[iCacheKey] = false;
+      depQueryCache[cacheKey] = false;
+      return false;
+    }
+    
+    // DepInfo.isDef() here
+    Instruction *DepInst = DepInfo.getInst();
+    
+    if (StoreInst *S = dyn_cast<StoreInst>(DepInst)) {
+      // Reject loads and stores that are to the same address
+      // but are of different types if we have to.
+      if (S->getValueOperand()->getType() != LI->getType()) {
+	// If the stored value is larger or equal to the
+	// loaded value, we can reuse it.
+	if (TD == 0 || !CanCoerceMustAliasedValueToLoad(S->getValueOperand(),
+							LI->getType(), *TD)) {
+	  depIQueryCache[iCacheKey] = false;
+	  depQueryCache[cacheKey] = false;
+	  return false;
+	}
+      }
+      continue;
+    }
+    // TODO: Better coercion
+    if (LoadInst *LD = dyn_cast<LoadInst>(DepInst)) {
+      // If the types mismatch and we can't handle it, reject reuse of the load.
+      if (LD->getType() != LI->getType()) {
+	// If the stored value is larger or equal to the loaded value, we can
+	// reuse it.
+	if (TD == 0 || !CanCoerceMustAliasedValueToLoad(LD, LI->getType(),*TD)) {
+	  depIQueryCache[iCacheKey] = false;
+	  depQueryCache[cacheKey] = false;
+	  return false;
+	}
+      }
+      continue;
+    }
+    depIQueryCache[iCacheKey] = false;
+    depQueryCache[cacheKey] = false;
+    return false;
+  }
+  // If we got through all the dependencies, we are good to go
+  return true;
+}
+
+bool MemoryExpression::depequals(const Expression &other)
+{
+  const MemoryExpression &OE = cast<MemoryExpression>(other);
+  if (!isStore_) {
+    LoadInst *LI = inst_.loadinst;
+    Instruction *OI = OE.inst_.inst;
+    
+    if (LI != OI) {
+      MemDepResult Dep = MD->getDependency(LI);
+      if (Dep.isNonLocal()) {
+	nonLocal_ = true;
+	return nonLocalEquals(LI, Dep, OE);
+      }
+      // If we weren't dependent on the other load, they aren't equal.
+      if (Dep.getInst() != OI)
+	return false;
+      // If we are dependent, but it's not a straight def, see if they can be made equal.
+      if (Dep.isClobber() && TD) {
+	if (StoreInst *DepSI = dyn_cast<StoreInst>(Dep.getInst())) {
+	  int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
+						      varargs[0],
+						      DepSI, *TD);
+	  if (Offset == -1 || !CanCoerceMustAliasedValueToLoad(DepSI->getValueOperand(),
+							       LI->getType(),
+							       *TD))
+	    return false;
+	  return true;
+	}
+	if (LoadInst *DepLI = dyn_cast<LoadInst>(Dep.getInst())) {
+	  int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
+						     varargs[0],
+						     DepLI, *TD);
+	  if (Offset == -1 || !CanCoerceMustAliasedValueToLoad(DepLI,
+							       LI->getType(),
+							       *TD))
+	    return false;
+	  return true;
+	}
+	// If the clobbering value is a memset/memcpy/memmove, see if we can forward
+	// a value on from it.
+	if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Dep.getInst())) {
+	  int Offset = AnalyzeLoadFromClobberingMemInst(LI->getType(),
+							LI->getPointerOperand(),
+							DepMI, *TD);
+	  if (Offset == -1)
+	    return false;
+	  return true; 
+	}
+	return false;
+      }
+      // If the load is def'd, just make sure we can coerce types.
+      if (!Dep.isDef()) {
+	return false;
+      }
+      Instruction *DepInst = Dep.getInst();
+      if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
+	Value *StoredVal = DepSI->getValueOperand();
+	
+	// The store and load are to a must-aliased pointer, but they may not
+	// actually have the same type.  See if we know how to reuse the stored
+	// value (depending on its type).
+	if (StoredVal->getType() != LI->getType()) {
+	  if (!TD || !CanCoerceMustAliasedValueToLoad(StoredVal, LI->getType(), *TD))
+	    return false;
+	}
+	return true;
+      }
+      if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInst)) {
+	// The loads are of a must-aliased pointer, but they may not
+	// actually have the same type.  See if we know how to reuse the stored
+	// value (depending on its type).
+	if (DepLI->getType() != LI->getType()) {
+	  if (!TD || !CanCoerceMustAliasedValueToLoad(DepLI, LI->getType(), *TD))
+	    return false;
+	}
+	return true;
+      }	    
+      //TODO: memintrisic case
+      return false;
+    }
+    return true;
+  } else {
+    // Two stores are the same if they store the same value to the same place.
+    // TODO: Use lookup to valueize and store value of store
+    if (OE.isStore_ && OE.inst_.storeinst->getValueOperand() == inst_.storeinst->getValueOperand())
+      return true;
+    return false;
+  }
+  
+  return true;
+}
+
+bool CallExpression::depequals(const Expression &other) {
+  const CallExpression &OE = cast<CallExpression>(other);
+  // Given the same arguments, two calls are equal if the dependency checker says one is dependent
+  // on the other
+  if (callinst_ != OE.callinst_) {
+    MemDepResult local_dep = MD->getDependency(callinst_);
+    if (!local_dep.isDef() && !local_dep.isNonLocal()) {
+      return false;
+    }
+    if (local_dep.isDef()) {
+      CallInst* local_cdep = cast<CallInst>(local_dep.getInst());
+      if (local_cdep != OE.callinst_)
+	return false;
+    } else {
+      // True if all of the dependencies are either transparent or loads
+      bool allTransparent = true;
+      // Non-local case.
+      const MemoryDependenceAnalysis::NonLocalDepInfo &deps =
+	MD->getNonLocalCallDependency(callinst_);
+      CallInst* cdep = 0;
+      CongruenceClass *cclass = valueToClass[OE.callinst_];
+      assert(cclass != NULL && "Somehow got a call instruction without a congruence class into the expressionToClass mapping");
+      
+      // Check to see if all non local dependencies are equal to
+      // the other call or if all of them are in the same
+      // congruence class as the other call instruction
+      for (unsigned i = 0, e = deps.size(); i != e; ++i) {
+	const NonLocalDepEntry *I = &deps[i];
+	
+	if (I->getResult().isNonLocal())
+	  continue;
+	
+	// Ignore clobbers by loads, since they have no impact on the call itself.
+	if (I->getResult().isClobber() && isa<LoadInst>(I->getResult().getInst()))
+	  continue;
+	
+	allTransparent = false;
+	if (!I->getResult().isDef() || cdep != 0) {
+	  cdep = 0;
+	  break;
+	}
+	// We need to ensure that all dependencies are in the same
+	// congruence class as the other call instruction
+	CallInst *NonLocalDepCall = dyn_cast<CallInst>(I->getResult().getInst());
+	if (NonLocalDepCall) {
+	  if (!cdep) {
+	    if (NonLocalDepCall == OE.callinst_ || valueToClass[NonLocalDepCall] == cclass)
+	      cdep = NonLocalDepCall;
+	    else
+	      break;
+	  } else {
+	    CongruenceClass *NLDPClass = valueToClass[NonLocalDepCall];
+	    if (cclass != NLDPClass) {
+	      cdep = 0;
+	      break;
+	    }
+	  }
+	  continue;
+	}
+	cdep = 0;
+	break;
+      }
+      if (!cdep && !allTransparent)
+	return false;
+    }
+  }
+  return true;
+}
 
 // createGVNPass - The public interface to this file...
 FunctionPass *llvm::createGVNPass(bool noLoads) {
