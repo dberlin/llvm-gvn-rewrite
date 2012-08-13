@@ -90,9 +90,9 @@ using namespace PatternMatch;
 //        Mark instructions in block as touched
 //      else if we made a new reachable edge to a block
 //        Mark phi nodes in block as touched.
-//      
+//
 //      Propagate edge based equalities to newly reachable edge
-//   else 
+//   else
 //     Perform symbolic evaluation on the instruction
 //     Lookup a congruence class for the symbolically evaluated instruction
 //     If we didn't find a congruence class
@@ -116,7 +116,7 @@ using namespace PatternMatch;
 
 // Large TODO list
 // 1. Make PRE a little saner
-// 2. Fix pointer dependency caching in memdep 
+// 2. Fix pointer dependency caching in memdep
 // 3. Use load + store value numbering + iteration, instead of
 // equality hacks.
 
@@ -369,18 +369,18 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     Value *value;
     bool operator <(const ValueDFS &other) const {
       if (dfs_in < other.dfs_in)
-	return true;
+        return true;
       else if (dfs_in == other.dfs_in)
-	{
-	  if (dfs_out < other.dfs_out)
-	    return true;
-	  else if (dfs_out == other.dfs_out)
-	    return localnum < other.localnum;
-	}
+        {
+          if (dfs_out < other.dfs_out)
+            return true;
+          else if (dfs_out == other.dfs_out)
+            return localnum < other.localnum;
+        }
       return false;
     }
   };
-    
+
   // Congruence classes represent the set of expressions/instructions
   // that are all the same *during some scope in the function*.
   // It is very slightly flow-sensitive.
@@ -391,14 +391,14 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
   // For any tuple (Value, BB) in the members set, it is correct to
   // assume the congruence class is represented by Value in all blocks
   // dominated by BB
-  
+
   // Every congruence class has a leader, and the leader is used to
   // symbolize instructions in a canonical way (IE every operand of an
   // instruction that is a member of the same congruence class will
   // always be replaced with leader during symbolization).
   // Each congruence class also has a canonical value expression,
   // though the expression may be null.  The expression is simply an
-  // easy 
+  // easy
   struct CongruenceClass {
     static uint32_t nextCongruenceNum;
     uint32_t id;
@@ -409,10 +409,10 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     DenseSet<std::pair<Value*, BasicBlock*> > members;
     bool dead;
     explicit CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0),
-			       dead(false) {};
-    CongruenceClass(Value *Leader, Expression *E):id(nextCongruenceNum++), 
-						  leader(Leader), expression(E),
-						  dead(false) {};
+                               dead(false) {};
+    CongruenceClass(Value *Leader, Expression *E):id(nextCongruenceNum++),
+                                                  leader(Leader), expression(E),
+                                                  dead(false) {};
   };
 
   DenseMap<Value*, CongruenceClass*> valueToClass;
@@ -467,7 +467,7 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
       if (opcode_ == ~0U || opcode_ == ~1U)
         return true;
       if (etype_ != other.etype_)
-	return false;
+        return false;
       return equals(other);
     }
 
@@ -535,14 +535,14 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
       if (type_ != OE.type_)
         return false;
       if (varargs != OE.varargs)
-	return false;
+        return false;
 
       return true;
     }
     virtual void print(raw_ostream &OS) {
       OS << "{etype = " << etype_ << ", opcode = " << opcode_ << ", varargs = {";
       for (unsigned i = 0, e = varargs.size(); i != e; ++i) {
-	OS << "[" << i << "] = " << varargs[i] << "  ";
+        OS << "[" << i << "] = " << varargs[i] << "  ";
       }
       OS << "}  }";
     }
@@ -584,13 +584,13 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     virtual bool equals(const Expression &other) const {
       // Two calls are never the same if we don't have memory dependence info
       if (!MD)
-	return false;
+        return false;
       const CallExpression &OE = cast<CallExpression>(other);
       if (type_ != OE.type_)
         return false;
       // Calls are unequal unless they have the same arguments
       if (varargs != OE.varargs)
-	return false;
+        return false;
       return true;
     }
     virtual bool depequals(const Expression &other);
@@ -604,7 +604,7 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     virtual void print(raw_ostream &OS) {
       OS << "{etype = " << etype_ << ", opcode = " << opcode_ << ", varargs = {";
       for (unsigned i = 0, e = varargs.size(); i != e; ++i) {
-	OS << "[" << i << "] = " << varargs[i] << "  ";
+        OS << "[" << i << "] = " << varargs[i] << "  ";
       }
       OS << "}";
       OS << " represents call at " << callinst_;
@@ -635,7 +635,7 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     bool hadNonLocal() const {
       return nonLocal_;
     }
-    
+
     bool isStore() const {
       return isStore_;
     }
@@ -674,16 +674,16 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     virtual bool equals(const Expression &other) const {
       // Two loads/stores are never the same if we don't have memory dependence info
       if (!MD)
-	return false;
+        return false;
       const MemoryExpression &OE = cast<MemoryExpression>(other);
       if (varargs != OE.varargs)
-	return false;
+        return false;
       return true;
     }
 
     virtual bool depequals(const Expression &other);
     bool nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
-			const MemoryExpression &OE) const;
+                        const MemoryExpression &OE) const;
 
 
     virtual hash_code getHashValue() const {
@@ -722,9 +722,9 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
       if (type_ != OE.type_)
         return false;
       if (varargs != OE.varargs)
-	return false;
+        return false;
       if (intargs != OE.intargs)
-	return false;
+        return false;
 
       return true;
     }
@@ -738,11 +738,11 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     virtual void print(raw_ostream &OS) {
       OS << "{etype = " << etype_ << ", opcode = " << opcode_ << ", varargs = {";
       for (unsigned i = 0, e = varargs.size(); i != e; ++i) {
-	OS << "[" << i << "] = " << varargs[i] << "  ";
+        OS << "[" << i << "] = " << varargs[i] << "  ";
       }
       OS << "}, intargs = {";
       for (unsigned i = 0, e = intargs.size(); i != e; ++i) {
-	OS << "[" << i << "] = " << intargs[i] << "  ";
+        OS << "[" << i << "] = " << intargs[i] << "  ";
       }
       OS << "}  }";
     }
@@ -774,11 +774,11 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     virtual bool equals(const Expression &other) const {
       const PHIExpression &OE = cast<PHIExpression>(other);
       if (bb_ != OE.bb_)
-	return false;
+        return false;
       if (type_ != OE.type_)
         return false;
       if (varargs != OE.varargs)
-	return false;
+        return false;
       return true;
     }
 
@@ -799,7 +799,7 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     virtual void print(raw_ostream &OS) {
       OS << "{etype = " << etype_ << ", opcode = " << opcode_ << ", varargs = {";
       for (unsigned i = 0, e = varargs.size(); i != e; ++i) {
-	OS << "[" << i << "] = " << varargs[i] << "  ";
+        OS << "[" << i << "] = " << varargs[i] << "  ";
       }
       OS << "}, bb = " << bb_ << "  }";
     }
@@ -829,16 +829,16 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     virtual bool equals(const Expression &other) const {
       const VariableExpression &OC = cast<VariableExpression>(other);
       if (variableValue_ != OC.variableValue_)
-	return false;
+        return false;
       return true;
     }
 
     VariableExpression():Expression(ExpressionTypeVariable),
-			 variableValue_(NULL) { }
+                         variableValue_(NULL) { }
 
 
     VariableExpression(Value *variableValue):Expression(ExpressionTypeVariable),
-					     variableValue_(variableValue) { }
+                                             variableValue_(variableValue) { }
     virtual hash_code getHashValue() const {
       return hash_combine(etype_, variableValue_->getType(), variableValue_);
     }
@@ -875,16 +875,16 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     virtual bool equals(const Expression &other) const {
       const ConstantExpression &OC = cast<ConstantExpression>(other);
       if (constantValue_ != OC.constantValue_)
-	return false;
+        return false;
       return true;
     }
 
     ConstantExpression():Expression(ExpressionTypeConstant),
-			 constantValue_(NULL) { }
+                         constantValue_(NULL) { }
 
 
     ConstantExpression(Constant *constantValue):Expression(ExpressionTypeConstant),
-						constantValue_(constantValue) { }
+                                                constantValue_(constantValue) { }
     virtual hash_code getHashValue() const {
       return hash_combine(etype_, constantValue_->getType(), constantValue_);
     }
@@ -918,7 +918,7 @@ namespace {
     DenseSet<Instruction*> touchedInstructions;
     DenseMap<Instruction*, uint32_t> processedCount;
     std::vector<CongruenceClass*> congruenceClass;
-    
+
     struct ComparingExpressionInfo {
       static inline Expression* getEmptyKey() {
         intptr_t Val = -1;
@@ -964,7 +964,7 @@ namespace {
     Expression *createInsertValueExpression(InsertValueInst*);
     Expression *uniquifyExpression(Expression*);
     Expression *createCmpExpression(unsigned, Type*,CmpInst::Predicate,
-				    Value*, Value*);
+                                    Value*, Value*);
 
   public:
     static char ID; // Pass identification, replacement for typeid
@@ -984,13 +984,13 @@ namespace {
     void handleNewInstruction(Instruction*);
     void markUsersTouched(Value*);
     Value *CoerceAvailableValueToLoadType(Value*,Type*,Instruction*,const TargetData &);
-    
+
     Value *GetStoreValueForLoad(Value*, unsigned, Type*, Instruction*,
-				const TargetData&);
+                                const TargetData&);
     Value *GetLoadValueForLoad(LoadInst*, unsigned, Type*, Instruction*,
-			       const TargetData&);
+                               const TargetData&);
     Value *GetMemInstValueForLoad(MemIntrinsic*, unsigned, Type*,
-				  Instruction*, const TargetData&);
+                                  Instruction*, const TargetData&);
 
   private:
     // Congruence class handling
@@ -1010,24 +1010,23 @@ namespace {
     DenseSet<Instruction*> instrsToErase_;
     void markInstructionForDeletion(Instruction *I) {
       DEBUG(dbgs() << "Marking " << *I << " for deletion\n");
-      instrsToErase_.insert(I); 
+      instrsToErase_.insert(I);
       // CongruenceClass *CC = valueToClass.lookup(I);
       // assert (!CC || CC == InitialClass);
-      
       // valueToClass.erase(I);
     }
     void verifyRemoved(Instruction *I) {
       for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
-	if (!congruenceClass[i] || congruenceClass[i] == InitialClass
-	    || congruenceClass[i]->dead) 
-	  continue;
-	CongruenceClass *CC = congruenceClass[i];
-	assert (CC->leader != I && "Leader is messed up");
-	assert (CC->members.count(std::make_pair(I, I->getParent())) == 0
-		&& "Removed instruction still a member");
+        if (!congruenceClass[i] || congruenceClass[i] == InitialClass
+            || congruenceClass[i]->dead)
+          continue;
+        CongruenceClass *CC = congruenceClass[i];
+        assert (CC->leader != I && "Leader is messed up");
+        assert (CC->members.count(std::make_pair(I, I->getParent())) == 0
+                && "Removed instruction still a member");
       }
     }
-    
+
     // Elimination
     bool eliminateInstructions(Function &);
     void convertDenseToDFSOrdered(DenseSet<std::pair<Value*, BasicBlock*> >&, std::set<ValueDFS>&);
@@ -1049,7 +1048,7 @@ namespace {
     void propagateChangeInEdge(BasicBlock*);
     // Non-local load handling
     bool processNonLocalLoad(LoadInst*);
-    
+
     // List of critical edges to be split between iterations.
     SmallVector<std::pair<TerminatorInst*, unsigned>, 4> toSplit;
 
@@ -1080,27 +1079,25 @@ namespace {
 }
 
 bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
-				      const MemoryExpression &OE) const {
-  
+                                      const MemoryExpression &OE) const {
   // Check our two caches.  Note that the caches do not cause us
-  // to lose any equivalences. 
+  // to lose any equivalences.
   // Because this is an optimistic value numbering, things do not
   // become *more equivalent*, only less equivalent.
   // As such, we only cache negative results, never positive ones
   // Positive results may become negative results in cases where
   // the congruence classes change
-  
-  
+
   DepIQueryMap::key_type iCacheKey(std::make_pair(LI, OE.inst_.inst));
   DepIQueryMap::const_iterator DII = depIQueryCache.find(iCacheKey);
   if (DII != depIQueryCache.end()) {
     DEBUG(dbgs() << "IDep query hit\n");
     return DII->second;
   }
-  
+
   DepBBQueryMap::key_type cacheKey(std::make_pair(std::make_pair(varargs[0],
-								 OE.varargs[0]),
-						  LI->getParent()));
+                                                                 OE.varargs[0]),
+                                                  LI->getParent()));
   DepBBQueryMap::const_iterator DQI = depQueryCache.find(cacheKey);
   if (DQI != depQueryCache.end()) {
     DEBUG(dbgs() << "Dep query hit\n");
@@ -1111,7 +1108,7 @@ bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
   CongruenceClass *OIClass = valueToClass[OE.inst_.loadinst];
   if (!OIClass)
     return false;
-  
+
   // We should mark the non-local ones so we can try to PRE them later
   SmallVector<NonLocalDepResult, 64> Deps;
   AliasAnalysis::Location Loc = AA->getLocation(LI);
@@ -1121,7 +1118,6 @@ bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
   // explicit
   // Note that this catches significantly more loads, because we
   // avoid phi translation failures
-  // 
   Loc.Ptr = varargs[0];
   Deps = locDepCache.lookup(LI);
   if (Deps.size() == 0)  {
@@ -1141,17 +1137,17 @@ bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
   if (NumDeps == 1 &&
       !Deps[0].getResult().isDef() && !Deps[0].getResult().isClobber()) {
     DEBUG(
-	  dbgs() << "GVN: non-local load ";
-	  WriteAsOperand(dbgs(), LI);
-	  dbgs() << " has unknown dependencies\n";
-	  );
+          dbgs() << "GVN: non-local load ";
+          WriteAsOperand(dbgs(), LI);
+          dbgs() << " has unknown dependencies\n";
+          );
     depIQueryCache[iCacheKey] = false;
     depQueryCache[cacheKey] = false;
     return false;
   }
   for (unsigned i = 0, e = NumDeps; i != e; ++i) {
     BasicBlock *DepBB = Deps[i].getBB();
-    
+
     // We may have dependencies memdep has discovered but are in
     // unreachable blocks. They don't matter (block reachability
     // for things reaching this block should be completely
@@ -1176,85 +1172,85 @@ bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
       depQueryCache[cacheKey] = false;
       return false;
     }
-    
+
     if (DepInfo.isClobber()) {
       // The address being loaded in this non-local block may
       // not be the same as the pointer operand of the load
       // if PHI translation occurs.  Make sure to consider
       // the right address.
       Value *Address = Deps[i].getAddress();
-      
+
       // If the dependence is to a store that writes to a
       // superset of the bits read by the load, we can
       // extract the bits we need for the load from the
       // stored value.
       if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInfo.getInst())) {
-	if (TD && Address) {
-	  int Offset = AnalyzeLoadFromClobberingStore(LI->getType(), Address,
-						      DepSI, *TD);
-	  if (Offset == -1) {
-	    depIQueryCache[iCacheKey] = false;
-	    depQueryCache[cacheKey] = false;
-	    return false;
-	  }
-	  continue;
-	}
+        if (TD && Address) {
+          int Offset = AnalyzeLoadFromClobberingStore(LI->getType(), Address,
+                                                      DepSI, *TD);
+          if (Offset == -1) {
+            depIQueryCache[iCacheKey] = false;
+            depQueryCache[cacheKey] = false;
+            return false;
+          }
+          continue;
+        }
       }
-      
+
       // Check to see if we have something like this:
       //    load i32* P
       //    load i8* (P+1)
       // if we have this, we can replace the later with an
       // extraction from the former.
       if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInfo.getInst())) {
-	// If this is a clobber and L is the first
-	// instruction in its block, then we have the first
-	// instruction in the entry block.
-	if (DepLI != LI && Address && TD) {
-	  int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
-						     LI->getPointerOperand(),
-						     DepLI, *TD);
-	  if (Offset == -1) {
-	    depIQueryCache[iCacheKey] = false;
-	    depQueryCache[cacheKey] = false;
-	    return false;
-	  }
-	  continue;
-	}
+        // If this is a clobber and L is the first
+        // instruction in its block, then we have the first
+        // instruction in the entry block.
+        if (DepLI != LI && Address && TD) {
+          int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
+                                                     LI->getPointerOperand(),
+                                                     DepLI, *TD);
+          if (Offset == -1) {
+            depIQueryCache[iCacheKey] = false;
+            depQueryCache[cacheKey] = false;
+            return false;
+          }
+          continue;
+        }
       }
       // If the clobbering value is a memset/memcpy/memmove, see if we can forward
       // a value on from it.
       if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Dep.getInst())) {
-	int Offset = AnalyzeLoadFromClobberingMemInst(LI->getType(),
-						      LI->getPointerOperand(),
-						      DepMI, *TD);
-	if (Offset != -1) {
-	  depIQueryCache[iCacheKey] = false;
-	  depQueryCache[cacheKey] = false;
-	  return false;
-	}
-	continue;
+        int Offset = AnalyzeLoadFromClobberingMemInst(LI->getType(),
+                                                      LI->getPointerOperand(),
+                                                      DepMI, *TD);
+        if (Offset != -1) {
+          depIQueryCache[iCacheKey] = false;
+          depQueryCache[cacheKey] = false;
+          return false;
+        }
+        continue;
       }
       depIQueryCache[iCacheKey] = false;
       depQueryCache[cacheKey] = false;
       return false;
     }
-    
+
     // DepInfo.isDef() here
     Instruction *DepInst = DepInfo.getInst();
-    
+
     if (StoreInst *S = dyn_cast<StoreInst>(DepInst)) {
       // Reject loads and stores that are to the same address
       // but are of different types if we have to.
       if (S->getValueOperand()->getType() != LI->getType()) {
-	// If the stored value is larger or equal to the
-	// loaded value, we can reuse it.
-	if (TD == 0 || !CanCoerceMustAliasedValueToLoad(S->getValueOperand(),
-							LI->getType(), *TD)) {
-	  depIQueryCache[iCacheKey] = false;
-	  depQueryCache[cacheKey] = false;
-	  return false;
-	}
+        // If the stored value is larger or equal to the
+        // loaded value, we can reuse it.
+        if (TD == 0 || !CanCoerceMustAliasedValueToLoad(S->getValueOperand(),
+                                                        LI->getType(), *TD)) {
+          depIQueryCache[iCacheKey] = false;
+          depQueryCache[cacheKey] = false;
+          return false;
+        }
       }
       continue;
     }
@@ -1262,13 +1258,13 @@ bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
     if (LoadInst *LD = dyn_cast<LoadInst>(DepInst)) {
       // If the types mismatch and we can't handle it, reject reuse of the load.
       if (LD->getType() != LI->getType()) {
-	// If the stored value is larger or equal to the loaded value, we can
-	// reuse it.
-	if (TD == 0 || !CanCoerceMustAliasedValueToLoad(LD, LI->getType(),*TD)) {
-	  depIQueryCache[iCacheKey] = false;
-	  depQueryCache[cacheKey] = false;
-	  return false;
-	}
+        // If the stored value is larger or equal to the loaded value, we can
+        // reuse it.
+        if (TD == 0 || !CanCoerceMustAliasedValueToLoad(LD, LI->getType(),*TD)) {
+          depIQueryCache[iCacheKey] = false;
+          depQueryCache[cacheKey] = false;
+          return false;
+        }
       }
       continue;
     }
@@ -1286,77 +1282,77 @@ bool MemoryExpression::depequals(const Expression &other)
   if (!isStore_) {
     LoadInst *LI = inst_.loadinst;
     Instruction *OI = OE.inst_.inst;
-    
+
     if (LI != OI) {
       MemDepResult Dep = MD->getDependency(LI);
       if (Dep.isNonLocal()) {
-	nonLocal_ = true;
-	return nonLocalEquals(LI, Dep, OE);
+        nonLocal_ = true;
+        return nonLocalEquals(LI, Dep, OE);
       }
       // If we weren't dependent on the other load, they aren't equal.
       if (Dep.getInst() != OI)
-	return false;
+        return false;
       // If we are dependent, but it's not a straight def, see if they can be made equal.
       if (Dep.isClobber() && TD) {
-	if (StoreInst *DepSI = dyn_cast<StoreInst>(Dep.getInst())) {
-	  int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
-						      varargs[0],
-						      DepSI, *TD);
-	  if (Offset == -1 || !CanCoerceMustAliasedValueToLoad(DepSI->getValueOperand(),
-							       LI->getType(),
-							       *TD))
-	    return false;
-	  return true;
-	}
-	if (LoadInst *DepLI = dyn_cast<LoadInst>(Dep.getInst())) {
-	  int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
-						     varargs[0],
-						     DepLI, *TD);
-	  if (Offset == -1 || !CanCoerceMustAliasedValueToLoad(DepLI,
-							       LI->getType(),
-							       *TD))
-	    return false;
-	  return true;
-	}
-	// If the clobbering value is a memset/memcpy/memmove, see if we can forward
-	// a value on from it.
-	if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Dep.getInst())) {
-	  int Offset = AnalyzeLoadFromClobberingMemInst(LI->getType(),
-							LI->getPointerOperand(),
-							DepMI, *TD);
-	  if (Offset == -1)
-	    return false;
-	  return true; 
-	}
-	return false;
+        if (StoreInst *DepSI = dyn_cast<StoreInst>(Dep.getInst())) {
+          int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
+                                                      varargs[0],
+                                                      DepSI, *TD);
+          if (Offset == -1 || !CanCoerceMustAliasedValueToLoad(DepSI->getValueOperand(),
+                                                               LI->getType(),
+                                                               *TD))
+            return false;
+          return true;
+        }
+        if (LoadInst *DepLI = dyn_cast<LoadInst>(Dep.getInst())) {
+          int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
+                                                     varargs[0],
+                                                     DepLI, *TD);
+          if (Offset == -1 || !CanCoerceMustAliasedValueToLoad(DepLI,
+                                                               LI->getType(),
+                                                               *TD))
+            return false;
+          return true;
+        }
+        // If the clobbering value is a memset/memcpy/memmove, see if we can forward
+        // a value on from it.
+        if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Dep.getInst())) {
+          int Offset = AnalyzeLoadFromClobberingMemInst(LI->getType(),
+                                                        LI->getPointerOperand(),
+                                                        DepMI, *TD);
+          if (Offset == -1)
+            return false;
+          return true;
+        }
+        return false;
       }
       // If the load is def'd, just make sure we can coerce types.
       if (!Dep.isDef()) {
-	return false;
+        return false;
       }
       Instruction *DepInst = Dep.getInst();
       if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
-	Value *StoredVal = DepSI->getValueOperand();
-	
-	// The store and load are to a must-aliased pointer, but they may not
-	// actually have the same type.  See if we know how to reuse the stored
-	// value (depending on its type).
-	if (StoredVal->getType() != LI->getType()) {
-	  if (!TD || !CanCoerceMustAliasedValueToLoad(StoredVal, LI->getType(), *TD))
-	    return false;
-	}
-	return true;
+        Value *StoredVal = DepSI->getValueOperand();
+
+        // The store and load are to a must-aliased pointer, but they may not
+        // actually have the same type.  See if we know how to reuse the stored
+        // value (depending on its type).
+        if (StoredVal->getType() != LI->getType()) {
+          if (!TD || !CanCoerceMustAliasedValueToLoad(StoredVal, LI->getType(), *TD))
+            return false;
+        }
+        return true;
       }
       if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInst)) {
-	// The loads are of a must-aliased pointer, but they may not
-	// actually have the same type.  See if we know how to reuse the stored
-	// value (depending on its type).
-	if (DepLI->getType() != LI->getType()) {
-	  if (!TD || !CanCoerceMustAliasedValueToLoad(DepLI, LI->getType(), *TD))
-	    return false;
-	}
-	return true;
-      }	    
+        // The loads are of a must-aliased pointer, but they may not
+        // actually have the same type.  See if we know how to reuse the stored
+        // value (depending on its type).
+        if (DepLI->getType() != LI->getType()) {
+          if (!TD || !CanCoerceMustAliasedValueToLoad(DepLI, LI->getType(), *TD))
+            return false;
+        }
+        return true;
+      }
       //TODO: memintrinsic case
       return false;
     }
@@ -1368,7 +1364,7 @@ bool MemoryExpression::depequals(const Expression &other)
       return true;
     return false;
   }
-  
+
   return true;
 }
 
@@ -1384,58 +1380,58 @@ bool CallExpression::depequals(const Expression &other) {
     if (local_dep.isDef()) {
       CallInst* local_cdep = cast<CallInst>(local_dep.getInst());
       if (local_cdep != OE.callinst_)
-	return false;
+        return false;
     } else {
       // True if all of the dependencies are either transparent or loads
       bool allTransparent = true;
       // Non-local case.
       const MemoryDependenceAnalysis::NonLocalDepInfo &deps =
-	MD->getNonLocalCallDependency(callinst_);
+        MD->getNonLocalCallDependency(callinst_);
       CallInst* cdep = 0;
       CongruenceClass *cclass = valueToClass[OE.callinst_];
       assert(cclass != NULL && "Somehow got a call instruction without a congruence class into the expressionToClass mapping");
-      
+
       // Check to see if all non local dependencies are equal to
       // the other call or if all of them are in the same
       // congruence class as the other call instruction
       for (unsigned i = 0, e = deps.size(); i != e; ++i) {
-	const NonLocalDepEntry *I = &deps[i];
-	
-	if (I->getResult().isNonLocal())
-	  continue;
-	
-	// Ignore clobbers by loads, since they have no impact on the call itself.
-	if (I->getResult().isClobber() && isa<LoadInst>(I->getResult().getInst()))
-	  continue;
-	
-	allTransparent = false;
-	if (!I->getResult().isDef() || cdep != 0) {
-	  cdep = 0;
-	  break;
-	}
-	// We need to ensure that all dependencies are in the same
-	// congruence class as the other call instruction
-	CallInst *NonLocalDepCall = dyn_cast<CallInst>(I->getResult().getInst());
-	if (NonLocalDepCall) {
-	  if (!cdep) {
-	    if (NonLocalDepCall == OE.callinst_ || valueToClass[NonLocalDepCall] == cclass)
-	      cdep = NonLocalDepCall;
-	    else
-	      break;
-	  } else {
-	    CongruenceClass *NLDPClass = valueToClass[NonLocalDepCall];
-	    if (cclass != NLDPClass) {
-	      cdep = 0;
-	      break;
-	    }
-	  }
-	  continue;
-	}
-	cdep = 0;
-	break;
+        const NonLocalDepEntry *I = &deps[i];
+
+        if (I->getResult().isNonLocal())
+          continue;
+
+        // Ignore clobbers by loads, since they have no impact on the call itself.
+        if (I->getResult().isClobber() && isa<LoadInst>(I->getResult().getInst()))
+          continue;
+
+        allTransparent = false;
+        if (!I->getResult().isDef() || cdep != 0) {
+          cdep = 0;
+          break;
+        }
+        // We need to ensure that all dependencies are in the same
+        // congruence class as the other call instruction
+        CallInst *NonLocalDepCall = dyn_cast<CallInst>(I->getResult().getInst());
+        if (NonLocalDepCall) {
+          if (!cdep) {
+            if (NonLocalDepCall == OE.callinst_ || valueToClass[NonLocalDepCall] == cclass)
+              cdep = NonLocalDepCall;
+            else
+              break;
+          } else {
+            CongruenceClass *NLDPClass = valueToClass[NonLocalDepCall];
+            if (cclass != NLDPClass) {
+              cdep = 0;
+              break;
+            }
+          }
+          continue;
+        }
+        cdep = 0;
+        break;
       }
       if (!cdep && !allTransparent)
-	return false;
+        return false;
     }
   }
   return true;
@@ -1480,10 +1476,8 @@ Value *GVN::CoerceAvailableValueToLoadType(Value *StoredVal,
     if (StoredValTy->isPointerTy() && LoadedTy->isPointerTy()) {
       Instruction *I = new BitCastInst(StoredVal, LoadedTy, "", InsertPt);
       handleNewInstruction(I);
-      
       return I;
     }
-    
 
     // Convert source pointers to integers, which can be bitcast.
     if (StoredValTy->isPointerTy()) {
@@ -1502,7 +1496,6 @@ Value *GVN::CoerceAvailableValueToLoadType(Value *StoredVal,
       StoredVal = I;
       handleNewInstruction(I);
     }
-    
 
     // Cast to pointer if the load needs a pointer type.
     if (LoadedTy->isPointerTy()) {
@@ -1539,7 +1532,7 @@ Value *GVN::CoerceAvailableValueToLoadType(Value *StoredVal,
   if (TD.isBigEndian()) {
     Constant *Val = ConstantInt::get(StoredVal->getType(), StoreSize-LoadSize);
     StoredVal = BinaryOperator::CreateLShr(StoredVal, Val, "tmp", InsertPt);
-    if (Instruction *I = dyn_cast<Instruction>(StoredVal)) 
+    if (Instruction *I = dyn_cast<Instruction>(StoredVal))
       handleNewInstruction(I);
   }
 
@@ -1558,7 +1551,6 @@ Value *GVN::CoerceAvailableValueToLoadType(Value *StoredVal,
     handleNewInstruction(I);
     return I;
   }
-  
 
   // Otherwise, bitcast.
   I = new BitCastInst(StoredVal, LoadedTy, "bitcast", InsertPt);
@@ -1588,7 +1580,6 @@ Value *GVN::GetStoreValueForLoad(Value *SrcVal, unsigned Offset,
     if (Instruction *I = dyn_cast<Instruction>(SrcVal))
       handleNewInstruction(I);
   }
-  
 
   if (!SrcVal->getType()->isIntegerTy()) {
     SrcVal = Builder.CreateBitCast(SrcVal, IntegerType::get(Ctx, StoreSize*8));
@@ -1622,7 +1613,7 @@ Value *GVN::GetStoreValueForLoad(Value *SrcVal, unsigned Offset,
 /// anything more we can do before we give up.
 Value *GVN::GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
                                   Type *LoadTy, Instruction *InsertPt,
-				  const TargetData &TD) {
+                                  const TargetData &TD) {
   // If Offset+LoadTy exceeds the size of SrcVal, then we must be wanting to
   // widen SrcVal out to a larger load.
   unsigned SrcValSize = TD.getTypeStoreSize(SrcVal->getType());
@@ -1664,13 +1655,13 @@ Value *GVN::GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
       RV = Builder.CreateLShr(RV,
                     NewLoadSize*8-SrcVal->getType()->getPrimitiveSizeInBits());
       if (Instruction *I = dyn_cast<Instruction>(RV))
-	handleNewInstruction(I);
+        handleNewInstruction(I);
     }
-    
+
     RV = Builder.CreateTrunc(RV, SrcVal->getType());
     if (Instruction *I = dyn_cast<Instruction>(RV))
       handleNewInstruction(I);
-    
+
     markUsersTouched(SrcVal);
     SrcVal->replaceAllUsesWith(RV);
 
@@ -1707,9 +1698,9 @@ Value *GVN::GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     if (LoadSize != 1) {
       Val = Builder.CreateZExt(Val, IntegerType::get(Ctx, LoadSize*8));
       if (Instruction *I = dyn_cast<Instruction>(Val))
-	handleNewInstruction(I);
+        handleNewInstruction(I);
     }
-    
+
     Value *OneElt = Val;
 
     // Splat the value out to the right number of bits.
@@ -1717,11 +1708,11 @@ Value *GVN::GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
       // If we can double the number of bytes set, do it.
       if (NumBytesSet*2 <= LoadSize) {
         Value *ShVal = Builder.CreateShl(Val, NumBytesSet*8);
-	if (Instruction *I = dyn_cast<Instruction>(ShVal))
-	  handleNewInstruction(I);
+        if (Instruction *I = dyn_cast<Instruction>(ShVal))
+          handleNewInstruction(I);
         Val = Builder.CreateOr(Val, ShVal);
-	if (Instruction *I = dyn_cast<Instruction>(Val))
-	  handleNewInstruction(I);
+        if (Instruction *I = dyn_cast<Instruction>(Val))
+          handleNewInstruction(I);
         NumBytesSet <<= 1;
         continue;
       }
@@ -1729,11 +1720,11 @@ Value *GVN::GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
       // Otherwise insert one byte at a time.
       Value *ShVal = Builder.CreateShl(Val, 1*8);
       if (Instruction *I = dyn_cast<Instruction>(ShVal))
-	handleNewInstruction(I);
+        handleNewInstruction(I);
 
       Val = Builder.CreateOr(OneElt, ShVal);
       if (Instruction *I = dyn_cast<Instruction>(Val))
-	handleNewInstruction(I);
+        handleNewInstruction(I);
 
       ++NumBytesSet;
     }
@@ -1800,9 +1791,9 @@ void GVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E) {
 // This is a special function only used by equality propagation, it
 // should not be called elsewhere
 Expression *GVN::createCmpExpression(unsigned Opcode,
-				     Type *Type,
-				     CmpInst::Predicate Predicate,
-				     Value *LHS, Value *RHS) {  
+                                     Type *Type,
+                                     CmpInst::Predicate Predicate,
+                                     Value *LHS, Value *RHS) {
   BasicExpression *E = new BasicExpression();
   E->setType(Type);
   E->setOpcode((Opcode << 8) | Predicate);
@@ -1844,14 +1835,14 @@ Expression *GVN::createExpression(Instruction *I) {
 
     assert (I->getOperand(0)->getType() == I->getOperand(1)->getType() && "Wrong types on cmp instruction");
     if ((E->varargs[0]->getType() == I->getOperand(0)->getType()
-	 && E->varargs[1]->getType() == I->getOperand(1)->getType())) {
+         && E->varargs[1]->getType() == I->getOperand(1)->getType())) {
       Value *V = SimplifyCmpInst(Predicate, E->varargs[0], E->varargs[1], TD, TLI, DT);
       Constant *C;
       if (V && (C = dyn_cast<Constant>(V))) {
-	DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
-	NumGVNCmpInsSimplified++;
-	delete E;
-	return createConstantExpression(C);
+        DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
+        NumGVNCmpInsSimplified++;
+        delete E;
+        return createConstantExpression(C);
       }
     }
 
@@ -1859,19 +1850,19 @@ Expression *GVN::createExpression(Instruction *I) {
     //TODO: Since we noop bitcasts, we may need to check types before
     //simplifying, so that we don't end up simplifying based on a wrong
     //type assumption. We should clean this up so we can use constants of the wrong type
-    if (isa<Constant>(E->varargs[0]) 
-	|| (E->varargs[1]->getType() == I->getOperand(1)->getType()
-	    && E->varargs[2]->getType() == I->getOperand(2)->getType())) {
+    if (isa<Constant>(E->varargs[0])
+        || (E->varargs[1]->getType() == I->getOperand(1)->getType()
+            && E->varargs[2]->getType() == I->getOperand(2)->getType())) {
       Value *V = SimplifySelectInst(E->varargs[0], E->varargs[1], E->varargs[2], TD, TLI, DT);
       if (V) {
-	DEBUG(dbgs() << "Simplified " << *I << " to " << " " << *V << "\n");
-	NumGVNCmpInsSimplified++;
-	delete E;
-	return performSymbolicEvaluation(V, I->getParent());
+        DEBUG(dbgs() << "Simplified " << *I << " to " << " " << *V << "\n");
+        NumGVNCmpInsSimplified++;
+        delete E;
+        return performSymbolicEvaluation(V, I->getParent());
       }
     }
   }
-  
+
   // Handle simplifying
   if (I->isBinaryOp()) {
     //TODO: Since we noop bitcasts, we may need to check types before
@@ -1894,10 +1885,10 @@ Expression *GVN::createExpression(Instruction *I) {
       Value *V = SimplifyGEPInst(E->varargs, TD, TLI, DT);
       Constant *C;
       if (V && (C = dyn_cast<Constant>(V))) {
-	DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
-	NumGVNBinOpsSimplified++;
-	delete E;
-	return createConstantExpression(C);
+        DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
+        NumGVNBinOpsSimplified++;
+        delete E;
+        return createConstantExpression(C);
       }
     }
   }
@@ -2069,30 +2060,30 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
       break;
     case Instruction::Call:
       if (noLoads)
-	E = NULL;
+        E = NULL;
       else
-	E = performSymbolicCallEvaluation(I, B);
+        E = performSymbolicCallEvaluation(I, B);
       break;
     case Instruction::Store:
       if (noLoads)
-	E = NULL;
+        E = NULL;
       else
-	E = performSymbolicStoreEvaluation(I, B);
+        E = performSymbolicStoreEvaluation(I, B);
       break;
     case Instruction::Load:
       if (noLoads)
-	E = NULL;
+        E = NULL;
       else
-	E = performSymbolicLoadEvaluation(I, B);
+        E = performSymbolicLoadEvaluation(I, B);
       break;
     case Instruction::BitCast: {
       // Pointer bitcasts are noops, we can just make them out of whole
       // cloth if we need to. 
       if (I->getType()->isPointerTy()){
-	if (Instruction *I0 = dyn_cast<Instruction>(I->getOperand(0)))
-	  return performSymbolicEvaluation(I0, I0->getParent());
-	else
-	  return performSymbolicEvaluation(I->getOperand(0), B);
+        if (Instruction *I0 = dyn_cast<Instruction>(I->getOperand(0)))
+          return performSymbolicEvaluation(I0, I0->getParent());
+        else
+          return performSymbolicEvaluation(I->getOperand(0), B);
       }
       E = createExpression(I);
     }
@@ -2172,7 +2163,7 @@ unsigned GVN::replaceAllDominatedUsesWith(Value *From, Value *To,
     if (DT->dominates(Root, UsingBlock)) {
       // Mark the users as touched
       if (Instruction *I = dyn_cast<Instruction>(U.getUser()))
-	touchedInstructions.insert(I);
+        touchedInstructions.insert(I);
       DEBUG(dbgs() << "Equality propagation replacing " << *From << " with " << *To << " in " << *(U.getUser()) << "\n");
       U.set(To);
       ++Count;
@@ -2184,7 +2175,7 @@ unsigned GVN::replaceAllDominatedUsesWith(Value *From, Value *To,
 /// propagateEquality - The given values are known to be equal in
 /// every block dominated by 'Root'.  Exploit this, for example by
 /// replacing 'LHS' with 'RHS' everywhere in the scope.  Returns
-/// whether a change was made. 
+/// whether a change was made.
 bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
   SmallVector<std::pair<Value*, Value*>, 4> Worklist;
   Worklist.push_back(std::make_pair(LHS, RHS));
@@ -2300,15 +2291,15 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       delete E;
 
       if (CC) {
-	if (CC->members.size() == 1) {
-	  unsigned NumReplacements = 
-	    replaceAllDominatedUsesWith(CC->leader, NotVal, Root);
-	  Changed |= NumReplacements > 0;
-	  NumGVNEqProp += NumReplacements;
-	}
-	// Ensure that any instruction in scope that gets the "A < B"
-	// value number is replaced with false.
-	CC->members.insert(std::make_pair(NotVal, Root));
+        if (CC->members.size() == 1) {
+          unsigned NumReplacements =
+            replaceAllDominatedUsesWith(CC->leader, NotVal, Root);
+          Changed |= NumReplacements > 0;
+          NumGVNEqProp += NumReplacements;
+        }
+        // Ensure that any instruction in scope that gets the "A < B"
+        // value number is replaced with false.
+        CC->members.insert(std::make_pair(NotVal, Root));
       }
       continue;
     }
@@ -2342,7 +2333,7 @@ void GVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
   assert (VClass && "Should have found a vclass");
   // Dead classes should have been eliminated from the mapping
   assert (!VClass->dead && "Found a dead class");
-  
+
   //TODO(dannyb): Double check algorithm where we are ignoring copy
   //check of "if e is a SSA variable", as LLVM has no copies.
 
@@ -2375,22 +2366,22 @@ void GVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
       if (ConstantExpression *CE = dyn_cast<ConstantExpression>(E))
         NewClass->leader = CE->getConstantValue();
       else if (VariableExpression *VE = dyn_cast<VariableExpression>(E))
-	NewClass->leader = VE->getVariableValue();
+        NewClass->leader = VE->getVariableValue();
       else if (MemoryExpression *ME = dyn_cast<MemoryExpression>(E)) {
-	if (ME->isStore())
-	  NewClass->leader = ME->getStoreInst()->getValueOperand();
-	else
-	  NewClass->leader = V;
+        if (ME->isStore())
+          NewClass->leader = ME->getStoreInst()->getValueOperand();
+        else
+          NewClass->leader = V;
       } else
         NewClass->leader = V;
 
       EClass = NewClass;
-      DEBUG(dbgs() << "Created new congruence class for " << V << 
-	    " using expression " << *E << " at " << NewClass->id << "\n");
+      DEBUG(dbgs() << "Created new congruence class for " << V <<
+            " using expression " << *E << " at " << NewClass->id << "\n");
     } else {
       EClass = lookupResult.first->second;
       assert(EClass && "Somehow don't have an eclass");
-      
+
       assert (!EClass->dead && "We accidentally looked up a dead class");
     }
   }
@@ -2409,26 +2400,26 @@ void GVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
       valueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
       if (VClass->members.empty() && VClass != InitialClass) {
-	if (VClass->expression) {
-	  VClass->dead = true;
-	  // TODO: I think this may be wrong.
-	  // I think we should be keeping track of the expression for
-	  // each instruction, not for each class, and erase the old
-	  // expression for the instruction when the class dies.
-	  expressionToClass.erase(VClass->expression);
-	  memoryExpressionToClass.erase(VClass->expression);
-	}
-	// delete VClass;
+        if (VClass->expression) {
+          VClass->dead = true;
+          // TODO: I think this may be wrong.
+          // I think we should be keeping track of the expression for
+          // each instruction, not for each class, and erase the old
+          // expression for the instruction when the class dies.
+          expressionToClass.erase(VClass->expression);
+          memoryExpressionToClass.erase(VClass->expression);
+        }
+        // delete VClass;
       } else if (VClass->leader == V) {
-	// TODO: Check what happens if expression represented the leader
-	VClass->leader = VClass->members.begin()->first;
-	for (DenseSet<std::pair<Value*,BasicBlock*> >::iterator LI = VClass->members.begin(),
-	       LE = VClass->members.end();
-	     LI != LE; ++LI) {
-	  if (Instruction *I = dyn_cast<Instruction>(LI->first))
-	    touchedInstructions.insert(I);
-	  changedValues.insert(LI->first);
-	}
+        // TODO: Check what happens if expression represented the leader
+        VClass->leader = VClass->members.begin()->first;
+        for (DenseSet<std::pair<Value*,BasicBlock*> >::iterator LI = VClass->members.begin(),
+               LE = VClass->members.end();
+             LI != LE; ++LI) {
+          if (Instruction *I = dyn_cast<Instruction>(LI->first))
+            touchedInstructions.insert(I);
+          changedValues.insert(LI->first);
+        }
       }
     }
     markUsersTouched(V);
@@ -2446,8 +2437,8 @@ void GVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
     if (reachableBlocks.insert(To).second) {
       DEBUG(dbgs() << "Block " << getBlockName(To) << " marked reachable\n");
       for (BasicBlock::iterator BI = To->begin(), BE = To->end();
-	   BI != BE; ++BI)
-	touchedInstructions.insert(BI);
+           BI != BE; ++BI)
+        touchedInstructions.insert(BI);
     } else {
       DEBUG(dbgs() << "Block " << getBlockName(To) << " was reachable, but new edge to it found\n");
       // We've made an edge reachable to an existing block, which may
@@ -2455,8 +2446,8 @@ void GVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
       // Otherwise, only mark the phi nodes as touched
       BasicBlock::iterator BI = To->begin();
       while (isa<PHINode>(BI)) {
-	touchedInstructions.insert(BI);
-	++BI;
+        touchedInstructions.insert(BI);
+        ++BI;
       }
       // Propagate the change downstream.
       propagateChangeInEdge(To);
@@ -2476,7 +2467,7 @@ void GVN::processOutgoingEdges(TerminatorInst *TI) {
     if (Instruction *I = dyn_cast<Instruction>(Cond)) {
       Expression *E = createExpression(I);
       if (ConstantExpression *CE = dyn_cast<ConstantExpression>(E)) {
-	CondEvaluated = CE->getConstantValue();
+        CondEvaluated = CE->getConstantValue();
       }
       delete E;
     } else if (isa<ConstantInt>(Cond)) {
@@ -2487,23 +2478,23 @@ void GVN::processOutgoingEdges(TerminatorInst *TI) {
     BasicBlock *FalseSucc = BR->getSuccessor(1);
     if (CondEvaluated && (CI = dyn_cast<ConstantInt>(CondEvaluated))) {
       if (CI->isOne()) {
-	DEBUG(dbgs() << "Condition for Terminator " << *TI << " evaluated to true\n");
-	updateReachableEdge(TI->getParent(), TrueSucc);
+        DEBUG(dbgs() << "Condition for Terminator " << *TI << " evaluated to true\n");
+        updateReachableEdge(TI->getParent(), TrueSucc);
       } else if (CI->isZero()) {
-	DEBUG(dbgs() << "Condition for Terminator " << *TI << " evaluated to false\n");
-	updateReachableEdge(TI->getParent(), FalseSucc);
+        DEBUG(dbgs() << "Condition for Terminator " << *TI << " evaluated to false\n");
+        updateReachableEdge(TI->getParent(), FalseSucc);
       }
     } else {
       BasicBlock *Parent = BR->getParent();
       if (isOnlyReachableViaThisEdge(Parent, TrueSucc, DT))
-	propagateEquality(Cond,
-			  ConstantInt::getTrue(TrueSucc->getContext()),
-			  TrueSucc);
-      
+        propagateEquality(Cond,
+                          ConstantInt::getTrue(TrueSucc->getContext()),
+                          TrueSucc);
+
       if (isOnlyReachableViaThisEdge(Parent, FalseSucc, DT))
-	propagateEquality(Cond,
-			  ConstantInt::getFalse(FalseSucc->getContext()),
-			  FalseSucc);
+        propagateEquality(Cond,
+                          ConstantInt::getFalse(FalseSucc->getContext()),
+                          FalseSucc);
       updateReachableEdge(TI->getParent(), TrueSucc);
       updateReachableEdge(TI->getParent(), FalseSucc);
     }
@@ -2513,13 +2504,13 @@ void GVN::processOutgoingEdges(TerminatorInst *TI) {
       Value *SwitchCond = SI->getCondition();
       BasicBlock *Parent = SI->getParent();
       for (SwitchInst::CaseIt i = SI->case_begin(), e = SI->case_end();
-	   i != e; ++i) {
-	BasicBlock *Dst = i.getCaseSuccessor();
-	if (isOnlyReachableViaThisEdge(Parent, Dst, DT))
-	  propagateEquality(SwitchCond, i.getCaseValue(), Dst);
+           i != e; ++i) {
+        BasicBlock *Dst = i.getCaseSuccessor();
+        if (isOnlyReachableViaThisEdge(Parent, Dst, DT))
+          propagateEquality(SwitchCond, i.getCaseValue(), Dst);
       }
     }
-    
+
     for (unsigned i = 0, e = TI->getNumSuccessors(); i != e; ++i) {
       BasicBlock *B = TI->getSuccessor(i);
       updateReachableEdge(TI->getParent(), B);
@@ -2553,15 +2544,15 @@ void GVN::propagateChangeInEdge(BasicBlock *Dest) {
   //reachability. If the phi node ends up changing congruence classes,
   //the users will be marked as touched anyway.  If we moved to using
   //value inferencing, there are cases we may need to touch more than
-  //phi nodes. 
+  //phi nodes.
   for (df_iterator<DomTreeNode*> DI = df_begin(DTN), DE = df_end(DTN); DI != DE; ++DI) {
     BasicBlock *B = DI->getBlock();
     if (!B->getUniquePredecessor()) {
       for (BasicBlock::iterator BI = B->begin(), BE = B->end();
-	   BI != BE; ++BI) {
-	if (!isa<PHINode>(BI))
-	  break;
-	touchedInstructions.insert(BI);
+           BI != BE; ++BI) {
+        if (!isa<PHINode>(BI))
+          break;
+        touchedInstructions.insert(BI);
       }
     }
   }
@@ -2713,7 +2704,7 @@ struct AvailableValueInBlock {
         const TargetData *TD = gvn.getTargetData();
         assert(TD && "Need target data to handle type mismatch case");
         Res = gvn.GetStoreValueForLoad(Res, Offset, LoadTy, BB->getTerminator(),
-				       *TD);
+                                       *TD);
 
         DEBUG(dbgs() << "GVN COERCED NONLOCAL VAL:\nOffset: " << Offset << "  "
                      << *getSimpleValue() << '\n'
@@ -2725,7 +2716,7 @@ struct AvailableValueInBlock {
         Res = Load;
       } else {
         Res = gvn.GetLoadValueForLoad(Load, Offset, LoadTy, BB->getTerminator(),
-				      *TD);
+                                      *TD);
 
         DEBUG(dbgs() << "GVN COERCED NONLOCAL LOAD:\nOffset: " << Offset << "  "
                      << *getCoercedLoadValue() << '\n'
@@ -2735,7 +2726,7 @@ struct AvailableValueInBlock {
       const TargetData *TD = gvn.getTargetData();
       assert(TD && "Need target data to handle type mismatch case");
       Res = gvn.GetMemInstValueForLoad(getMemIntrinValue(), Offset,
-				       LoadTy, BB->getTerminator(), *TD);
+                                       LoadTy, BB->getTerminator(), *TD);
       DEBUG(dbgs() << "GVN COERCED NONLOCAL MEM INTRIN:\nOffset: " << Offset
                    << "  " << *getMemIntrinValue() << '\n'
                    << *Res << '\n' << "\n\n\n");
@@ -2752,7 +2743,7 @@ struct AvailableValueInBlock {
 /// This returns the value that should be used at LI's definition
 /// site.
 static Value *ConstructSSAForLoadSet(LoadInst *LI,
-				     SmallVectorImpl<AvailableValueInBlock> &ValuesPerBlock,
+                                     SmallVectorImpl<AvailableValueInBlock> &ValuesPerBlock,
                                      GVN &gvn) {
   // Check for the fully redundant, dominating load case.  In this case, we can
   // just use the dominating value directly.
@@ -2783,7 +2774,7 @@ static Value *ConstructSSAForLoadSet(LoadInst *LI,
 
   for (unsigned i = 0, e = NewPHIs.size(); i != e; ++i)
     gvn.handleNewInstruction(NewPHIs[i]);
-  
+
   // If new PHI nodes were created, notify alias analysis.
   if (V->getType()->isPointerTy()) {
     AliasAnalysis *AA = gvn.getAliasAnalysis();
@@ -2913,11 +2904,11 @@ void GVN::handleNewInstruction(Instruction *I) {
 /// non-local by performing PHI construction.
 bool GVN::processNonLocalLoad(LoadInst *LI) {
   return false;
-  
+
   // Find the non-local dependencies of the load.
   SmallVector<NonLocalDepResult, 64> Deps;
   AliasAnalysis::Location Loc = AA->getLocation(LI);
-  
+
   Loc.Ptr = lookupOperandLeader(LI->getPointerOperand());
   MD->getNonLocalPointerDependency(Loc, true, LI->getParent(), Deps);
   //DEBUG(dbgs() << "INVESTIGATING NONLOCAL LOAD: "
@@ -2952,10 +2943,10 @@ bool GVN::processNonLocalLoad(LoadInst *LI) {
   for (unsigned i = 0, e = NumDeps; i != e; ++i) {
     BasicBlock *DepBB = Deps[i].getBB();
     MemDepResult DepInfo = Deps[i].getResult();
-   
+
     if (!reachableBlocks.count(DepBB))
       DEBUG(dbgs() << "Skipping dependency in unreachable block\n");
-      
+
     if (!DepInfo.isDef() && !DepInfo.isClobber()) {
       UnavailableBlocks.push_back(DepBB);
       continue;
@@ -3376,10 +3367,10 @@ Value *GVN::findPRELeader(BasicBlock *BB, Value *Op) {
     return CC->leader;
 
   for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator SI = CC->members.begin(),
-	 SE = CC->members.end(); SI != SE; ++SI)
+         SE = CC->members.end(); SI != SE; ++SI)
     if (DT->dominates(SI->second, BB))
       return SI->first;
-  return 0;  
+  return 0;
 }
 
 /// performPRE - Perform a purely local form of PRE that looks for diamond
@@ -3401,78 +3392,78 @@ bool GVN::performPRE(Function &F) {
       int MemberDFSIn = II->dfs_in;
       int MemberDFSOut = II->dfs_out;
       ++II;
-      
-      if (Instruction *CurInst = dyn_cast<Instruction>(Member)) {
-	BasicBlock *BB = CurInst->getParent();
-	// Nothing to PRE in the entry block.
-	if (BB == &F.getEntryBlock()) continue;
-	// Don't perform PRE on a landing pad.
-	if (BB->isLandingPad()) continue;
-	// Don't do PRE on compares. The PHI would prevent CodeGenPrepare from
-	// sinking the compare again, and it would force the code generator to
-	// move the i1 from processor flags or predicate registers into a general
-	// purpose register.
-	if (isa<CmpInst>(CurInst))
-	  continue;
-	if (isa<AllocaInst>(CurInst) ||
-	    isa<TerminatorInst>(CurInst) || isa<PHINode>(CurInst) ||
-	    CurInst->getType()->isVoidTy() ||
-	    CurInst->mayReadFromMemory() || CurInst->mayHaveSideEffects() ||
-	    isa<DbgInfoIntrinsic>(CurInst))
-	  continue;
-	// Look for the predecessors for PRE opportunities.  We're
-	// only trying to solve the basic diamond case, where
-	// a value is computed in the successor and one predecessor,
-	// but not the other.  We also explicitly disallow cases
-	// where the successor is its own predecessor, because they're
-	// more complicated to get right.
-	unsigned NumWith = 0;
-	unsigned NumWithout = 0;
-	BasicBlock *PREPred = 0;
-	int PREPredDFSIn = 0;
-	int PREPredDFSOut = 0;
-	predMap.clear();
 
-	for (pred_iterator PI = pred_begin(BB), PE = pred_end(BB); PI != PE; ++PI) {
-	  BasicBlock *P = *PI;
-	  // We're not interested in PRE where the block is its
-	  // own predecessor, or in blocks with predecessors
-	  // that are not reachable.
-	  if (P == BB) {
-	    NumWithout = 2;
-	    break;
-	  } else if (!reachableBlocks.count(P)) {
-	    NumWithout = 2;
-	    break;
-	  }
-	  std::pair<int, int> DFSPair = DFSBBMap[P];
-	  ValueDFS LookupTemp;
-	  LookupTemp.dfs_in = DFSPair.first;
-	  LookupTemp.dfs_out = DFSPair.second;
-	  LookupTemp.localnum = -1;
-	    
-	  std::set<ValueDFS>::iterator ResultLookup = DFSOrderedSet.lower_bound(LookupTemp);
-	  Value *predV = 0;
-	  if (ResultLookup != DFSOrderedSet.end()) {
-	    // Make sure our result dominates the predecessor
-	    if (ResultLookup->value != Member 
-		&& ResultLookup->dfs_in <= DFSPair.first 
-		&& ResultLookup->dfs_out >= DFSPair.second)
-	      predV = ResultLookup->value;
-	  }
-	  
-	  if (predV == 0) {
-	    PREPred = P;
-	    PREPredDFSIn = DFSPair.first;
-	    PREPredDFSOut = DFSPair.second;
-	    ++NumWithout;
-	  } else if (predV == CurInst) {
-	    NumWithout = 2;
-	  } else {
-	    predMap[P] = predV;
-	    ++NumWith;
-	  }
-	}
+      if (Instruction *CurInst = dyn_cast<Instruction>(Member)) {
+        BasicBlock *BB = CurInst->getParent();
+        // Nothing to PRE in the entry block.
+        if (BB == &F.getEntryBlock()) continue;
+        // Don't perform PRE on a landing pad.
+        if (BB->isLandingPad()) continue;
+        // Don't do PRE on compares. The PHI would prevent CodeGenPrepare from
+        // sinking the compare again, and it would force the code generator to
+        // move the i1 from processor flags or predicate registers into a general
+        // purpose register.
+        if (isa<CmpInst>(CurInst))
+          continue;
+        if (isa<AllocaInst>(CurInst) ||
+            isa<TerminatorInst>(CurInst) || isa<PHINode>(CurInst) ||
+            CurInst->getType()->isVoidTy() ||
+            CurInst->mayReadFromMemory() || CurInst->mayHaveSideEffects() ||
+            isa<DbgInfoIntrinsic>(CurInst))
+          continue;
+        // Look for the predecessors for PRE opportunities.  We're
+        // only trying to solve the basic diamond case, where
+        // a value is computed in the successor and one predecessor,
+        // but not the other.  We also explicitly disallow cases
+        // where the successor is its own predecessor, because they're
+        // more complicated to get right.
+        unsigned NumWith = 0;
+        unsigned NumWithout = 0;
+        BasicBlock *PREPred = 0;
+        int PREPredDFSIn = 0;
+        int PREPredDFSOut = 0;
+        predMap.clear();
+
+        for (pred_iterator PI = pred_begin(BB), PE = pred_end(BB); PI != PE; ++PI) {
+          BasicBlock *P = *PI;
+          // We're not interested in PRE where the block is its
+          // own predecessor, or in blocks with predecessors
+          // that are not reachable.
+          if (P == BB) {
+            NumWithout = 2;
+            break;
+          } else if (!reachableBlocks.count(P)) {
+            NumWithout = 2;
+            break;
+          }
+          std::pair<int, int> DFSPair = DFSBBMap[P];
+          ValueDFS LookupTemp;
+          LookupTemp.dfs_in = DFSPair.first;
+          LookupTemp.dfs_out = DFSPair.second;
+          LookupTemp.localnum = -1;
+
+          std::set<ValueDFS>::iterator ResultLookup = DFSOrderedSet.lower_bound(LookupTemp);
+          Value *predV = 0;
+          if (ResultLookup != DFSOrderedSet.end()) {
+            // Make sure our result dominates the predecessor
+            if (ResultLookup->value != Member
+                && ResultLookup->dfs_in <= DFSPair.first
+                && ResultLookup->dfs_out >= DFSPair.second)
+              predV = ResultLookup->value;
+          }
+
+          if (predV == 0) {
+            PREPred = P;
+            PREPredDFSIn = DFSPair.first;
+            PREPredDFSOut = DFSPair.second;
+            ++NumWithout;
+          } else if (predV == CurInst) {
+            NumWithout = 2;
+          } else {
+            predMap[P] = predV;
+            ++NumWith;
+          }
+        }
 
       // Don't do PRE when it might increase code size, i.e. when
       // we would need to insert instructions in more than one pred.
@@ -3521,7 +3512,7 @@ bool GVN::performPRE(Function &F) {
         continue;
       }
       DEBUG(dbgs() << "Inserting instruction " << *PREInstr << " into " << getBlockName(PREPred) << "\n");
-      
+
       PREInstr->insertBefore(PREPred->getTerminator());
       PREInstr->setName(CurInst->getName() + ".pre");
       PREInstr->setDebugLoc(CurInst->getDebugLoc());
@@ -3535,7 +3526,7 @@ bool GVN::performPRE(Function &F) {
       VDFS.dfs_in = PREPredDFSIn;
       VDFS.dfs_out = PREPredDFSOut;
       DFSOrderedSet.insert(VDFS);
-      
+
       // // Update the availability map to include the new instruction.
       // addToLeaderTable(ValNo, PREInstr, PREPred);
 
@@ -3574,7 +3565,7 @@ bool GVN::performPRE(Function &F) {
       }
     }
   }
-  
+
   if (splitCriticalEdges())
     Changed = true;
 
@@ -3582,8 +3573,8 @@ bool GVN::performPRE(Function &F) {
 }
 
 void GVN::convertDenseToDFSOrdered(DenseSet<std::pair<Value*, BasicBlock*> > &Dense,
-				   std::set<ValueDFS> &DFSOrderedSet) {
-  for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator DI = Dense.begin(), DE = Dense.end(); 
+                                   std::set<ValueDFS> &DFSOrderedSet) {
+  for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator DI = Dense.begin(), DE = Dense.end();
        DI != DE; ++DI) {
     std::pair<int, int> DFSPair = DFSBBMap[DI->second];
     ValueDFS VD;
@@ -3599,12 +3590,12 @@ void GVN::convertDenseToDFSOrdered(DenseSet<std::pair<Value*, BasicBlock*> > &De
       VD.localnum = InstrLocalDFS[I];
     else
       VD.localnum = 0;
-    
+
     VD.value = DI->first;
     DFSOrderedSet.insert(VD);
   }
 }
-  
+
 uint32_t CongruenceClass::nextCongruenceNum = 0;
 
 /// runOnFunction - This is the main transformation entry point for a function.
@@ -3615,7 +3606,7 @@ bool GVN::runOnFunction(Function& F) {
   TLI = &getAnalysis<TargetLibraryInfo>();
 
   bool Changed = false;
-  
+
   DEBUG(dbgs() << "Starting GVN on new function " << F.getName() << "\n");
 
   // Merge unconditional branches, allowing PRE to catch more
@@ -3636,7 +3627,7 @@ bool GVN::runOnFunction(Function& F) {
   DEBUG(dbgs() << "Found " << NumBasicBlocks <<  " basic blocks\n");
   for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI)
     for (BasicBlock::iterator BI = FI->begin(), BE = FI->end();
-	 BI != BE; ++BI) {
+         BI != BE; ++BI) {
       InstrLocalDFS[BI] = ICount;
       ++ICount;
     }
@@ -3657,8 +3648,8 @@ bool GVN::runOnFunction(Function& F) {
   // in an IPA-GVN, this would not be done
   for (Function::arg_iterator FAI = F.arg_begin(), FAE= F.arg_end(); FAI != FAE; ++FAI)
     createSingletonCongruenceClass(FAI, &F.getEntryBlock());
-  
-  
+
+
   // Initialize all other instructions to be in INITIAL class
   DenseSet<std::pair<Value*, BasicBlock*> > InitialValues;
   for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI)  {
@@ -3669,7 +3660,7 @@ bool GVN::runOnFunction(Function& F) {
 
   InitialClass = createCongruenceClass(NULL, NULL);
   for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator LI = InitialValues.begin(),
-	 LE = InitialValues.end();
+         LE = InitialValues.end();
        LI != LE; ++LI)
     valueToClass[LI->first] = InitialClass;
   InitialClass->members.swap(InitialValues);
@@ -3693,38 +3684,38 @@ bool GVN::runOnFunction(Function& F) {
       bool blockReachable = reachableBlocks.count(*RI);
       bool movedForward = false;
       for (BasicBlock::iterator BI = (*RI)->begin(), BE = (*RI)->end(); BI != BE; !movedForward ? BI++ : BI) {
-	movedForward = false;
+        movedForward = false;
         DenseSet<Instruction*>::iterator DI = touchedInstructions.find(BI);
         if (DI != touchedInstructions.end()) {
-	  DEBUG(dbgs() << "Processing instruction " << *BI << "\n");
+          DEBUG(dbgs() << "Processing instruction " << *BI << "\n");
           touchedInstructions.erase(DI);
-	  if (!blockReachable) {
-	    DEBUG(dbgs() << "Skipping instruction " << *BI  << " because block " << getBlockName(*RI) << " is unreachable\n");
-	    continue;
-	  }
-	  // This is done in case something eliminates the instruction
-	  // along the way.
-	  Instruction *I = BI++;
-	  movedForward = true;
+          if (!blockReachable) {
+            DEBUG(dbgs() << "Skipping instruction " << *BI  << " because block " << getBlockName(*RI) << " is unreachable\n");
+            continue;
+          }
+          // This is done in case something eliminates the instruction
+          // along the way.
+          Instruction *I = BI++;
+          movedForward = true;
 
-	  if (processedCount.count(I) == 0) {
-	    processedCount.insert(std::make_pair(I, 1));
-	  } else {
-	    processedCount[I] += 1;
-	    assert(processedCount[I] < 100 && "Seem to have processed the same instruction a lot");
-	  }
-	 
+          if (processedCount.count(I) == 0) {
+            processedCount.insert(std::make_pair(I, 1));
+          } else {
+            processedCount[I] += 1;
+            assert(processedCount[I] < 100 && "Seem to have processed the same instruction a lot");
+          }
+
           if (!I->isTerminator()) {
-	    // This is inside the terminator check because otherwise,
-	    // we will remove unreachable marks, since they have no
-	    // uses. 
-	    if (I->use_empty()) {
-	      UpdateMemDepInfo(MD, I, NULL);
-	      markInstructionForDeletion(I);
-	      continue;
-	    }
+            // This is inside the terminator check because otherwise,
+            // we will remove unreachable marks, since they have no
+            // uses.
+            if (I->use_empty()) {
+              UpdateMemDepInfo(MD, I, NULL);
+              markInstructionForDeletion(I);
+              continue;
+            }
 
-	    Expression *Symbolized = performSymbolicEvaluation(I, *RI);
+            Expression *Symbolized = performSymbolicEvaluation(I, *RI);
             performCongruenceFinding(I, *RI, Symbolized);
           } else {
             processOutgoingEdges(dyn_cast<TerminatorInst>(I));
@@ -3749,8 +3740,8 @@ bool GVN::runOnFunction(Function& F) {
     ++DI;
     // if (!toErase->use_empty()) {
     //   for (Value::use_iterator UI = toErase->use_begin(), UE = toErase->use_end();
-    // 	 UI != UE; ++UI) {
-    // 	assert (instrsToErase_.count(cast<Instruction>(*UI)) && "trying to removing something without also deleting it's uses");
+    //   UI != UE; ++UI) {
+    //  assert (instrsToErase_.count(cast<Instruction>(*UI)) && "trying to removing something without also deleting it's uses");
     //   }
     // }
     if (!toErase->use_empty())
@@ -3767,8 +3758,8 @@ bool GVN::runOnFunction(Function& F) {
      Changed = true;
    }
  }
- 
-       
+
+
  valueToClass.clear();
  for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
    delete congruenceClass[i];
@@ -3802,7 +3793,7 @@ bool GVN::runOnFunction(Function& F) {
 
 
 // Return true if V is a value that will always be available (IE can
-// be placed anywhere) in the function.  
+// be placed anywhere) in the function.
 // We avoid mentioning global value
 static bool alwaysAvailable(Value *V) {
   return isa<Constant>(V) || isa<Argument>(V);
@@ -3835,7 +3826,7 @@ bool GVN::eliminateInstructions(Function &F) {
       continue;
     DFSBBMap[FI] = std::make_pair(DTN->getDFSNumIn(), DTN->getDFSNumOut());
   }
-  
+
  for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
    CongruenceClass *CC = congruenceClass[i];
    // FIXME: We should eventually be able to replace everything still
@@ -3851,35 +3842,35 @@ bool GVN::eliminateInstructions(Function &F) {
    SmallVector<Value*, 4> ValueStack;
    SmallVector<std::pair<int, int>, 64> DFSStack;
    assert (CC->leader && "We should have had a leader");
-   
+
    // if (!CC->expression || !CC->leader)
    //   continue;
-   
+
    // If this is a leader that is always available, just replace
    // everything with it
-   if (alwaysAvailable(CC->leader)) { 
-     for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator CI = CC->members.begin(), 
-	    CE = CC->members.end(); CI != CE; ) {
+   if (alwaysAvailable(CC->leader)) {
+     for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator CI = CC->members.begin(),
+            CE = CC->members.end(); CI != CE; ) {
        Value *member = CI->first;
        ++CI;
        // Skip the member that is also us :)
        if (member != CC->leader) {
-	 //TODO: eliminate duplicate bitcasts but not valid bitcast
-	 if (isa<StoreInst>(member) || isa<BitCastInst>(member))
-	   continue;
-	 DEBUG(dbgs() << "Found replacement " << *(CC->leader) << " for " << *member << "\n");
-	 // Due to equality propagation, these may not always be
-	 // instructions, they may be real values.  We don't really
-	 // care about trying to replace the non-instructions.
-	 if (Instruction *I = dyn_cast<Instruction>(member))
-	   replaceInstruction(I, CC->leader, CC);
+         //TODO: eliminate duplicate bitcasts but not valid bitcast
+         if (isa<StoreInst>(member) || isa<BitCastInst>(member))
+           continue;
+         DEBUG(dbgs() << "Found replacement " << *(CC->leader) << " for " << *member << "\n");
+         // Due to equality propagation, these may not always be
+         // instructions, they may be real values.  We don't really
+         // care about trying to replace the non-instructions.
+         if (Instruction *I = dyn_cast<Instruction>(member))
+           replaceInstruction(I, CC->leader, CC);
        }
      }
    } else {
 
 #if 1
      // If this is a singleton, the only thing we do is process
-     // non-local loads.  
+     // non-local loads.
      // TODO: processNonLocalLoad still does PRE of loads,
      // and looking or store based eliminations, and this happens
      // nowhere else.  Once that is fixed, this should be removed.
@@ -3891,109 +3882,108 @@ bool GVN::eliminateInstructions(Function &F) {
        // *compared* it with something, causing non-local to be set
        // appropriately.  If nothing else in the function was even
        // compared to this, it's probably not worth trying to eliminate.
-	 if (ME->hadNonLocal()) {
-	   Value *member = CC->members.begin()->first;
-	   if (LoadInst *LI = dyn_cast<LoadInst>(member)){
-	     processNonLocalLoad(LI);
-	   }
-	 }
+         if (ME->hadNonLocal()) {
+           Value *member = CC->members.begin()->first;
+           if (LoadInst *LI = dyn_cast<LoadInst>(member)){
+             processNonLocalLoad(LI);
+           }
+         }
        }
        continue;
      } else {
 #if 0
        MemoryExpression *ME;
        if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
-	 if (0|| ME->hadNonLocal()) {
-	   Value *member = CC->members.begin()->first;
-	   if (LoadInst *LI = dyn_cast<LoadInst>(member)){
-	     processNonLocalLoad(LI);
-	   }
-	 }
+         if (0|| ME->hadNonLocal()) {
+           Value *member = CC->members.begin()->first;
+           if (LoadInst *LI = dyn_cast<LoadInst>(member)){
+             processNonLocalLoad(LI);
+           }
+         }
        }
 #endif
 #endif
-       // 
-       std::set<ValueDFS> DFSOrderedSet;	   
+       std::set<ValueDFS> DFSOrderedSet;
        convertDenseToDFSOrdered(CC->members, DFSOrderedSet);
-       
+
        for (std::set<ValueDFS>::iterator CI = DFSOrderedSet.begin(), CE = DFSOrderedSet.end(); CI != CE;) {
-	 int MemberDFSIn = CI->dfs_in;
-	 int MemberDFSOut = CI->dfs_out;
-	 Value *Member = CI->value;
-	 ++CI;
-	 
-	 //TODO: eliminate duplicate bitcasts but not valid bitcasts.
-	 // Bitcasts are always going to value number to their values
-	 // (because of type ignoring above), so we will think we can
-	 // eliminate every bitcast, but we can't. We could eliminate
-	 // bitcasts that value number to *other bitcasts*, however.
-	 if (isa<StoreInst>(Member) || isa<BitCastInst>(Member))
-	   continue;
+         int MemberDFSIn = CI->dfs_in;
+         int MemberDFSOut = CI->dfs_out;
+         Value *Member = CI->value;
+         ++CI;
 
-	 if (DFSStack.empty()) {
-	   DEBUG(dbgs() << "DFS Stack is empty\n");
-	 } else {
-	   DEBUG(dbgs() << "Stack Top DFS numbers are (" << DFSStack.back().first << "," << DFSStack.back().second << ")\n");
-	 }
+         //TODO: eliminate duplicate bitcasts but not valid bitcasts.
+         // Bitcasts are always going to value number to their values
+         // (because of type ignoring above), so we will think we can
+         // eliminate every bitcast, but we can't. We could eliminate
+         // bitcasts that value number to *other bitcasts*, however.
+         if (isa<StoreInst>(Member) || isa<BitCastInst>(Member))
+           continue;
 
-	 DEBUG(dbgs() << "Current DFS numbers are (" << MemberDFSIn << "," << MemberDFSOut <<")\n");
-	 // We should push whenever it's empty or there is a constant
-	 // We should pop until we are back within the right DFS scope
-	 // Walk along, processing members who are dominated by each other.
-	 if ((ValueStack.empty() || isa<Constant>(Member))
-	     || !(MemberDFSIn >= DFSStack.back().first  
-		  && MemberDFSOut <= DFSStack.back().second)) {
-	   assert(ValueStack.size() == DFSStack.size() && "Mismatch between ValueStack and DFSStack");
-	   while (!DFSStack.empty() 
-		  && !(MemberDFSIn >= DFSStack.back().first  && MemberDFSOut <= DFSStack.back().second)){
-	     DFSStack.pop_back();
-	     ValueStack.pop_back();
-	   }
-	   
-	   if (DFSStack.empty() || isa<Constant>(Member)) {    
-	     ValueStack.push_back(Member);
-	     DFSStack.push_back(std::make_pair(MemberDFSIn, MemberDFSOut));
-	   }
-	 } else {
-           // Skip the case of trying to eliminate the leader.  
+         if (DFSStack.empty()) {
+           DEBUG(dbgs() << "DFS Stack is empty\n");
+         } else {
+           DEBUG(dbgs() << "Stack Top DFS numbers are (" << DFSStack.back().first << "," << DFSStack.back().second << ")\n");
+         }
+
+         DEBUG(dbgs() << "Current DFS numbers are (" << MemberDFSIn << "," << MemberDFSOut <<")\n");
+         // We should push whenever it's empty or there is a constant
+         // We should pop until we are back within the right DFS scope
+         // Walk along, processing members who are dominated by each other.
+         if ((ValueStack.empty() || isa<Constant>(Member))
+             || !(MemberDFSIn >= DFSStack.back().first
+                  && MemberDFSOut <= DFSStack.back().second)) {
+           assert(ValueStack.size() == DFSStack.size() && "Mismatch between ValueStack and DFSStack");
+           while (!DFSStack.empty()
+                  && !(MemberDFSIn >= DFSStack.back().first  && MemberDFSOut <= DFSStack.back().second)){
+             DFSStack.pop_back();
+             ValueStack.pop_back();
+           }
+
+           if (DFSStack.empty() || isa<Constant>(Member)) {
+             ValueStack.push_back(Member);
+             DFSStack.push_back(std::make_pair(MemberDFSIn, MemberDFSOut));
+           }
+         } else {
+           // Skip the case of trying to eliminate the leader.
            if (Member == CC->leader)
-	     continue;
+             continue;
 
-	   Value *Result = ValueStack.back();
-	   DEBUG(dbgs() << "Found replacement " << *Result << " for " << *Member << "\n");	   
+           Value *Result = ValueStack.back();
+           DEBUG(dbgs() << "Found replacement " << *Result << " for " << *Member << "\n");
 
-	   // If we find a load or a store as a replacement, make sure
-	   // to correct the type.  This should *always* work, since
-	   // we tested whether it was possible before value numbering
-	   // the same. 
-	   LoadInst *LI;
-	   if (Result->getType() != Member->getType() && (LI = dyn_cast<LoadInst>(Member))) {
-	     if (LoadInst *LIR = dyn_cast<LoadInst>(Result)) {
-	       int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
-							  LI->getPointerOperand(),
-							  LIR, *TD);
-	       // If this assert is triggered, something is broken in
-	       // value numbering, not elimination.
-	       assert(Offset != -1 && "Should have been able to coerce load");
-	       
-	       Result = GetLoadValueForLoad(LIR, Offset, LI->getType(), LI, *TD);
-	       
-	     } else if (StoreInst *SIR = dyn_cast<StoreInst>(Result)) {
-	       int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
-							   LI->getPointerOperand(),
-							   SIR, *TD);
-	       // If this assert is triggered, something is broken in
-	       // value numbering, not elimination.
-	       assert(Offset != -1 && "Should have been able to coerce store");
-	       Result = GetStoreValueForLoad(SIR->getValueOperand(), Offset, LI->getType(), LI, *TD);
-	     }
-	   }
+           // If we find a load or a store as a replacement, make sure
+           // to correct the type.  This should *always* work, since
+           // we tested whether it was possible before value numbering
+           // the same.
+           LoadInst *LI;
+           if (Result->getType() != Member->getType() && (LI = dyn_cast<LoadInst>(Member))) {
+             if (LoadInst *LIR = dyn_cast<LoadInst>(Result)) {
+               int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
+                                                          LI->getPointerOperand(),
+                                                          LIR, *TD);
+               // If this assert is triggered, something is broken in
+               // value numbering, not elimination.
+               assert(Offset != -1 && "Should have been able to coerce load");
 
-	   // Perform actual replacement
-	   Instruction *I;
-	   if ((I = dyn_cast<Instruction>(Member)) && Member != CC->leader)
-	     replaceInstruction(I, Result, CC);
-	 }
+               Result = GetLoadValueForLoad(LIR, Offset, LI->getType(), LI, *TD);
+
+             } else if (StoreInst *SIR = dyn_cast<StoreInst>(Result)) {
+               int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
+                                                           LI->getPointerOperand(),
+                                                           SIR, *TD);
+               // If this assert is triggered, something is broken in
+               // value numbering, not elimination.
+               assert(Offset != -1 && "Should have been able to coerce store");
+               Result = GetStoreValueForLoad(SIR->getValueOperand(), Offset, LI->getType(), LI, *TD);
+             }
+           }
+
+           // Perform actual replacement
+           Instruction *I;
+           if ((I = dyn_cast<Instruction>(Member)) && Member != CC->leader)
+             replaceInstruction(I, Result, CC);
+         }
        }
      }
    }

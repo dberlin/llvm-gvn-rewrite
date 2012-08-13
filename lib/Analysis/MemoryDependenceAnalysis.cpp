@@ -737,7 +737,7 @@ void MemoryDependenceAnalysis::
 getNonLocalPointerDependency(const AliasAnalysis::Location &Loc, bool isLoad,
                              BasicBlock *FromBB,
                              SmallVectorImpl<NonLocalDepResult> &Result,
-			     BasicBlock *StopBB) {
+                             BasicBlock *StopBB) {
   assert(Loc.Ptr->getType()->isPointerTy() &&
          "Can't get pointer deps of a non-pointer!");
   Result.clear();
@@ -883,7 +883,7 @@ getNonLocalPointerDepFromBB(const PHITransAddr &Pointer,
                             SmallVectorImpl<NonLocalDepResult> &Result,
                             DenseMap<BasicBlock*, Value*> &Visited,
                             bool SkipFirstBlock,
-			    BasicBlock *StopBlock) {
+                            BasicBlock *StopBlock) {
   
   // Look up the cached info for Pointer.
   ValueIsLoadPair CacheKey(Pointer.getAddr(), isLoad);
