@@ -3478,7 +3478,7 @@ bool GVN::performPRE(Function &F) {
       // we would need to insert instructions in more than one pred.
       if (NumWithout != 1 || NumWith == 0)
         continue;
-      
+
       // Don't do PRE across indirect branch.
       if (isa<IndirectBrInst>(PREPred->getTerminator()))
         continue;
@@ -3563,7 +3563,7 @@ bool GVN::performPRE(Function &F) {
           unsigned jj = PHINode::getOperandNumForIncomingValue(ii);
           AA->addEscapingUse(Phi->getOperandUse(jj));
         }
-        
+
         if (MD)
           MD->invalidateCachedPointerInfo(Phi);
       }

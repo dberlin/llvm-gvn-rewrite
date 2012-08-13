@@ -795,8 +795,28 @@ storeRegToStackSlot(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
       } else
         llvm_unreachable("Unknown reg class!");
       break;
+    case 24:
+      if (ARM::DTripleRegClass.hasSubClassEq(RC)) {
+        // Use aligned spills if the stack can be realigned.
+        if (Align >= 16 && getRegisterInfo().canRealignStack(MF)) {
+          AddDefaultPred(BuildMI(MBB, I, DL, get(ARM::VST1d64TPseudo))
+                     .addFrameIndex(FI).addImm(16)
+                     .addReg(SrcReg, getKillRegState(isKill))
+                     .addMemOperand(MMO));
+        } else {
+          MachineInstrBuilder MIB =
+          AddDefaultPred(BuildMI(MBB, I, DL, get(ARM::VSTMDIA))
+                       .addFrameIndex(FI))
+                       .addMemOperand(MMO);
+          MIB = AddDReg(MIB, SrcReg, ARM::dsub_0, getKillRegState(isKill), TRI);
+          MIB = AddDReg(MIB, SrcReg, ARM::dsub_1, 0, TRI);
+          AddDReg(MIB, SrcReg, ARM::dsub_2, 0, TRI);
+        }
+      } else
+        llvm_unreachable("Unknown reg class!");
+      break;
     case 32:
-      if (ARM::QQPRRegClass.hasSubClassEq(RC)) {
+      if (ARM::QQPRRegClass.hasSubClassEq(RC) || ARM::DQuadRegClass.hasSubClassEq(RC)) {
         if (Align >= 16 && getRegisterInfo().canRealignStack(MF)) {
           // FIXME: It's possible to only store part of the QQ register if the
           // spilled def has a sub-register index.
@@ -868,6 +888,8 @@ ARMBaseInstrInfo::isStoreToStackSlot(const MachineInstr *MI,
     }
     break;
   case ARM::VST1q64:
+  case ARM::VST1d64TPseudo:
+  case ARM::VST1d64QPseudo:
     if (MI->getOperand(0).isFI() &&
         MI->getOperand(2).getSubReg() == 0) {
       FrameIndex = MI->getOperand(0).getIndex();
@@ -942,8 +964,28 @@ loadRegFromStackSlot(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
     } else
       llvm_unreachable("Unknown reg class!");
     break;
-  case 32:
-    if (ARM::QQPRRegClass.hasSubClassEq(RC)) {
+  case 24:
+    if (ARM::DTripleRegClass.hasSubClassEq(RC)) {
+      if (Align >= 16 && getRegisterInfo().canRealignStack(MF)) {
+        AddDefaultPred(BuildMI(MBB, I, DL, get(ARM::VLD1d64TPseudo), DestReg)
+                     .addFrameIndex(FI).addImm(16)
+                     .addMemOperand(MMO));
+      } else {
+        MachineInstrBuilder MIB =
+          AddDefaultPred(BuildMI(MBB, I, DL, get(ARM::VLDMDIA))
+                         .addFrameIndex(FI)
+                         .addMemOperand(MMO));
+        MIB = AddDReg(MIB, DestReg, ARM::dsub_0, RegState::DefineNoRead, TRI);
+        MIB = AddDReg(MIB, DestReg, ARM::dsub_1, RegState::DefineNoRead, TRI);
+        MIB = AddDReg(MIB, DestReg, ARM::dsub_2, RegState::DefineNoRead, TRI);
+        if (TargetRegisterInfo::isPhysicalRegister(DestReg))
+          MIB.addReg(DestReg, RegState::ImplicitDefine);
+      }
+    } else
+      llvm_unreachable("Unknown reg class!");
+    break;
+   case 32:
+    if (ARM::QQPRRegClass.hasSubClassEq(RC) || ARM::DQuadRegClass.hasSubClassEq(RC)) {
       if (Align >= 16 && getRegisterInfo().canRealignStack(MF)) {
         AddDefaultPred(BuildMI(MBB, I, DL, get(ARM::VLD1d64QPseudo), DestReg)
                      .addFrameIndex(FI).addImm(16)
@@ -1016,6 +1058,8 @@ ARMBaseInstrInfo::isLoadFromStackSlot(const MachineInstr *MI,
     }
     break;
   case ARM::VLD1q64:
+  case ARM::VLD1d64TPseudo:
+  case ARM::VLD1d64QPseudo:
     if (MI->getOperand(1).isFI() &&
         MI->getOperand(0).getSubReg() == 0) {
       FrameIndex = MI->getOperand(1).getIndex();
@@ -1974,10 +2018,10 @@ optimizeCompareInstr(MachineInstr *CmpInstr, unsigned SrcReg, unsigned SrcReg2,
   case ARM::t2EORri: {
     // Scan forward for the use of CPSR
     // When checking against MI: if it's a conditional code requires
-    // checking of V bit, then this is not safe to do. If we can't find the
-    // CPSR use (i.e. used in another block), then it's not safe to perform
-    // the optimization.
-    // When checking against Sub, we handle the condition codes GE, LT, GT, LE.
+    // checking of V bit, then this is not safe to do.
+    // It is safe to remove CmpInstr if CPSR is redefined or killed.
+    // If we are done with the basic block, we need to check whether CPSR is
+    // live-out.
     SmallVector<std::pair<MachineOperand*, ARMCC::CondCodes>, 4>
         OperandsToUpdate;
     bool isSafe = false;
@@ -2017,7 +2061,7 @@ optimizeCompareInstr(MachineInstr *CmpInstr, unsigned SrcReg, unsigned SrcReg2,
         else
           switch (CC) {
           default:
-            isSafe = true;
+            // CPSR can be used multiple times, we should continue.
             break;
           case ARMCC::VS:
           case ARMCC::VC:
@@ -2030,10 +2074,15 @@ optimizeCompareInstr(MachineInstr *CmpInstr, unsigned SrcReg, unsigned SrcReg2,
       }
     }
 
-    // If the candidate is Sub, we may exit the loop at end of the basic block.
-    // In that case, it is still safe to remove CmpInstr.
-    if (!isSafe && !Sub)
-      return false;
+    // If CPSR is not killed nor re-defined, we should check whether it is
+    // live-out. If it is live-out, do not optimize.
+    if (!isSafe) {
+      MachineBasicBlock *MBB = CmpInstr->getParent();
+      for (MachineBasicBlock::succ_iterator SI = MBB->succ_begin(),
+               SE = MBB->succ_end(); SI != SE; ++SI)
+        if ((*SI)->isLiveIn(ARM::CPSR))
+          return false;
+    }
 
     // Toggle the optional operand to CPSR.
     MI->getOperand(5).setReg(ARM::CPSR);
@@ -2193,7 +2242,7 @@ ARMBaseInstrInfo::getNumMicroOps(const InstrItineraryData *ItinData,
   //
   // On Cortex-A8, each pair of register loads / stores can be scheduled on the
   // same cycle. The scheduling for the first load / store must be done
-  // separately by assuming the the address is not 64-bit aligned.
+  // separately by assuming the address is not 64-bit aligned.
   //
   // On Cortex-A9, the formula is simply (#reg / 2) + (#reg % 2). If the address
   // is not 64-bit aligned, then AGU would take an extra cycle.  For VFP / NEON

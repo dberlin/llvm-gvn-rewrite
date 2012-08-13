@@ -411,6 +411,10 @@ void InstrEmitter::AddOperand(MachineInstr *MI, SDValue Op,
   } else if (BlockAddressSDNode *BA = dyn_cast<BlockAddressSDNode>(Op)) {
     MI->addOperand(MachineOperand::CreateBA(BA->getBlockAddress(),
                                             BA->getTargetFlags()));
+  } else if (TargetIndexSDNode *TI = dyn_cast<TargetIndexSDNode>(Op)) {
+    MI->addOperand(MachineOperand::CreateTargetIndex(TI->getIndex(),
+                                                     TI->getOffset(),
+                                                     TI->getTargetFlags()));
   } else {
     assert(Op.getValueType() != MVT::Other &&
            Op.getValueType() != MVT::Glue &&
@@ -479,7 +483,8 @@ void InstrEmitter::EmitSubregNode(SDNode *Node,
     unsigned SrcReg, DstReg, DefSubIdx;
     if (DefMI &&
         TII->isCoalescableExtInstr(*DefMI, SrcReg, DstReg, DefSubIdx) &&
-        SubIdx == DefSubIdx) {
+        SubIdx == DefSubIdx &&
+        TRC == MRI->getRegClass(SrcReg)) {
       // Optimize these:
       // r1025 = s/zext r1024, 4
       // r1026 = extract_subreg r1025, 4

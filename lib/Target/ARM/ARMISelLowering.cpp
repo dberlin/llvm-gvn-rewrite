@@ -90,75 +90,70 @@ static const uint16_t GPRArgRegs[] = {
   ARM::R0, ARM::R1, ARM::R2, ARM::R3
 };
 
-void ARMTargetLowering::addTypeForNEON(EVT VT, EVT PromotedLdStVT,
-                                       EVT PromotedBitwiseVT) {
+void ARMTargetLowering::addTypeForNEON(MVT VT, MVT PromotedLdStVT,
+                                       MVT PromotedBitwiseVT) {
   if (VT != PromotedLdStVT) {
-    setOperationAction(ISD::LOAD, VT.getSimpleVT(), Promote);
-    AddPromotedToType (ISD::LOAD, VT.getSimpleVT(),
-                       PromotedLdStVT.getSimpleVT());
+    setOperationAction(ISD::LOAD, VT, Promote);
+    AddPromotedToType (ISD::LOAD, VT, PromotedLdStVT);
 
-    setOperationAction(ISD::STORE, VT.getSimpleVT(), Promote);
-    AddPromotedToType (ISD::STORE, VT.getSimpleVT(),
-                       PromotedLdStVT.getSimpleVT());
+    setOperationAction(ISD::STORE, VT, Promote);
+    AddPromotedToType (ISD::STORE, VT, PromotedLdStVT);
   }
 
-  EVT ElemTy = VT.getVectorElementType();
+  MVT ElemTy = VT.getVectorElementType();
   if (ElemTy != MVT::i64 && ElemTy != MVT::f64)
-    setOperationAction(ISD::SETCC, VT.getSimpleVT(), Custom);
-  setOperationAction(ISD::INSERT_VECTOR_ELT, VT.getSimpleVT(), Custom);
-  setOperationAction(ISD::EXTRACT_VECTOR_ELT, VT.getSimpleVT(), Custom);
+    setOperationAction(ISD::SETCC, VT, Custom);
+  setOperationAction(ISD::INSERT_VECTOR_ELT, VT, Custom);
+  setOperationAction(ISD::EXTRACT_VECTOR_ELT, VT, Custom);
   if (ElemTy == MVT::i32) {
-    setOperationAction(ISD::SINT_TO_FP, VT.getSimpleVT(), Custom);
-    setOperationAction(ISD::UINT_TO_FP, VT.getSimpleVT(), Custom);
-    setOperationAction(ISD::FP_TO_SINT, VT.getSimpleVT(), Custom);
-    setOperationAction(ISD::FP_TO_UINT, VT.getSimpleVT(), Custom);
+    setOperationAction(ISD::SINT_TO_FP, VT, Custom);
+    setOperationAction(ISD::UINT_TO_FP, VT, Custom);
+    setOperationAction(ISD::FP_TO_SINT, VT, Custom);
+    setOperationAction(ISD::FP_TO_UINT, VT, Custom);
   } else {
-    setOperationAction(ISD::SINT_TO_FP, VT.getSimpleVT(), Expand);
-    setOperationAction(ISD::UINT_TO_FP, VT.getSimpleVT(), Expand);
-    setOperationAction(ISD::FP_TO_SINT, VT.getSimpleVT(), Expand);
-    setOperationAction(ISD::FP_TO_UINT, VT.getSimpleVT(), Expand);
+    setOperationAction(ISD::SINT_TO_FP, VT, Expand);
+    setOperationAction(ISD::UINT_TO_FP, VT, Expand);
+    setOperationAction(ISD::FP_TO_SINT, VT, Expand);
+    setOperationAction(ISD::FP_TO_UINT, VT, Expand);
   }
-  setOperationAction(ISD::BUILD_VECTOR, VT.getSimpleVT(), Custom);
-  setOperationAction(ISD::VECTOR_SHUFFLE, VT.getSimpleVT(), Custom);
-  setOperationAction(ISD::CONCAT_VECTORS, VT.getSimpleVT(), Legal);
-  setOperationAction(ISD::EXTRACT_SUBVECTOR, VT.getSimpleVT(), Legal);
-  setOperationAction(ISD::SELECT, VT.getSimpleVT(), Expand);
-  setOperationAction(ISD::SELECT_CC, VT.getSimpleVT(), Expand);
-  setOperationAction(ISD::SIGN_EXTEND_INREG, VT.getSimpleVT(), Expand);
+  setOperationAction(ISD::BUILD_VECTOR,      VT, Custom);
+  setOperationAction(ISD::VECTOR_SHUFFLE,    VT, Custom);
+  setOperationAction(ISD::CONCAT_VECTORS,    VT, Legal);
+  setOperationAction(ISD::EXTRACT_SUBVECTOR, VT, Legal);
+  setOperationAction(ISD::SELECT,            VT, Expand);
+  setOperationAction(ISD::SELECT_CC,         VT, Expand);
+  setOperationAction(ISD::SIGN_EXTEND_INREG, VT, Expand);
   if (VT.isInteger()) {
-    setOperationAction(ISD::SHL, VT.getSimpleVT(), Custom);
-    setOperationAction(ISD::SRA, VT.getSimpleVT(), Custom);
-    setOperationAction(ISD::SRL, VT.getSimpleVT(), Custom);
+    setOperationAction(ISD::SHL, VT, Custom);
+    setOperationAction(ISD::SRA, VT, Custom);
+    setOperationAction(ISD::SRL, VT, Custom);
   }
 
   // Promote all bit-wise operations.
   if (VT.isInteger() && VT != PromotedBitwiseVT) {
-    setOperationAction(ISD::AND, VT.getSimpleVT(), Promote);
-    AddPromotedToType (ISD::AND, VT.getSimpleVT(),
-                       PromotedBitwiseVT.getSimpleVT());
-    setOperationAction(ISD::OR,  VT.getSimpleVT(), Promote);
-    AddPromotedToType (ISD::OR,  VT.getSimpleVT(),
-                       PromotedBitwiseVT.getSimpleVT());
-    setOperationAction(ISD::XOR, VT.getSimpleVT(), Promote);
-    AddPromotedToType (ISD::XOR, VT.getSimpleVT(),
-                       PromotedBitwiseVT.getSimpleVT());
+    setOperationAction(ISD::AND, VT, Promote);
+    AddPromotedToType (ISD::AND, VT, PromotedBitwiseVT);
+    setOperationAction(ISD::OR,  VT, Promote);
+    AddPromotedToType (ISD::OR,  VT, PromotedBitwiseVT);
+    setOperationAction(ISD::XOR, VT, Promote);
+    AddPromotedToType (ISD::XOR, VT, PromotedBitwiseVT);
   }
 
   // Neon does not support vector divide/remainder operations.
-  setOperationAction(ISD::SDIV, VT.getSimpleVT(), Expand);
-  setOperationAction(ISD::UDIV, VT.getSimpleVT(), Expand);
-  setOperationAction(ISD::FDIV, VT.getSimpleVT(), Expand);
-  setOperationAction(ISD::SREM, VT.getSimpleVT(), Expand);
-  setOperationAction(ISD::UREM, VT.getSimpleVT(), Expand);
-  setOperationAction(ISD::FREM, VT.getSimpleVT(), Expand);
+  setOperationAction(ISD::SDIV, VT, Expand);
+  setOperationAction(ISD::UDIV, VT, Expand);
+  setOperationAction(ISD::FDIV, VT, Expand);
+  setOperationAction(ISD::SREM, VT, Expand);
+  setOperationAction(ISD::UREM, VT, Expand);
+  setOperationAction(ISD::FREM, VT, Expand);
 }
 
-void ARMTargetLowering::addDRTypeForNEON(EVT VT) {
+void ARMTargetLowering::addDRTypeForNEON(MVT VT) {
   addRegisterClass(VT, &ARM::DPRRegClass);
   addTypeForNEON(VT, MVT::f64, MVT::v2i32);
 }
 
-void ARMTargetLowering::addQRTypeForNEON(EVT VT) {
+void ARMTargetLowering::addQRTypeForNEON(MVT VT) {
   addRegisterClass(VT, &ARM::QPRRegClass);
   addTypeForNEON(VT, MVT::v2f64, MVT::v4i32);
 }
@@ -1041,8 +1036,9 @@ const TargetRegisterClass *ARMTargetLowering::getRegClassFor(EVT VT) const {
 
 // Create a fast isel object.
 FastISel *
-ARMTargetLowering::createFastISel(FunctionLoweringInfo &funcInfo) const {
-  return ARM::createFastISel(funcInfo);
+ARMTargetLowering::createFastISel(FunctionLoweringInfo &funcInfo,
+                                  const TargetLibraryInfo *libInfo) const {
+  return ARM::createFastISel(funcInfo, libInfo);
 }
 
 /// getMaximalGlobalOffset - Returns the maximal possible offset which can
@@ -1171,6 +1167,8 @@ CCAssignFn *ARMTargetLowering::CCAssignFnForNode(CallingConv::ID CC,
     return (Return ? RetCC_ARM_AAPCS : CC_ARM_AAPCS);
   case CallingConv::ARM_APCS:
     return (Return ? RetCC_ARM_APCS : CC_ARM_APCS);
+  case CallingConv::GHC:
+    return (Return ? RetCC_ARM_APCS : CC_ARM_APCS_GHC);
   }
 }
 
@@ -4271,6 +4269,10 @@ SDValue ARMTargetLowering::ReconstructShuffle(SDValue Op,
 
     // Record this extraction against the appropriate vector if possible...
     SDValue SourceVec = V.getOperand(0);
+    // If the element number isn't a constant, we can't effectively
+    // analyze what's going on.
+    if (!isa<ConstantSDNode>(V.getOperand(1)))
+      return SDValue();
     unsigned EltNo = cast<ConstantSDNode>(V.getOperand(1))->getZExtValue();
     bool FoundSource = false;
     for (unsigned j = 0; j < SourceVecs.size(); ++j) {
@@ -6859,7 +6861,7 @@ ARMTargetLowering::EmitInstrWithCustomInserter(MachineInstr *MI,
     RSBBB->addSuccessor(SinkBB);
 
     // insert a cmp at the end of BB
-    AddDefaultPred(BuildMI(BB, dl, 
+    AddDefaultPred(BuildMI(BB, dl,
                            TII->get(isThumb2 ? ARM::t2CMPri : ARM::CMPri))
                    .addReg(ABSSrcReg).addImm(0));
 
@@ -7678,7 +7680,7 @@ static SDValue PerformSTORECombine(SDNode *N,
   if (St->isVolatile())
     return SDValue();
 
-  // Optimize trunc store (of multiple scalars) to shuffle and store.  First, 
+  // Optimize trunc store (of multiple scalars) to shuffle and store.  First,
   // pack all of the elements in one place.  Next, store to memory in fewer
   // chunks.
   SDValue StVal = St->getValue();
@@ -9046,12 +9048,19 @@ bool ARMTargetLowering::isLegalICmpImmediate(int64_t Imm) const {
   return Imm >= 0 && Imm <= 255;
 }
 
-/// isLegalAddImmediate - Return true if the specified immediate is legal
-/// add immediate, that is the target has add instructions which can add
-/// a register with the immediate without having to materialize the
+/// isLegalAddImmediate - Return true if the specified immediate is a legal add
+/// *or sub* immediate, that is the target has add or sub instructions which can
+/// add a register with the immediate without having to materialize the
 /// immediate into a register.
 bool ARMTargetLowering::isLegalAddImmediate(int64_t Imm) const {
-  return ARM_AM::getSOImmVal(Imm) != -1;
+  // Same encoding for add/sub, just flip the sign.
+  int64_t AbsImm = llvm::abs64(Imm);
+  if (!Subtarget->isThumb())
+    return ARM_AM::getSOImmVal(AbsImm) != -1;
+  if (Subtarget->isThumb2())
+    return ARM_AM::getT2SOImmVal(AbsImm) != -1;
+  // Thumb1 only has 8-bit unsigned immediate.
+  return AbsImm >= 0 && AbsImm <= 255;
 }
 
 static bool getARMIndexedAddressParts(SDNode *Ptr, EVT VT,

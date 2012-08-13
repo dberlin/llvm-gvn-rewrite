@@ -24,7 +24,7 @@ class X86MachineFunctionInfo : public MachineFunctionInfo {
   virtual void anchor();
 
   /// ForceFramePointer - True if the function is required to use of frame
-  /// pointer for reasons other than it containing dynamic allocation or 
+  /// pointer for reasons other than it containing dynamic allocation or
   /// that FP eliminatation is turned off. For example, Cygwin main function
   /// contains stack pointer re-alignment code which requires FP.
   bool ForceFramePointer;
@@ -69,10 +69,6 @@ class X86MachineFunctionInfo : public MachineFunctionInfo {
   /// NumLocalDynamics - Number of local-dynamic TLS accesses.
   unsigned NumLocalDynamics;
 
-  /// After the stack pointer has been restore from the base pointer we
-  /// use a cached adjusment.
-  int64_t BPAdj;
-
 public:
   X86MachineFunctionInfo() : ForceFramePointer(false),
                              CalleeSavedFrameSize(0),
@@ -87,7 +83,7 @@ public:
                              VarArgsFPOffset(0),
                              ArgumentStackSize(0),
                              NumLocalDynamics(0) {}
-  
+
   explicit X86MachineFunctionInfo(MachineFunction &MF)
     : ForceFramePointer(false),
       CalleeSavedFrameSize(0),
@@ -101,10 +97,9 @@ public:
       VarArgsGPOffset(0),
       VarArgsFPOffset(0),
       ArgumentStackSize(0),
-      NumLocalDynamics(0),
-      BPAdj(0) {}
+      NumLocalDynamics(0) {}
 
-  bool getForceFramePointer() const { return ForceFramePointer;} 
+  bool getForceFramePointer() const { return ForceFramePointer;}
   void setForceFramePointer(bool forceFP) { ForceFramePointer = forceFP; }
 
   unsigned getCalleeSavedFrameSize() const { return CalleeSavedFrameSize; }
@@ -143,15 +138,6 @@ public:
   unsigned getNumLocalDynamicTLSAccesses() const { return NumLocalDynamics; }
   void incNumLocalDynamicTLSAccesses() { ++NumLocalDynamics; }
 
-  /// setBasePtrStackAdjustment - If we're restoring the stack pointer from the
-  /// base pointer, due to dynamic stack realignment + VLAs, we cache the
-  /// number of bytes initially allocated for the stack frame.  In obscure
-  /// cases (e.g., tail calls with byval argument and no stack protector), the
-  /// stack gets adjusted outside of the prolog, but these shouldn't be 
-  /// considered when restoring from the base pointer.  Currently, this is only
-  /// needed for x86.
-  void setBasePtrStackAdjustment(int64_t adj) { BPAdj = adj; }
-  int64_t getBasePtrStackAdjustment() const { return BPAdj; }
 };
 
 } // End llvm namespace
