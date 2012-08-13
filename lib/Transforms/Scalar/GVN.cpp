@@ -125,10 +125,8 @@ STATISTIC(NumGVNBlocksDeleted, "Number of blocks deleted");
 STATISTIC(NumGVNLoad,   "Number of loads deleted");
 STATISTIC(NumGVNPRE,    "Number of instructions PRE'd");
 STATISTIC(NumGVNBlocks, "Number of blocks merged");
-STATISTIC(NumGVNSimpl,  "Number of instructions simplified");
 STATISTIC(NumGVNEqProp, "Number of equalities propagated");
 STATISTIC(NumPRELoad,   "Number of loads PRE'd");
-STATISTIC(NumGVNPhisEqual, "Number of equivalent PHI");
 STATISTIC(NumGVNPhisAllSame, "Number of PHIs whos arguments are all the same");
 STATISTIC(NumGVNBinOpsSimplified, "Number of binary operations simplified");
 STATISTIC(NumGVNCmpInsSimplified, "Number of comparison operations simplified");
@@ -409,10 +407,10 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     DenseSet<std::pair<Value*, BasicBlock*> > members;
     bool dead;
     explicit CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0),
-                               dead(false) {};
+                               dead(false) {}
     CongruenceClass(Value *Leader, Expression *E):id(nextCongruenceNum++),
                                                   leader(Leader), expression(E),
-                                                  dead(false) {};
+                                                  dead(false) {}
   };
 
   DenseMap<Value*, CongruenceClass*> valueToClass;
@@ -459,7 +457,7 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     Expression(uint32_t o = ~2U) : etype_(ExpressionTypeBase), opcode_(o) {}
     Expression(ExpressionType etype, uint32_t o = ~2U): etype_(etype), opcode_(o) { }
 
-    virtual ~Expression() {};
+    virtual ~Expression() {}
 
     bool operator==(const Expression &other) const {
       if (opcode_ != other.opcode_)
@@ -526,9 +524,9 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 
     BasicExpression():type_(NULL)  {
       etype_ = ExpressionTypeBasic;
-    };
+    }
 
-    virtual ~BasicExpression() {};
+    virtual ~BasicExpression() {}
 
     virtual bool equals(const Expression &other) const {
       const BasicExpression &OE = cast<BasicExpression>(other);
@@ -577,9 +575,9 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
       callinst_ = CI;
       nomem_ = nomem;
       readonly_ = readonly;
-    };
+    }
 
-    virtual ~CallExpression() {};
+    virtual ~CallExpression() {}
 
     virtual bool equals(const Expression &other) const {
       // Two calls are never the same if we don't have memory dependence info
@@ -660,16 +658,16 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
       isStore_ = false;
       nonLocal_ = false;
       inst_.loadinst = L;
-    };
+    }
 
     MemoryExpression(StoreInst *S) {
       etype_ = ExpressionTypeMemory;
       isStore_ = true;
       nonLocal_ = false;
       inst_.storeinst = S;
-    };
+    }
 
-    virtual ~MemoryExpression() {};
+    virtual ~MemoryExpression() {}
 
     virtual bool equals(const Expression &other) const {
       // Two loads/stores are never the same if we don't have memory dependence info
@@ -713,9 +711,9 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 
     InsertValueExpression() {
       etype_ = ExpressionTypeInsertValue;
-    };
+    }
 
-    virtual ~InsertValueExpression() {};
+    virtual ~InsertValueExpression() {}
 
     virtual bool equals(const Expression &other) const {
       const InsertValueExpression &OE = cast<InsertValueExpression>(other);
@@ -1846,7 +1844,7 @@ Expression *GVN::createExpression(Instruction *I) {
       }
     }
 
-  } else if (SelectInst *SI = dyn_cast<SelectInst>(I)) {
+  } else if (isa<SelectInst>(I)) {
     //TODO: Since we noop bitcasts, we may need to check types before
     //simplifying, so that we don't end up simplifying based on a wrong
     //type assumption. We should clean this up so we can use constants of the wrong type
