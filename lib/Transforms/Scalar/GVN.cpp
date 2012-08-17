@@ -2208,6 +2208,16 @@ unsigned GVN::replaceAllDominatedUsesWith(Value *From, Value *To,
 /// every block dominated by 'Root'.  Exploit this, for example by
 /// replacing 'LHS' with 'RHS' everywhere in the scope.  Returns
 /// whether a change was made.
+// FIXME: This is part of the old GVN algorithm that we have
+// temporarily kept.  It should be replaced with proper predicate
+// support.
+// Right now it requires touching and replacing instructions in the
+// middle of analysis.  Worse, it requires elimination on every
+// iteration in order to maximize the equalities found, because
+// the elimination it performs is fairly simple, and it expects
+// something to go looking for leaders and eliminating on every
+// iteration.
+
 bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
   SmallVector<std::pair<Value*, Value*>, 4> Worklist;
   Worklist.push_back(std::make_pair(LHS, RHS));
