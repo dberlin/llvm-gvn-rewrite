@@ -1076,6 +1076,14 @@ namespace {
   char GVN::ID = 0;
 }
 
+// Test whether a load and a memory expression are going to produce
+// the same value.  
+// This is done by testing each non-local dependency to see if it is
+// in the same congruence class, or if we can definitely extract the
+// value of this load from the dependency.
+// FIXME: At some point, the "value can be extracted" analysis should
+// really be part of something else, and this should be straight
+// dependency equality.
 bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
                                       const MemoryExpression &OE) const {
   // Check our two caches.  Note that the caches do not cause us
@@ -1085,11 +1093,15 @@ bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
   // As such, we only cache negative results, never positive ones
   // Positive results may become negative results in cases where
   // the congruence classes change
+  // The first type of cache is a simple pairwise cache that tests
+  // whether we found the instruction pair to have the same
+  // dependency.
+  // The second type of cache is a cache of (pointer argument, BB of
+  // load instruction) -> result.
 
   DepIQueryMap::key_type iCacheKey(std::make_pair(LI, OE.inst_.inst));
   DepIQueryMap::const_iterator DII = depIQueryCache.find(iCacheKey);
   if (DII != depIQueryCache.end()) {
-    DEBUG(dbgs() << "IDep query hit\n");
     return DII->second;
   }
 
@@ -1110,8 +1122,13 @@ bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
   // We should mark the non-local ones so we can try to PRE them later
   SmallVector<NonLocalDepResult, 64> Deps;
   AliasAnalysis::Location Loc = AA->getLocation(LI);
-  // TODO: This should be safe right now (getLocation rips the type info out
-  // before we change it, etc).  It may become unsafe in the future.
+  // TODO: This valueizes the pointer argument, which helps eliminate
+  // false dependencies, and make pointer dependency testing faster by
+  // making caching work better.
+  // While this should be safe right now (getLocation rips the type info out
+  // before we change it, so we aren't messing with what it thinks the
+  // size of the access is, etc).
+  // It may become unsafe in the future.
   // We should change the interface and code a bit to make this
   // explicit
   // Note that this catches significantly more loads, because we
@@ -1274,6 +1291,20 @@ bool MemoryExpression::nonLocalEquals(LoadInst *LI, MemDepResult &Dep,
   return true;
 }
 
+
+// This is the normal memory dependency testing. We determine if two
+// memory expressions have the same dependencies.  For stores, this is
+// simple.  Two stores are valued the same if they store the same
+// value to the same place.  For loads, this is more complicated. 
+// For loads with non-local dependencies, we hand off testing to
+// nonLocalEquals.
+// For other loads, we check to see whether we are dependent on the
+// instruction from the other memory dependency.  If so, we see if
+// this and the other expression are the same except for type, or
+// we can otherwise extract the value from it. 
+// FIXME: At some point, the "value can be extracted" analysis should
+// really be part of something else, and this should be straight
+// dependency equality.
 bool MemoryExpression::depequals(const Expression &other)
 {
   const MemoryExpression &OE = cast<MemoryExpression>(other);
@@ -1288,6 +1319,11 @@ bool MemoryExpression::depequals(const Expression &other)
         return nonLocalEquals(LI, Dep, OE);
       }
       // If we weren't dependent on the other load, they aren't equal.
+      // FIXME: This isn't strictly true, they could produce the same
+      // value even if they were not dependent on each other, if the
+      // dependency in the way is a false dependency.  This starts to
+      // require fairly complicated analysis that does not belong in
+      // an equals function.  
       if (Dep.getInst() != OI)
         return false;
       // If we are dependent, but it's not a straight def, see if they can be made equal.
@@ -1818,6 +1854,12 @@ Expression *GVN::createExpression(Instruction *I) {
   }
 
 
+  // Perform simplificaiton
+  // TODO: Right now we only check to see if we get a constant result.
+  // We may get a less than constant, but still better, result for
+  // some operations.
+  //  IE add 0, x -> x
+  // We should handle this by simply rewriting the expression.
   if (CmpInst *CI = dyn_cast<CmpInst>(I)) {
     // Sort the operand value numbers so x<y and y>x get the same value number.
     CmpInst::Predicate Predicate = CI->getPredicate();
@@ -1845,9 +1887,6 @@ Expression *GVN::createExpression(Instruction *I) {
     }
 
   } else if (isa<SelectInst>(I)) {
-    //TODO: Since we noop bitcasts, we may need to check types before
-    //simplifying, so that we don't end up simplifying based on a wrong
-    //type assumption. We should clean this up so we can use constants of the wrong type
     if (isa<Constant>(E->varargs[0])
         || (E->varargs[1]->getType() == I->getOperand(1)->getType()
             && E->varargs[2]->getType() == I->getOperand(2)->getType())) {
@@ -1859,10 +1898,7 @@ Expression *GVN::createExpression(Instruction *I) {
         return performSymbolicEvaluation(V, I->getParent());
       }
     }
-  }
-
-  // Handle simplifying
-  if (I->isBinaryOp()) {
+  } else if (I->isBinaryOp()) {
     //TODO: Since we noop bitcasts, we may need to check types before
     //simplifying, so that we don't end up simplifying based on a
     //wrong type assumption
@@ -1914,14 +1950,12 @@ Expression *GVN::createInsertValueExpression(InsertValueInst *I) {
 
 Expression *GVN::createVariableExpression(Value *V) {
   VariableExpression *E = new VariableExpression(V);
-  // E->setType(C->getType());
   E->setOpcode(V->getValueID());
   return E;
 }
 
 Expression *GVN::createConstantExpression(Constant *C) {
   ConstantExpression *E = new ConstantExpression(C);
-  // E->setType(C->getType());
   E->setOpcode(C->getValueID());
   return E;
 }
@@ -2900,8 +2934,13 @@ void GVN::handleNewInstruction(Instruction *I) {
 
 /// processNonLocalLoad - Attempt to eliminate a load whose dependencies are
 /// non-local by performing PHI construction.
+// FIXME: This is one of the last vestiges of the old GVN.
+// Because it performs a weird optimization not subsumed by anything
+// else, we run it on singleton loads.  Realistically, this should be
+// subsumed into PRE or elimination directly.  As it is, it is quite
+// expensive, because it re-gets all the non-local pointer dependencies. 
+
 bool GVN::processNonLocalLoad(LoadInst *LI) {
-  return false;
 
   // Find the non-local dependencies of the load.
   SmallVector<NonLocalDepResult, 64> Deps;
@@ -3372,7 +3411,8 @@ Value *GVN::findPRELeader(BasicBlock *BB, Value *Op) {
 }
 
 /// performPRE - Perform a purely local form of PRE that looks for diamond
-/// control flow patterns and attempts to perform simple PRE at the join point.
+/// control flow patterns and attempts to perform simple PRE at the
+/// join point.
 bool GVN::performPRE(Function &F) {
   bool Changed = false;
 
@@ -3724,7 +3764,9 @@ bool GVN::runOnFunction(Function& F) {
   }
   eliminateInstructions(F);
 
-
+  
+  // Note: It is not currently safe to use the leader info in congruence classes
+  // after PRE has finished, as PRE does not update or respect them.
   if (EnablePRE) {
     bool PREChanged = true;
     while (PREChanged) {
@@ -3732,30 +3774,26 @@ bool GVN::runOnFunction(Function& F) {
       Changed |= PREChanged;
     }
   }
-
+  
+  // Delete all instructions marked for deletion.
   for (DenseSet<Instruction*>::iterator DI = instrsToErase_.begin(), DE = instrsToErase_.end(); DI != DE;) {
     Instruction *toErase = *DI;
     ++DI;
-    // if (!toErase->use_empty()) {
-    //   for (Value::use_iterator UI = toErase->use_begin(), UE = toErase->use_end();
-    //   UI != UE; ++UI) {
-    //  assert (instrsToErase_.count(cast<Instruction>(*UI)) && "trying to removing something without also deleting it's uses");
-    //   }
-    // }
     if (!toErase->use_empty())
       toErase->replaceAllUsesWith(UndefValue::get(toErase->getType()));
 
     toErase->eraseFromParent();
   }
 
- for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI){
-   BasicBlock *BB = FI;
-   if (!reachableBlocks.count(BB)) {
-     DEBUG(dbgs() << "We believe block " << getBlockName(BB) << " is unreachable\n");
-     DeleteInstructionInBlock(BB);
-     Changed = true;
-   }
- }
+  // Delete all unreachable blocks
+  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI){
+    BasicBlock *BB = FI;
+    if (!reachableBlocks.count(BB)) {
+      DEBUG(dbgs() << "We believe block " << getBlockName(BB) << " is unreachable\n");
+      DeleteInstructionInBlock(BB);
+      Changed = true;
+    }
+  }
 
 
  valueToClass.clear();
@@ -3866,7 +3904,6 @@ bool GVN::eliminateInstructions(Function &F) {
      }
    } else {
 
-#if 1
      // If this is a singleton, the only thing we do is process
      // non-local loads.
      // TODO: processNonLocalLoad still does PRE of loads,
@@ -3889,18 +3926,6 @@ bool GVN::eliminateInstructions(Function &F) {
        }
        continue;
      } else {
-#if 0
-       MemoryExpression *ME;
-       if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
-         if (0|| ME->hadNonLocal()) {
-           Value *member = CC->members.begin()->first;
-           if (LoadInst *LI = dyn_cast<LoadInst>(member)){
-             processNonLocalLoad(LI);
-           }
-         }
-       }
-#endif
-#endif
        std::set<ValueDFS> DFSOrderedSet;
        convertDenseToDFSOrdered(CC->members, DFSOrderedSet);
 
