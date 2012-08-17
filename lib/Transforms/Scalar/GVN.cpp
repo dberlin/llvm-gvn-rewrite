@@ -2237,24 +2237,6 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
     if (isa<Constant>(LHS) || (isa<Argument>(LHS) && !isa<Constant>(RHS)))
       std::swap(LHS, RHS);
     assert((isa<Argument>(LHS) || isa<Instruction>(LHS)) && "Unexpected value!");
-    //TODO: Improve equality propagation
-#if 0
-    // If there is no obvious reason to prefer the left-hand side over
-    // the right-hand side, ensure the longest lived term is on the
-    // right-hand side, so the shortest lived term will be replaced by
-    // the longest lived.  This tends to expose more simplifications.
-    uint32_t LVN = VN.lookup_or_add(LHS);
-    if ((isa<Argument>(LHS) && isa<Argument>(RHS)) ||
-        (isa<Instruction>(LHS) && isa<Instruction>(RHS))) {
-      // Move the 'oldest' value to the right-hand side, using the value number as
-      // a proxy for age.
-      uint32_t RVN = VN.lookup_or_add(RHS);
-      if (LVN < RVN) {
-        std::swap(LHS, RHS);
-        LVN = RVN;
-      }
-    }
-#endif
     assert((!isa<Instruction>(RHS) ||
             DT->properlyDominates(cast<Instruction>(RHS)->getParent(), Root)) &&
            "Instruction doesn't dominate scope!");
