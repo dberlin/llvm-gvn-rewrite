@@ -3973,46 +3973,47 @@ bool GVN::eliminateInstructions(Function &F) {
              ValueStack.push_back(Member);
              DFSStack.push_back(std::make_pair(MemberDFSIn, MemberDFSOut));
            }
-         } else {
-           // Skip the case of trying to eliminate the leader.
-           if (Member == CC->leader)
-             continue;
-
-           Value *Result = ValueStack.back();
-           DEBUG(dbgs() << "Found replacement " << *Result << " for " << *Member << "\n");
-
-           // If we find a load or a store as a replacement, make sure
-           // to correct the type.  This should *always* work, since
-           // we tested whether it was possible before value numbering
-           // the same.
-           LoadInst *LI;
-           if (Result->getType() != Member->getType() && (LI = dyn_cast<LoadInst>(Member))) {
-             if (LoadInst *LIR = dyn_cast<LoadInst>(Result)) {
-               int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
-                                                          LI->getPointerOperand(),
-                                                          LIR, *TD);
-               // If this assert is triggered, something is broken in
-               // value numbering, not elimination.
-               assert(Offset != -1 && "Should have been able to coerce load");
-
-               Result = GetLoadValueForLoad(LIR, Offset, LI->getType(), LI, *TD);
-
-             } else if (StoreInst *SIR = dyn_cast<StoreInst>(Result)) {
-               int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
-                                                           LI->getPointerOperand(),
-                                                           SIR, *TD);
-               // If this assert is triggered, something is broken in
-               // value numbering, not elimination.
-               assert(Offset != -1 && "Should have been able to coerce store");
-               Result = GetStoreValueForLoad(SIR->getValueOperand(), Offset, LI->getType(), LI, *TD);
-             }
-           }
-
-           // Perform actual replacement
-           Instruction *I;
-           if ((I = dyn_cast<Instruction>(Member)) && Member != CC->leader)
-             replaceInstruction(I, Result, CC);
-         }
+         } 
+	 // Skip the case of trying to eliminate the leader.
+	 if (Member == CC->leader)
+	   continue;
+	 
+	 Value *Result = ValueStack.back();
+	 if (Member == Result)
+	   continue;
+	 DEBUG(dbgs() << "Found replacement " << *Result << " for " << *Member << "\n");
+	 
+	 // If we find a load or a store as a replacement, make sure
+	 // to correct the type.  This should *always* work, since
+	 // we tested whether it was possible before value numbering
+	 // the same.
+	 LoadInst *LI;
+	 if (Result->getType() != Member->getType() && (LI = dyn_cast<LoadInst>(Member))) {
+	   if (LoadInst *LIR = dyn_cast<LoadInst>(Result)) {
+	     int Offset = AnalyzeLoadFromClobberingLoad(LI->getType(),
+							LI->getPointerOperand(),
+							LIR, *TD);
+	     // If this assert is triggered, something is broken in
+	     // value numbering, not elimination.
+	     assert(Offset != -1 && "Should have been able to coerce load");
+	     
+	     Result = GetLoadValueForLoad(LIR, Offset, LI->getType(), LI, *TD);
+	     
+	   } else if (StoreInst *SIR = dyn_cast<StoreInst>(Result)) {
+	     int Offset = AnalyzeLoadFromClobberingStore(LI->getType(),
+							 LI->getPointerOperand(),
+							 SIR, *TD);
+	     // If this assert is triggered, something is broken in
+	     // value numbering, not elimination.
+	     assert(Offset != -1 && "Should have been able to coerce store");
+	     Result = GetStoreValueForLoad(SIR->getValueOperand(), Offset, LI->getType(), LI, *TD);
+	   }
+	 }
+	 
+	 // Perform actual replacement
+	 Instruction *I;
+	 if ((I = dyn_cast<Instruction>(Member)) && Member != CC->leader)
+	   replaceInstruction(I, Result, CC);
        }
      }
    }
