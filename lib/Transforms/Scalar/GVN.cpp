@@ -1910,6 +1910,15 @@ Expression *GVN::createExpression(Instruction *I) {
       delete E;
       return createConstantExpression(C);
     }
+  } else if (BitCastInst *BI = dyn_cast<BitCastInst>(I)) {
+    Value *V = SimplifyInstruction(BI);
+    Constant *C;
+    if (V && (C = dyn_cast<Constant>(V))) {
+      DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
+      NumGVNBinOpsSimplified++;
+      delete E;
+      return createConstantExpression(C);
+    }
   } else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
     //TODO: Since we noop bitcasts, we may need to check types before
     //simplifying, so that we don't end up simplifying based on a
@@ -1933,6 +1942,10 @@ Expression *GVN::createExpression(Instruction *I) {
 Expression *GVN::uniquifyExpression(Expression *E) {
   std::pair<DenseSet<Expression *, ComparingExpressionInfo>::iterator, bool> P = uniquedExpressions.insert(E);
   if (!P.second && *(P.first) != E) {
+    // We rely on the expression either never being inserted into
+    // expressionsToDelete, or properly removed by our caller.
+     
+    assert(!expressionToDelete.count(E) && "This expression should not be in expressionsToDelete");
     delete E;
     return *(P.first);
   }
@@ -2165,10 +2178,10 @@ Expression *GVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
   }
   if (!E)
     return NULL;
-  expressionToDelete.insert(E);
 
   if (isa<ConstantExpression>(E) || isa<VariableExpression>(E))
     E = uniquifyExpression(E);
+  expressionToDelete.insert(E);
   return E;
 }
 
@@ -3738,8 +3751,8 @@ bool GVN::runOnFunction(Function& F) {
           if (!I->isTerminator()) {
             // This is inside the terminator check because otherwise,
             // we will remove unreachable marks, since they have no
-            // uses.
-            if (I->use_empty()) {
+            // uses.localpr
+            if (!I->mayHaveSideEffects() && I->use_empty()) {
               UpdateMemDepInfo(MD, I, NULL);
               markInstructionForDeletion(I);
               continue;
@@ -3883,8 +3896,8 @@ bool GVN::eliminateInstructions(Function &F) {
        ++CI;
        // Skip the member that is also us :)
        if (member != CC->leader) {
-         //TODO: eliminate duplicate bitcasts but not valid bitcast
-         if (isa<StoreInst>(member) || isa<BitCastInst>(member))
+	 //
+         if (isa<StoreInst>(member) || (isa<BitCastInst>(member) && !isa<Constant>(CC->leader)))
            continue;
          DEBUG(dbgs() << "Found replacement " << *(CC->leader) << " for " << *member << "\n");
          // Due to equality propagation, these may not always be
@@ -3931,8 +3944,9 @@ bool GVN::eliminateInstructions(Function &F) {
          // Bitcasts are always going to value number to their values
          // (because of type ignoring above), so we will think we can
          // eliminate every bitcast, but we can't. We could eliminate
-         // bitcasts that value number to *other bitcasts*, however.
-         if (isa<StoreInst>(Member) || isa<BitCastInst>(Member))
+         // bitcasts that value number to *other bitcasts*.
+	 
+         if (isa<StoreInst>(Member) || (isa<BitCastInst>(Member) && !isa<Constant>(CC->leader)))
            continue;
 
          if (DFSStack.empty()) {
