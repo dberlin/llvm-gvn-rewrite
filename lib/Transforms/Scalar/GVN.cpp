@@ -127,7 +127,6 @@ using namespace PatternMatch;
 // get propagated around. 
 // When elimination comes around, prefer undef's as leaders as we do
 // with constants.
-// 2. Support simplification into copies (IE and x,x -> x)
 // 3. Duplicate bitcast removal
 
 STATISTIC(NumGVNInstrDeleted,  "Number of instructions deleted");
@@ -138,8 +137,7 @@ STATISTIC(NumGVNBlocks, "Number of blocks merged");
 STATISTIC(NumGVNEqProp, "Number of equalities propagated");
 STATISTIC(NumPRELoad,   "Number of loads PRE'd");
 STATISTIC(NumGVNPhisAllSame, "Number of PHIs whos arguments are all the same");
-STATISTIC(NumGVNBinOpsSimplified, "Number of binary operations simplified");
-STATISTIC(NumGVNCmpInsSimplified, "Number of comparison operations simplified");
+STATISTIC(NumGVNOpsSimplified, "Number of binary operations simplified");
 
 static cl::opt<bool> EnablePRE("enable-pre",
                                cl::init(true), cl::Hidden);
@@ -1057,6 +1055,7 @@ namespace {
     DenseMap<Instruction*, uint32_t> InstrLocalDFS;
 
     // Symbolic evaluation
+    Expression *checkSimplificationResults(Expression*, Instruction*, Value*);
     Expression *performSymbolicEvaluation(Value*, BasicBlock*);
     Expression *performSymbolicLoadEvaluation(Instruction*, BasicBlock*);
     Expression *performSymbolicStoreEvaluation(Instruction*, BasicBlock*);
@@ -1429,6 +1428,10 @@ bool MemoryExpression::depequals(const Expression &other)
 
 bool CallExpression::depequals(const Expression &other) {
   const CallExpression &OE = cast<CallExpression>(other);
+  // If neither call touches memory, we're done
+  if (nomem_ && OE.nomem_)
+    return true;
+
   // Given the same arguments, two calls are equal if the dependency checker says one is dependent
   // on the other
   if (callinst_ != OE.callinst_) {
@@ -1864,6 +1867,28 @@ Expression *GVN::createCmpExpression(unsigned Opcode,
 }
 
 
+Expression *GVN::checkSimplificationResults(Expression *E, Instruction *I, Value *V) {
+  if (!V)
+    return NULL;
+
+  Constant *C;
+  if ((C = dyn_cast<Constant>(V))) {
+    DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
+    NumGVNOpsSimplified++;
+    delete E;
+    return createConstantExpression(C);
+  }
+  CongruenceClass *CC = valueToClass.lookup(V);
+  if (CC && CC->expression) {
+    DEBUG(dbgs() << "Simplified " << *I << " to " << " expression " << *V << "\n");
+    NumGVNOpsSimplified++;
+    delete E;
+    return CC->expression;
+  }
+  return NULL;
+}
+
+
 Expression *GVN::createExpression(Instruction *I) {
   BasicExpression *E = new BasicExpression();
   setBasicExpressionInfo(I, E);
@@ -1885,7 +1910,7 @@ Expression *GVN::createExpression(Instruction *I) {
   // some operations.
   // IE
   //  add 0, x -> x 
-  // and x, x -> x
+  //  and x, x -> x
   // We should handle this by simply rewriting the expression.
   if (CmpInst *CI = dyn_cast<CmpInst>(I)) {
     // Sort the operand value numbers so x<y and y>x get the same value number.
@@ -1904,13 +1929,9 @@ Expression *GVN::createExpression(Instruction *I) {
     if ((E->varargs[0]->getType() == I->getOperand(0)->getType()
          && E->varargs[1]->getType() == I->getOperand(1)->getType())) {
       Value *V = SimplifyCmpInst(Predicate, E->varargs[0], E->varargs[1], TD, TLI, DT);
-      Constant *C;
-      if (V && (C = dyn_cast<Constant>(V))) {
-        DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
-        NumGVNCmpInsSimplified++;
-        delete E;
-        return createConstantExpression(C);
-      }
+      Expression *simplifiedE;
+      if ((simplifiedE = checkSimplificationResults(E, I, V)))
+	return simplifiedE;
     }
 
   } else if (isa<SelectInst>(I)) {
@@ -1918,34 +1939,23 @@ Expression *GVN::createExpression(Instruction *I) {
         || (E->varargs[1]->getType() == I->getOperand(1)->getType()
             && E->varargs[2]->getType() == I->getOperand(2)->getType())) {
       Value *V = SimplifySelectInst(E->varargs[0], E->varargs[1], E->varargs[2], TD, TLI, DT);
-      if (V) {
-        DEBUG(dbgs() << "Simplified " << *I << " to " << " " << *V << "\n");
-        NumGVNCmpInsSimplified++;
-        delete E;
-        return performSymbolicEvaluation(V, I->getParent());
-      }
+      Expression *simplifiedE;
+      if ((simplifiedE = checkSimplificationResults(E, I, V)))
+	return simplifiedE;
     }
   } else if (I->isBinaryOp()) {
     //TODO: Since we noop bitcasts, we may need to check types before
     //simplifying, so that we don't end up simplifying based on a
     //wrong type assumption
     Value *V = SimplifyBinOp(E->getOpcode(), E->varargs[0], E->varargs[1], TD, TLI, DT);
-    Constant *C;
-    if (V && (C = dyn_cast<Constant>(V))) {
-      DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
-      NumGVNBinOpsSimplified++;
-      delete E;
-      return createConstantExpression(C);
-    }
+    Expression *simplifiedE;
+    if ((simplifiedE = checkSimplificationResults(E, I, V)))
+      return simplifiedE;
   } else if (BitCastInst *BI = dyn_cast<BitCastInst>(I)) {
     Value *V = SimplifyInstruction(BI);
-    Constant *C;
-    if (V && (C = dyn_cast<Constant>(V))) {
-      DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
-      NumGVNBinOpsSimplified++;
-      delete E;
-      return createConstantExpression(C);
-    }
+    Expression *simplifiedE;
+    if ((simplifiedE = checkSimplificationResults(E, I, V)))
+      return simplifiedE;
   } else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
     //TODO: Since we noop bitcasts, we may need to check types before
     //simplifying, so that we don't end up simplifying based on a
@@ -1953,13 +1963,9 @@ Expression *GVN::createExpression(Instruction *I) {
     //constants of the wrong type.
     if (GEP->getPointerOperandType() == E->varargs[0]->getType() ) {
       Value *V = SimplifyGEPInst(E->varargs, TD, TLI, DT);
-      Constant *C;
-      if (V && (C = dyn_cast<Constant>(V))) {
-        DEBUG(dbgs() << "Simplified " << *I << " to " << " constant " << *C << "\n");
-        NumGVNBinOpsSimplified++;
-        delete E;
-        return createConstantExpression(C);
-      }
+      Expression *simplifiedE;
+      if ((simplifiedE = checkSimplificationResults(E, I, V)))
+	return simplifiedE;
     }
   }
 
