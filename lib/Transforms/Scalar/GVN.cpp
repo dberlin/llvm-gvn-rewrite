@@ -376,6 +376,7 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     int dfs_out;
     int localnum;
     Value *value;
+    bool equivalence;
     bool operator <(const ValueDFS &other) const {
       if (dfs_in < other.dfs_in)
         return true;
@@ -384,7 +385,12 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
           if (dfs_out < other.dfs_out)
             return true;
           else if (dfs_out == other.dfs_out)
-            return localnum < other.localnum;
+	    {
+	      if (localnum < other.localnum)
+		return true;
+	      else if (localnum == other.localnum)
+		return !!equivalence < !!other.equivalence;
+	    }
         }
       return false;
     }
@@ -408,14 +414,21 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
   // Each congruence class also has a canonical value expression,
   // though the expression may be null.  The expression is simply an
   // easy
+
   struct CongruenceClass {
+    typedef DenseSet<std::pair<Value*, BasicBlock*> > MemberSet;
     static uint32_t nextCongruenceNum;
     uint32_t id;
     Value* leader;
     // TODO: Do we actually need this? It's not clear what purpose it
     // really serves
     Expression* expression;
-    DenseSet<std::pair<Value*, BasicBlock*> > members;
+    // Actual members of this class.  These are the things the same everywhere
+    MemberSet members;
+    // Noted equivalences.  These are things that are equivalence to
+    // this class over certain paths.  This could be replaced with
+    // proper predicate support during analysis.
+    MemberSet equivalences;
     bool dead;
     explicit CongruenceClass():id(nextCongruenceNum++), leader(0), expression(0),
                                dead(false) {}
@@ -1038,7 +1051,8 @@ namespace {
 
     // Elimination
     bool eliminateInstructions(Function &);
-    void convertDenseToDFSOrdered(DenseSet<std::pair<Value*, BasicBlock*> >&, std::set<ValueDFS>&);
+    void convertDenseToDFSOrdered(CongruenceClass::MemberSet &, std::set<ValueDFS>&, bool);
+
     void replaceInstruction(Instruction*, Value*, CongruenceClass*);
     DenseMap<BasicBlock*, std::pair<int, int> > DFSBBMap;
     DenseMap<Instruction*, uint32_t> InstrLocalDFS;
@@ -2270,12 +2284,7 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
     // 'RHS' within the scope Root.
     CongruenceClass *CC = valueToClass[LHS];
     assert (CC && "Should have found a congruence class");
-    // BUG: This scheme needs to be reworked slightly to record which
-    // members came from equality propagation.
-    // We never want to replace an instruction that came from equality
-    // propagation with something that dominates it. It is simply a
-    // marker for where an equivalent starts.
-    CC->members.insert(std::make_pair(RHS, Root));
+    CC->equivalences.insert(std::make_pair(RHS, Root));
 
     // Replace all occurrences of 'LHS' with 'RHS' everywhere in the
     // scope.  As LHS always has at least one use that is not
@@ -2352,12 +2361,8 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
         }
         // Ensure that any instruction in scope that gets the "A < B"
         // value number is replaced with false.
-	// BUG: This scheme needs to be reworked slightly to record which
-	// members came from equality propagation.
-	// We never want to replace an instruction that came from equality
-	// propagation with something that dominates it. It is simply a
-	// marker for where an equivalent starts.
-        CC->members.insert(std::make_pair(NotVal, Root));
+
+        CC->equivalences.insert(std::make_pair(NotVal, Root));
       }
       // TODO: Equality propagation - do equivalent of this
       // Ensure that any instruction in scope that gets the "A < B" value number
@@ -2478,7 +2483,7 @@ void GVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
       } else if (VClass->leader == V) {
         // TODO: Check what happens if expression represented the leader
         VClass->leader = VClass->members.begin()->first;
-        for (DenseSet<std::pair<Value*,BasicBlock*> >::iterator LI = VClass->members.begin(),
+        for (CongruenceClass::MemberSet::iterator LI = VClass->members.begin(),
                LE = VClass->members.end();
              LI != LE; ++LI) {
           if (Instruction *I = dyn_cast<Instruction>(LI->first))
@@ -3436,7 +3441,7 @@ Value *GVN::findPRELeader(BasicBlock *BB, Value *Op) {
   if (CC->leader && (isa<Argument>(CC->leader) || isa<Constant>(CC->leader) || isa<GlobalValue>(CC->leader)))
     return CC->leader;
 
-  for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator SI = CC->members.begin(),
+  for (CongruenceClass::MemberSet::iterator SI = CC->members.begin(),
          SE = CC->members.end(); SI != SE; ++SI)
     if (DT->dominates(SI->second, BB))
       return SI->first;
@@ -3448,7 +3453,6 @@ Value *GVN::findPRELeader(BasicBlock *BB, Value *Op) {
 /// join point.
 bool GVN::performPRE(Function &F) {
   bool Changed = false;
-
   for (unsigned i = 0, e = congruenceClass.size(); i != e; ++i) {
     CongruenceClass *CC = congruenceClass[i];
     // Skip the INITIAL class, singletons, and dead classes
@@ -3456,7 +3460,8 @@ bool GVN::performPRE(Function &F) {
       continue;
 
     std::set<ValueDFS> DFSOrderedSet;
-    convertDenseToDFSOrdered(CC->members, DFSOrderedSet);
+    // TODO: Include equivalences in PRE
+    convertDenseToDFSOrdered(CC->members, DFSOrderedSet, false);
     DenseMap<BasicBlock*, Value*> predMap;
     for (std::set<ValueDFS>::iterator II = DFSOrderedSet.begin(), IE = DFSOrderedSet.end(); II != IE;) {
       Value *Member = II->value;
@@ -3643,14 +3648,16 @@ bool GVN::performPRE(Function &F) {
   return Changed;
 }
 
-void GVN::convertDenseToDFSOrdered(DenseSet<std::pair<Value*, BasicBlock*> > &Dense,
-                                   std::set<ValueDFS> &DFSOrderedSet) {
-  for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator DI = Dense.begin(), DE = Dense.end();
+void GVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
+                                   std::set<ValueDFS> &DFSOrderedSet,
+				   bool Equivalences) {
+  for (CongruenceClass::MemberSet::iterator DI = Dense.begin(), DE = Dense.end();
        DI != DE; ++DI) {
     std::pair<int, int> DFSPair = DFSBBMap[DI->second];
     ValueDFS VD;
     VD.dfs_in = DFSPair.first;
     VD.dfs_out = DFSPair.second;
+    VD.equivalence = Equivalences;
 
     // If it's an instruction, use the real local dfs number.
     // If it's a value, it *must* have come from equality propagation,
@@ -3717,7 +3724,7 @@ bool GVN::runOnFunction(Function& F) {
 
 
   // Initialize all other instructions to be in INITIAL class
-  DenseSet<std::pair<Value*, BasicBlock*> > InitialValues;
+  CongruenceClass::MemberSet InitialValues;
   for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI)  {
     for (BasicBlock::iterator BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
       InitialValues.insert(std::make_pair(BI, FI));
@@ -3725,7 +3732,7 @@ bool GVN::runOnFunction(Function& F) {
   }
 
   InitialClass = createCongruenceClass(NULL, NULL);
-  for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator LI = InitialValues.begin(),
+  for (CongruenceClass::MemberSet::iterator LI = InitialValues.begin(),
          LE = InitialValues.end();
        LI != LE; ++LI)
     valueToClass[LI->first] = InitialClass;
@@ -3786,7 +3793,6 @@ bool GVN::runOnFunction(Function& F) {
 		continue;
 	      }
 	    }
-	    
 
             Expression *Symbolized = performSymbolicEvaluation(I, *RI);
             performCongruenceFinding(I, *RI, Symbolized);
@@ -3866,6 +3872,7 @@ bool GVN::runOnFunction(Function& F) {
 // Return true if V is a value that will always be available (IE can
 // be placed anywhere) in the function.
 // We avoid mentioning global value
+
 static bool alwaysAvailable(Value *V) {
   return isa<Constant>(V) || isa<Argument>(V);
 }
@@ -3920,7 +3927,7 @@ bool GVN::eliminateInstructions(Function &F) {
    // If this is a leader that is always available, just replace
    // everything with it
    if (alwaysAvailable(CC->leader)) {
-     for (DenseSet<std::pair<Value*, BasicBlock*> >::iterator CI = CC->members.begin(),
+     for (CongruenceClass::MemberSet::iterator CI = CC->members.begin(),
             CE = CC->members.end(); CI != CE; ) {
        Value *member = CI->first;
        ++CI;
@@ -3944,7 +3951,7 @@ bool GVN::eliminateInstructions(Function &F) {
      // TODO: processNonLocalLoad still does PRE of loads,
      // and looking or store based eliminations, and this happens
      // nowhere else.  Once that is fixed, this should be removed.
-     if (CC->members.size() == 1) {
+     if ((CC->members.size()  + CC->equivalences.size()) == 1) {
        MemoryExpression *ME;
        if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
        // This looks like a weird test, because of where hadNonLocal
@@ -3961,13 +3968,22 @@ bool GVN::eliminateInstructions(Function &F) {
        }
        continue;
      } else {
-       std::set<ValueDFS> DFSOrderedSet;
-       convertDenseToDFSOrdered(CC->members, DFSOrderedSet);
+       // Convert the members and equivalences to DFS ordered sets and
+       // then merge them.
+       std::set<ValueDFS> DFSOrderedMembers;
+       convertDenseToDFSOrdered(CC->members, DFSOrderedMembers, false);
+       std::set<ValueDFS> DFSOrderedEquivalences;
+       convertDenseToDFSOrdered(CC->equivalences, DFSOrderedEquivalences, true);
+       std::vector<ValueDFS> DFSOrderedSet;
+       set_union(DFSOrderedMembers.begin(), DFSOrderedMembers.end(),
+		 DFSOrderedEquivalences.begin(), DFSOrderedEquivalences.end(),
+		 std::inserter(DFSOrderedSet, DFSOrderedSet.begin()));
 
-       for (std::set<ValueDFS>::iterator CI = DFSOrderedSet.begin(), CE = DFSOrderedSet.end(); CI != CE;) {
+       for (std::vector<ValueDFS>::iterator CI = DFSOrderedSet.begin(), CE = DFSOrderedSet.end(); CI != CE;) {
          int MemberDFSIn = CI->dfs_in;
          int MemberDFSOut = CI->dfs_out;
          Value *Member = CI->value;
+         bool EquivalenceOnly = CI->equivalence;
          ++CI;
 
          //TODO: eliminate duplicate bitcasts but not valid bitcasts.
@@ -3989,7 +4005,7 @@ bool GVN::eliminateInstructions(Function &F) {
          // We should push whenever it's empty or there is a constant
          // We should pop until we are back within the right DFS scope
          // Walk along, processing members who are dominated by each other.
-         if ((ValueStack.empty() || isa<Constant>(Member))
+         if ((ValueStack.empty() || isa<Constant>(Member) || EquivalenceOnly)
              || !(MemberDFSIn >= DFSStack.back().first
                   && MemberDFSOut <= DFSStack.back().second)) {
            assert(ValueStack.size() == DFSStack.size() && "Mismatch between ValueStack and DFSStack");
@@ -4004,8 +4020,9 @@ bool GVN::eliminateInstructions(Function &F) {
              DFSStack.push_back(std::make_pair(MemberDFSIn, MemberDFSOut));
            }
          } 
-	 // Skip the case of trying to eliminate the leader.
-	 if (Member == CC->leader)
+	 // Skip the case of trying to eliminate the leader, or trying
+	 // to eliminate equivalence-only candidates
+	 if (Member == CC->leader || EquivalenceOnly)
 	   continue;
 	 
 	 Value *Result = ValueStack.back();
