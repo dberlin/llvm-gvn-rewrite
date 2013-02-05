@@ -3749,14 +3749,15 @@ bool GVN::runOnFunction(Function& F) {
           }
 
           if (!I->isTerminator()) {
-            // This is inside the terminator check because otherwise,
-            // we will remove unreachable marks, since they have no
-            // uses.localpr
-            if (!I->mayHaveSideEffects() && I->use_empty()) {
-              UpdateMemDepInfo(MD, I, NULL);
-              markInstructionForDeletion(I);
-              continue;
-            }
+	    // This duplicates what old GVN used to do with loads
+            if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
+	      if (LI->isSimple() && LI->use_empty()) {	
+		UpdateMemDepInfo(MD, I, NULL);
+		markInstructionForDeletion(I);
+		continue;
+	      }
+	    }
+	    
 
             Expression *Symbolized = performSymbolicEvaluation(I, *RI);
             performCongruenceFinding(I, *RI, Symbolized);
