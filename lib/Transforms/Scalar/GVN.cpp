@@ -3908,7 +3908,7 @@ bool GVN::eliminateInstructions(Function &F) {
        }
      }
    } else {
-
+     DEBUG(dbgs() << "Eliminating in congruence class " << CC->id << "\n");
      // If this is a singleton, the only thing we do is process
      // non-local loads.
      // TODO: processNonLocalLoad still does PRE of loads,
