@@ -124,9 +124,10 @@ using namespace PatternMatch;
 // 1. Support load of undef/lifetime start/etc = undef, as per old
 // GVN.  My first thought is to just create an UndefExpression, and
 // treat these loads/etc as equivalent to it, so that the right values
-// get propagated around. 
+// get propagated around.
 // When elimination comes around, prefer undef's as leaders as we do
 // with constants.
+// For the moment, i've added killUselessLoadInst to get the basic case.
 // 3. Duplicate bitcast removal
 
 STATISTIC(NumGVNInstrDeleted,  "Number of instructions deleted");
@@ -4007,15 +4008,17 @@ bool GVN::eliminateInstructions(Function &F) {
      // TODO: processNonLocalLoad still does PRE of loads,
      // and looking or store based eliminations, and this happens
      // nowhere else.  Once that is fixed, this should be removed.
-     if ((CC->members.size()  + CC->equivalences.size()) == 1) {
+     if (CC->members.size() == 1) {
        MemoryExpression *ME;
        if (CC->expression && (ME = dyn_cast<MemoryExpression>(CC->expression))) {
-       // This looks like a weird test, because of where hadNonLocal
-       // is set (depEquals), but it will trigger if we at least
-       // *compared* it with something, causing non-local to be set
-       // appropriately.  If nothing else in the function was even
-       // compared to this, it's probably not worth trying to eliminate.
-         if (ME->hadNonLocal()) {
+	 // This looks like a weird test, because of where hadNonLocal
+	 // is set (depEquals), but it will trigger if we at least
+	 // *compared* it with something, causing non-local to be set
+	 // appropriately.  If nothing else in the function was even
+	 // compared to this, it's probably not worth trying to
+	 // eliminate.
+	 // FIXME: Heuristic temporarily disabled 
+         if (ME->hadNonLocal() || 1) {
            Value *member = CC->members.begin()->first;
            if (LoadInst *LI = dyn_cast<LoadInst>(member)){
              processNonLocalLoad(LI);
