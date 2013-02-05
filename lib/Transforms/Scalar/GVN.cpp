@@ -2296,7 +2296,6 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       Worklist.push_back(std::make_pair(B, RHS));
       continue;
     }
-    //TODO Multi propagation
     // If we are propagating an equality like "(A == B)" == "true"
     // then also propagate the equality A == B.  When propagating a
     // comparison such as "(A >= B)" == "true", replace all instances
@@ -2324,9 +2323,10 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       // This is because at least one of the members may later get
       // split out of the class.
 
-      CongruenceClass *CC = expressionToClass[E];
+      CongruenceClass *CC = expressionToClass.lookup(E);
       delete E;
-
+      // If we didn't find a congruence class, there is no equivalent
+      // instruction already
       if (CC) {
         if (CC->members.size() == 1) {
           unsigned NumReplacements =
@@ -2338,6 +2338,13 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
         // value number is replaced with false.
         CC->members.insert(std::make_pair(NotVal, Root));
       }
+      // TODO: Equality propagation - do equivalent of this
+      // Ensure that any instruction in scope that gets the "A < B" value number
+      // is replaced with false.
+      // The leader table only tracks basic blocks, not edges. Only add to if we
+      // have the simple case where the edge dominates the end.
+      // if (RootDominatesEnd)
+      //   addToLeaderTable(Num, NotVal, Root.getEnd());
       continue;
     }
 
@@ -2415,7 +2422,7 @@ void GVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
       EClass = NewClass;
       DEBUG(dbgs() << "Created new congruence class for " << V <<
             " using expression " << *E << " at " << NewClass->id << "\n");
-    } else {
+    } else {      
       EClass = lookupResult.first->second;
       assert(EClass && "Somehow don't have an eclass");
 
@@ -3687,11 +3694,6 @@ bool GVN::runOnFunction(Function& F) {
     touchedInstructions.insert(BI);
   reachableBlocks.insert(&F.getEntryBlock());
 
-  // Initialize arguments to be in their own unique congruence classes
-  // in an IPA-GVN, this would not be done
-  for (Function::arg_iterator FAI = F.arg_begin(), FAE= F.arg_end(); FAI != FAE; ++FAI)
-    createSingletonCongruenceClass(FAI, &F.getEntryBlock());
-
 
   // Initialize all other instructions to be in INITIAL class
   DenseSet<std::pair<Value*, BasicBlock*> > InitialValues;
@@ -3707,6 +3709,12 @@ bool GVN::runOnFunction(Function& F) {
        LI != LE; ++LI)
     valueToClass[LI->first] = InitialClass;
   InitialClass->members.swap(InitialValues);
+
+  // Initialize arguments to be in their own unique congruence classes
+  // In an IPA-GVN, this would not be done
+  for (Function::arg_iterator FAI = F.arg_begin(), FAE= F.arg_end(); FAI != FAE; ++FAI)
+    createSingletonCongruenceClass(FAI, &F.getEntryBlock());
+
   if (!noLoads) {
     MD = &getAnalysis<MemoryDependenceAnalysis>();
     AA = &getAnalysis<AliasAnalysis>();
