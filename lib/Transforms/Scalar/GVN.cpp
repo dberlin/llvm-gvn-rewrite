@@ -129,7 +129,6 @@ using namespace PatternMatch;
 // with constants.
 // 2. Support simplification into copies (IE and x,x -> x)
 // 3. Duplicate bitcast removal
-// 4. Need to mark scope starts in congruence class members
 
 STATISTIC(NumGVNInstrDeleted,  "Number of instructions deleted");
 STATISTIC(NumGVNBlocksDeleted, "Number of blocks deleted");
@@ -1071,7 +1070,10 @@ namespace {
     void propagateChangeInEdge(BasicBlock*);
     // Non-local load handling
     bool processNonLocalLoad(LoadInst*);
-
+    // Old GVN basic load emulation
+    bool killUselessLoadInst(LoadInst*);
+    DenseSet<LoadInst*> checkedLoads;
+    
     // List of critical edges to be split between iterations.
     SmallVector<std::pair<TerminatorInst*, unsigned>, 4> toSplit;
 
@@ -3676,6 +3678,56 @@ void GVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
 
 uint32_t CongruenceClass::nextCongruenceNum = 0;
 
+bool GVN::killUselessLoadInst(LoadInst *LI) {
+  if (!LI->isSimple())
+    return false;
+  
+  if (LI->use_empty()) {	
+    UpdateMemDepInfo(MD, LI, NULL);
+    markInstructionForDeletion(LI);
+    ++NumGVNLoad;
+    return true;
+  }
+
+  // Only need to ever check these loads once
+  if (!checkedLoads.insert(LI).second)
+    return false;
+  MemDepResult Dep = MD->getDependency(LI);
+  Instruction *DepInst = Dep.getInst();
+  // If we can't determine an actual dependent instruction, we can't
+  // do anything
+  if (Dep.isClobber() || !Dep.isDef())
+    return false;
+  
+
+  // If this load really doesn't depend on anything, then we must be loading an
+  // undef value.  This can happen when loading for a fresh allocation with no
+  // intervening stores, for example.
+  if (isa<AllocaInst>(DepInst) || isMallocLikeFn(DepInst, TLI)) {
+    LI->replaceAllUsesWith(UndefValue::get(LI->getType()));
+    UpdateMemDepInfo(MD, LI, NULL);
+    markUsersTouched(LI);
+    markInstructionForDeletion(LI);
+    ++NumGVNLoad;
+    return true;
+  }
+
+  // If this load occurs either right after a lifetime begin,
+  // then the loaded value is undefined.
+  if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(DepInst)) {
+    if (II->getIntrinsicID() == Intrinsic::lifetime_start) {
+      LI->replaceAllUsesWith(UndefValue::get(LI->getType()));
+      UpdateMemDepInfo(MD, LI, NULL);
+      markUsersTouched(LI);
+      markInstructionForDeletion(LI);
+      ++NumGVNLoad;
+      return true;
+    }
+  }
+  return false;
+  
+}
+
 /// runOnFunction - This is the main transformation entry point for a function.
 bool GVN::runOnFunction(Function& F) {
   DT = &getAnalysis<DominatorTree>();
@@ -3787,11 +3839,8 @@ bool GVN::runOnFunction(Function& F) {
           if (!I->isTerminator()) {
 	    // This duplicates what old GVN used to do with loads
             if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
-	      if (LI->isSimple() && LI->use_empty()) {	
-		UpdateMemDepInfo(MD, I, NULL);
-		markInstructionForDeletion(I);
+	      if (killUselessLoadInst(LI)) 
 		continue;
-	      }
 	    }
 
             Expression *Symbolized = performSymbolicEvaluation(I, *RI);
@@ -3865,6 +3914,7 @@ bool GVN::runOnFunction(Function& F) {
   locDepCache.clear();
   DFSBBMap.clear();
   InstrLocalDFS.clear();
+  checkedLoads.clear();
   return Changed;
 }
 
@@ -4003,6 +4053,7 @@ bool GVN::eliminateInstructions(Function &F) {
 
          DEBUG(dbgs() << "Current DFS numbers are (" << MemberDFSIn << "," << MemberDFSOut <<")\n");
          // We should push whenever it's empty or there is a constant
+         // or a local equivalence we want to replace with
          // We should pop until we are back within the right DFS scope
          // Walk along, processing members who are dominated by each other.
          if ((ValueStack.empty() || isa<Constant>(Member) || EquivalenceOnly)
