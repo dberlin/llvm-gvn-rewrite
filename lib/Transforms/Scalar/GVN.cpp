@@ -2259,6 +2259,11 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
     // 'RHS' within the scope Root.
     CongruenceClass *CC = valueToClass[LHS];
     assert (CC && "Should have found a congruence class");
+    // BUG: This scheme needs to be reworked slightly to record which
+    // members came from equality propagation.
+    // We never want to replace an instruction that came from equality
+    // propagation with something that dominates it. It is simply a
+    // marker for where an equivalent starts.
     CC->members.insert(std::make_pair(RHS, Root));
 
     // Replace all occurrences of 'LHS' with 'RHS' everywhere in the
@@ -2336,6 +2341,11 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
         }
         // Ensure that any instruction in scope that gets the "A < B"
         // value number is replaced with false.
+	// BUG: This scheme needs to be reworked slightly to record which
+	// members came from equality propagation.
+	// We never want to replace an instruction that came from equality
+	// propagation with something that dominates it. It is simply a
+	// marker for where an equivalent starts.
         CC->members.insert(std::make_pair(NotVal, Root));
       }
       // TODO: Equality propagation - do equivalent of this
