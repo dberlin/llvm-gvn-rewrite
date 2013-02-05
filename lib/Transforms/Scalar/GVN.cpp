@@ -119,6 +119,17 @@ using namespace PatternMatch;
 // 2. Fix pointer dependency caching in memdep
 // 3. Use load + store value numbering + iteration, instead of
 // equality hacks.
+//
+// Small TODO list
+// 1. Support load of undef/lifetime start/etc = undef, as per old
+// GVN.  My first thought is to just create an UndefExpression, and
+// treat these loads/etc as equivalent to it, so that the right values
+// get propagated around. 
+// When elimination comes around, prefer undef's as leaders as we do
+// with constants.
+// 2. Support simplification into copies (IE and x,x -> x)
+// 3. Duplicate bitcast removal
+// 4. Need to mark scope starts in congruence class members
 
 STATISTIC(NumGVNInstrDeleted,  "Number of instructions deleted");
 STATISTIC(NumGVNBlocksDeleted, "Number of blocks deleted");
