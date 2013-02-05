@@ -1051,8 +1051,6 @@ namespace {
     SmallVector<std::pair<TerminatorInst*, unsigned>, 4> toSplit;
 
     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
-      AU.addRequiredID(BreakCriticalEdgesID);
-      AU.addPreservedID(BreakCriticalEdgesID);
       AU.addRequired<DominatorTree>();
       AU.addRequired<TargetLibraryInfo>();
       if (!noLoads)
@@ -1858,7 +1856,9 @@ Expression *GVN::createExpression(Instruction *I) {
   // TODO: Right now we only check to see if we get a constant result.
   // We may get a less than constant, but still better, result for
   // some operations.
-  //  IE add 0, x -> x
+  // IE
+  //  add 0, x -> x 
+  // and x, x -> x
   // We should handle this by simply rewriting the expression.
   if (CmpInst *CI = dyn_cast<CmpInst>(I)) {
     // Sort the operand value numbers so x<y and y>x get the same value number.
