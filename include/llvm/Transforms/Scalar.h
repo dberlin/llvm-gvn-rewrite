@@ -330,6 +330,7 @@ FunctionPass *createMergedLoadStoreMotionPass();
 // elimination cotemporaneously.
 //
 FunctionPass *createGVNPass(bool NoLoads = false);
+FunctionPass *createNewGVNPass();
 
 //===----------------------------------------------------------------------===//
 //
