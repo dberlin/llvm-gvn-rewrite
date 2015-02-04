@@ -41,7 +41,8 @@ void llvm::initializeScalarOpts(PassRegistry &Registry) {
   initializeDeadInstEliminationPass(Registry);
   initializeScalarizerPass(Registry);
   initializeDSEPass(Registry);
-  initializeGVNLegacyPassPass(Registry);
+  initializeGVNPass(Registry);
+  initializeNewGVNPass(Registry);
   initializeEarlyCSELegacyPassPass(Registry);
   initializeFlattenCFGPassPass(Registry);
   initializeInductiveRangeCheckEliminationPass(Registry);
@@ -121,6 +122,10 @@ void LLVMAddScalarizerPass(LLVMPassManagerRef PM) {
 
 void LLVMAddGVNPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createGVNPass());
+}
+
+void LLVMAddNewGVNPass(LLVMPassManagerRef PM) {
+  unwrap(PM)->add(createNewGVNPass());
 }
 
 void LLVMAddMergedLoadStoreMotionPass(LLVMPassManagerRef PM) {

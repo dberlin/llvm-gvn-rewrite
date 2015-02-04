@@ -335,6 +335,14 @@ FunctionPass *createMergedLoadStoreMotionPass();
 
 //===----------------------------------------------------------------------===//
 //
+// GVN - This pass performs global value numbering and redundant load
+// elimination cotemporaneously.
+//
+FunctionPass *createGVNPass(bool NoLoads = false);
+FunctionPass *createNewGVNPass();
+
+//===----------------------------------------------------------------------===//
+//
 // MemCpyOpt - This pass performs optimizations related to eliminating memcpy
 // calls and/or combining multiple stores into memset's.
 //
