@@ -511,7 +511,6 @@ Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
   return E;
 }
 
-
 Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
                                                   BasicBlock *B) {
   LoadInst *LI = cast<LoadInst>(I);
@@ -537,8 +536,8 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
   PHIExpression *E = cast<PHIExpression>(createPHIExpression(I));
   E->setOpcode(I->getOpcode());
   if (E->VarArgs.empty()) {
-    DEBUG(dbgs() << "Simplified PHI node " << I << " to undef"
-                 << "\n");
+    // DEBUG(dbgs() << "Simplified PHI node " << I << " to undef"
+    //              << "\n");
     delete E;
     return createVariableExpression(UndefValue::get(I->getType()));
   }
@@ -1008,7 +1007,9 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI) {
       if (ConstantExpression *CE = dyn_cast<ConstantExpression>(E)) {
         CondEvaluated = CE->getConstantValue();
       }
-      delete E;
+      // Do not delete here, it will get deleted when we destroy all the
+      // expressions
+      // delete E;
     } else if (isa<ConstantInt>(Cond)) {
       CondEvaluated = Cond;
     }
@@ -1124,11 +1125,15 @@ void NewGVN::cleanupTables() {
     CongruenceClasses[i] = NULL;
   }
 
+  // DenseSet iterator invalidation rules mean we can't
+  std::vector<Expression *> toDelete;
   for (auto DI = ExpressionToDelete.begin(), DE = ExpressionToDelete.end();
-       DI != DE;) {
-    Expression *toErase = *DI;
-    ++DI;
-    delete toErase;
+       DI != DE; ++DI)
+    toDelete.push_back(*DI);
+  ExpressionToDelete.clear();
+  for (unsigned i = 0, e = toDelete.size(); i != e; ++i) {
+    delete toDelete[i];
+    toDelete[i] = nullptr;
   }
 
   CongruenceClasses.clear();
@@ -1234,4 +1239,3 @@ bool NewGVN::runOnFunction(Function &F) {
   delete MSSA;
   return Changed;
 }
-
