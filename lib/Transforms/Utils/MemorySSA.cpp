@@ -590,7 +590,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
     renamePass(RPD.BB, RPD.Pred, RPD.MA, PerBlockAccesses, RenamePassWorklist);
   } while (!RenamePassWorklist.empty());
 
-  F.getParent()->print(dbgs(), new MemorySSAAnnotatedWriter(this));
+  F.print(dbgs(), new MemorySSAAnnotatedWriter(this));
 
   for (auto DI = PerBlockAccesses.begin(), DE = PerBlockAccesses.end();
        DI != DE; ++DI) {
