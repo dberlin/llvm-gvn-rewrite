@@ -102,7 +102,8 @@ unsigned int getVersionNumberFromAccess(MemoryAccess *MA) {
 
 MemoryAccess *
 MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
-                                    const AliasAnalysis::Location &Loc) {
+                                    const AliasAnalysis::Location &Loc,
+                                    SmallPtrSet<MemoryAccess *, 32> &Visited) {
 
   ++NumClobberCacheLookups;
   auto CCV = CachedClobberingVersion.find(std::make_pair(P, Loc));
@@ -137,9 +138,15 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
   // correct answers.
   MemoryAccess *Result;
 
+  // If we already got here once, and didn't get to an answer (if we
+  // did, it would have been cached below), we must be stuck in
+  // mutually recursive phi nodes or something
+  if (!Visited.insert(P).second)
+    return P;
+
   // Look through 1 argument phi nodes
   if (P->getNumIncomingValues() == 1)
-    Result = getClobberingHeapVersion(P->getIncomingValue(0), Loc);
+    Result = getClobberingHeapVersion(P->getIncomingValue(0), Loc, Visited);
   else {
     // Find the most dominating argument first
     // For heap intrinsics, these *must* be instructions of some sort
@@ -150,7 +157,8 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
         DominatingArg = Arg;
     }
 
-    MemoryAccess *TargetVersion = getClobberingHeapVersion(DominatingArg, Loc);
+    MemoryAccess *TargetVersion =
+        getClobberingHeapVersion(DominatingArg, Loc, Visited);
     Result = TargetVersion;
 
     // Now reduce it against the others
@@ -159,7 +167,8 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
       if (Arg == DominatingArg)
         continue;
 
-      MemoryAccess *HeapVersionForArg = getClobberingHeapVersion(Arg, Loc);
+      MemoryAccess *HeapVersionForArg =
+          getClobberingHeapVersion(Arg, Loc, Visited);
       if (TargetVersion != HeapVersionForArg) {
         Result = P;
         break;
@@ -179,7 +188,8 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
 
 MemoryAccess *
 MemorySSA::getClobberingHeapVersion(MemoryAccess *HV,
-                                    const AliasAnalysis::Location &Loc) {
+                                    const AliasAnalysis::Location &Loc,
+                                    SmallPtrSet<MemoryAccess *, 32> &Visited) {
   MemoryAccess *CurrVersion = HV;
   while (true) {
     MemoryAccess *UseVersion = CurrVersion;
@@ -190,7 +200,7 @@ MemorySSA::getClobberingHeapVersion(MemoryAccess *HV,
 
     // Either a call to a memory SSA intrinsic or a phi node
     if (MemoryPhi *P = dyn_cast<MemoryPhi>(UseVersion))
-      return getClobberingHeapVersion(P, Loc);
+      return getClobberingHeapVersion(P, Loc, Visited);
     else {
       MemoryDef *MD = dyn_cast<MemoryDef>(UseVersion);
       assert(MD && "Use linked to something that is not a def");
@@ -230,14 +240,11 @@ MemorySSA::getClobberingHeapVersion(MemoryAccess *HV,
     }
 
     MemoryAccess *NextVersion = cast<MemoryDef>(UseVersion)->getUseOperand();
-    // Lambda abuse is fun
-    DEBUG([=](MemoryAccess *V1, MemoryAccess *V2) {
-      dbgs() << "Walking memory SSA from version ";
-      DEBUG(dbgs() << getVersionNumberFromAccess(V1));
-      dbgs() << " to version ";
-      DEBUG(dbgs() << getVersionNumberFromAccess(V2));
-      dbgs() << "\n";
-    }(CurrVersion, NextVersion));
+    DEBUG(dbgs() << "Walking memory SSA from version ");
+    DEBUG(dbgs() << getVersionNumberFromAccess(CurrVersion));
+    DEBUG(dbgs() << " to version ");
+    DEBUG(dbgs() << getVersionNumberFromAccess(NextVersion));
+    DEBUG(dbgs() << "\n");
     // Walk from def to def
     CurrVersion = NextVersion;
   }
@@ -264,18 +271,18 @@ MemoryAccess *MemorySSA::getClobberingHeapVersion(Instruction *I) {
     return CCV->second;
   }
 
-  MemoryAccess *FinalVersion = getClobberingHeapVersion(StartingVersion, Loc);
+  SmallPtrSet<MemoryAccess *, 32> Visited;
+  MemoryAccess *FinalVersion =
+      getClobberingHeapVersion(StartingVersion, Loc, Visited);
 
   CachedClobberingVersion.insert(
       std::make_pair(std::make_pair(StartingVersion, Loc), FinalVersion));
-  DEBUG([=](MemoryAccess *V1, MemoryAccess *V2, Instruction *I) {
-    dbgs() << "Starting Memory SSA version for " << *I << " is ";
-    dbgs() << getVersionNumberFromAccess(V1);
-    dbgs() << "\n";
-    dbgs() << "Final Memory SSA Version for " << *I << " is ";
-    dbgs() << getVersionNumberFromAccess(V2);
-    dbgs() << "\n";
-  }(StartingVersion, FinalVersion, I));
+  DEBUG(dbgs() << "Starting Memory SSA version for " << *I << " is ");
+  DEBUG(dbgs() << getVersionNumberFromAccess(StartingVersion));
+  DEBUG(dbgs() << "\n");
+  DEBUG(dbgs() << "Final Memory SSA Version for " << *I << " is ");
+  DEBUG(dbgs() << getVersionNumberFromAccess(FinalVersion));
+  DEBUG(dbgs() << "\n");
 
   return FinalVersion;
 }
@@ -590,7 +597,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
     renamePass(RPD.BB, RPD.Pred, RPD.MA, PerBlockAccesses, RenamePassWorklist);
   } while (!RenamePassWorklist.empty());
 
-  F.print(dbgs(), new MemorySSAAnnotatedWriter(this));
+  DEBUG(F.print(dbgs(), new MemorySSAAnnotatedWriter(this)));
 
   for (auto DI = PerBlockAccesses.begin(), DE = PerBlockAccesses.end();
        DI != DE; ++DI) {

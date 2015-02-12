@@ -15,9 +15,9 @@
 #ifndef LLVM_TRANSFORMS_SCALAR_GVNEXPRESSION_H
 #define LLVM_TRANSFORMS_SCALAR_GVNEXPRESSION_H
 namespace llvm {
-  class MemoryAccess;
-  
-  namespace GVNExpression {
+class MemoryAccess;
+
+namespace GVNExpression {
 
 enum ExpressionType {
   ExpressionTypeBase,
@@ -190,7 +190,7 @@ public:
     return EB->getExpressionType() == ExpressionTypeLoad;
   }
 
-  LoadExpression(LoadInst *L, MemoryAccess*HV) {
+  LoadExpression(LoadInst *L, MemoryAccess *HV) {
     EType = ExpressionTypeLoad;
     LI = L;
     HeapVersion = HV;
@@ -325,6 +325,7 @@ public:
   PHIExpression() : BB(NULL) { EType = ExpressionTypePhi; }
 
   PHIExpression(BasicBlock *bb) : BB(bb) { EType = ExpressionTypePhi; }
+  virtual ~PHIExpression() {}
 
   virtual hash_code getHashValue() const {
     return hash_combine(EType, BB, Opcode, ValueType,
