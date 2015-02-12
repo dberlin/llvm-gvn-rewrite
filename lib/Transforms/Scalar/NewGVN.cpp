@@ -1187,7 +1187,6 @@ bool NewGVN::runOnFunction(Function &F) {
   ReachableBlocks.insert(&F.getEntryBlock());
 
   initializeCongruenceClasses(F);
-  DEBUG(F.dump());
 
   while (!TouchedInstructions.empty()) {
     // TODO: Use two worklist method to keep ordering straight
