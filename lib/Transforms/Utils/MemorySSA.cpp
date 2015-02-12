@@ -141,9 +141,11 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
   // If we already got here once, and didn't get to an answer (if we
   // did, it would have been cached below), we must be stuck in
   // mutually recursive phi nodes or something
-  if (!Visited.insert(P).second)
+  if (!Visited.insert(P).second) {
+    llvm_unreachable("Whoops, found mutually recursive memory phis");
     return P;
-
+  }
+  
   // Look through 1 argument phi nodes
   if (P->getNumIncomingValues() == 1)
     Result = getClobberingHeapVersion(P->getIncomingValue(0), Loc, Visited);
