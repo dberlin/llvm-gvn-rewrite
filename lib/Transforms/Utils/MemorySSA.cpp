@@ -98,14 +98,78 @@ unsigned int getVersionNumberFromAccess(MemoryAccess *MA) {
 }
 }
 
-std::pair<MemoryAccess *, bool>
-MemorySSA::lookThroughPhiArguments(MemoryPhi *Phi, MemoryAccess *PhiArg0,
-				   MemoryAccess *PhiArg1,
-				   SmallPtrSet<MemoryAccess *, 32> &Visited)
-{
+bool MemorySSA::walkChainFromPhiToTarget(
+    MemoryPhi *Phi, MemoryAccess *Target, MemoryAccess *Use,
+    const AliasAnalysis::Location &Loc,
+    SmallPtrSet<MemoryAccess *, 32> &Visited) {
+  while (Use != Target) {
+    if (MemoryPhi *UsePhi = dyn_cast<MemoryPhi>(Use)) {
+      // If we already hit this argument, at least this part of the
+      // walk was successful (If for some reason, another argument
+      // of the phi node does not work out, we will return false from
+      // *that* visit.
+      if (!Visited.insert(Use).second)
+        return true;
+      auto Result = getClobberingHeapVersion(UsePhi, Loc, Visited);
+      if (!Result.first || !Result.second)
+        return false;
+      Use = Result.first;
+      continue;
+    } else {
+      MemoryDef *Def = dyn_cast<MemoryDef>(Use);
+      assert(Def && "Use should have led us to either a def or a phi");
+      // If we hit the top before we hit target, we failed
+      if (isDefaultMemoryDef(Def))
+        return false;
+
+      Instruction *DefMemoryInst = Def->getMemoryInst();
+      assert(DefMemoryInst &&
+             "Defining instruction not actually an instruction");
+
+      // If it's a call, get mod ref info, and if we have a mod,
+      // we are done. Otherwise grab alias location, see if they
+      // alias, and if they do, we are done.
+      // Otherwise, continue
+      if (CallInst *CI = dyn_cast<CallInst>(DefMemoryInst)) {
+        if (AA->getModRefInfo(CI, Loc) & AliasAnalysis::Mod)
+          return false;
+      } else if (AA->alias(getLocationForAA(AA, DefMemoryInst), Loc) !=
+                 AliasAnalysis::NoAlias)
+        return false;
+      Use = Def->getUseOperand();
+      continue;
+    }
+  }
+  return true;
 }
 
-			      
+bool MemorySSA::isDefaultMemoryDef(const MemoryAccess *MA) const {
+  if (const MemoryDef *MD = dyn_cast<const MemoryDef>(MA))
+    if (MD->getUseOperand() == nullptr)
+      return true;
+
+  return false;
+}
+
+MemoryAccess *
+MemorySSA::lookThroughPhiArguments(MemoryPhi *Phi, MemoryAccess *PhiArg0,
+                                   MemoryAccess *PhiArg1,
+                                   const AliasAnalysis::Location &Loc,
+                                   SmallPtrSet<MemoryAccess *, 32> &Visited) {
+  if (PhiArg0 == PhiArg1)
+    return PhiArg0;
+  if (isDefaultMemoryDef(PhiArg0) ||
+      (!isDefaultMemoryDef(PhiArg1) &&
+       DT->dominates(PhiArg0->getBlock(), PhiArg1->getBlock()))) {
+    if (walkChainFromPhiToTarget(Phi, PhiArg0, PhiArg1, Loc, Visited))
+      return PhiArg0;
+  } else if (isDefaultMemoryDef(PhiArg1) ||
+             DT->dominates(PhiArg1->getBlock(), PhiArg0->getBlock())) {
+    if (walkChainFromPhiToTarget(Phi, PhiArg1, PhiArg0, Loc, Visited))
+      return PhiArg1;
+  }
+  return nullptr;
+}
 
 // Get the clobbering heap version for a phi node and alias location
 
@@ -221,12 +285,9 @@ MemorySSA::getClobberingHeapVersion(MemoryAccess *HV,
     else {
       MemoryDef *MD = dyn_cast<MemoryDef>(UseVersion);
       assert(MD && "Use linked to something that is not a def");
-      if (MD->getUseOperand() == nullptr)
+      // If we hit the top, stop
+      if (isDefaultMemoryDef(MD))
         return std::make_pair(CurrVersion, false);
-      // First memory SSA intrinsic in the function is a
-      // heapversionnew with a constant
-      // operand. If the memory is defined outside the function, we will
-      // get there.
       Instruction *DefMemoryInst = MD->getMemoryInst();
       assert(DefMemoryInst &&
              "Defining instruction not actually an instruction");
@@ -307,19 +368,29 @@ MemoryAccess *MemorySSA::getClobberingHeapVersion(Instruction *I) {
 void MemorySSA::computeLiveInBlocks(
     const AccessMap &BlockAccesses,
     const SmallPtrSetImpl<BasicBlock *> &DefBlocks,
-    const SmallVector<BasicBlock *, 32> &UseBlocks,
+    const SmallPtrSetImpl<BasicBlock *> &UseBlocks,
     SmallPtrSetImpl<BasicBlock *> &LiveInBlocks) {
+  const bool DefBigger = DefBlocks.size() > UseBlocks.size();
+  const SmallPtrSetImpl<BasicBlock *> &CheckSet =
+      DefBigger ? DefBlocks : UseBlocks;
+  const SmallPtrSetImpl<BasicBlock *> &StartSet =
+      DefBigger ? UseBlocks : DefBlocks;
+
   // To determine liveness, we must iterate through the predecessors of blocks
   // where the def is live.  Blocks are added to the worklist if we need to
-  // check their predecessors.  Start with all the using blocks.
-  SmallVector<BasicBlock *, 64> LiveInBlockWorklist(UseBlocks.begin(),
-                                                    UseBlocks.end());
+  // check their predecessors.  Start with all the blocks of the
+  // smaller of (def, use) set, and check the other set.
+
+  SmallVector<BasicBlock *, 64> LiveInBlockWorklist(StartSet.begin(),
+                                                    StartSet.end());
+
   // If any of the using blocks is also a definition block, check to see if the
   // definition occurs before or after the use.  If it happens before the use,
   // the value isn't really live-in.
   for (unsigned i = 0, e = LiveInBlockWorklist.size(); i != e; ++i) {
     BasicBlock *BB = LiveInBlockWorklist[i];
-    if (!DefBlocks.count(BB))
+
+    if (!CheckSet.count(BB))
       continue;
 
     // Okay, this is a block that both uses and defines the value.  If the first
@@ -331,7 +402,6 @@ void MemorySSA::computeLiveInBlocks(
       LiveInBlockWorklist[i] = LiveInBlockWorklist.back();
       LiveInBlockWorklist.pop_back();
       --i, --e;
-      break;
     }
   }
 
@@ -373,9 +443,12 @@ void MemorySSA::determineInsertionPoint(AccessMap &BlockAccesses) {
   SmallPtrSet<BasicBlock *, 32> DefBlocks;
   DefBlocks.insert(DefiningBlocks.begin(), DefiningBlocks.end());
 
+  SmallPtrSet<BasicBlock *, 32> UseBlocks;
+  UseBlocks.insert(UsingBlocks.begin(), UsingBlocks.end());
+
   SmallPtrSet<BasicBlock *, 32> LiveInBlocks;
 
-  computeLiveInBlocks(BlockAccesses, DefBlocks, UsingBlocks, LiveInBlocks);
+  computeLiveInBlocks(BlockAccesses, DefBlocks, UseBlocks, LiveInBlocks);
   // Use a priority queue keyed on dominator tree level so that inserted nodes
   // are handled from the bottom of the dominator tree upwards.
   typedef std::pair<DomTreeNode *, unsigned> DomTreeNodePair;
@@ -451,9 +524,8 @@ void MemorySSA::determineInsertionPoint(AccessMap &BlockAccesses) {
       BlockAccesses.insert(std::make_pair(BB, Accesses));
     }
     MemoryPhi *Phi = new MemoryPhi(++NextHeapVersion, BB);
-    // Phi goes first
     InstructionToMemoryAccess.insert(std::make_pair(BB, Phi));
-
+    // Phi goes first
     Accesses->push_front(Phi);
   }
 }
