@@ -98,12 +98,23 @@ unsigned int getVersionNumberFromAccess(MemoryAccess *MA) {
 }
 }
 
+std::pair<MemoryAccess *, bool>
+MemorySSA::lookThroughPhiArguments(MemoryPhi *Phi, MemoryAccess *PhiArg0,
+				   MemoryAccess *PhiArg1,
+				   SmallPtrSet<MemoryAccess *, 32> &Visited)
+{
+}
+
+			      
+
 // Get the clobbering heap version for a phi node and alias location
 
-MemoryAccess *
+std::pair<MemoryAccess *, bool>
 MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
                                     const AliasAnalysis::Location &Loc,
                                     SmallPtrSet<MemoryAccess *, 32> &Visited) {
+
+  bool HitVisited = false;
 
   ++NumClobberCacheLookups;
   auto CCV = CachedClobberingVersion.find(std::make_pair(P, Loc));
@@ -112,7 +123,7 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
     DEBUG(dbgs() << "Cached Memory SSA version for " << *P << " is ");
     DEBUG(dbgs() << getVersionNumberFromAccess(CCV->second));
     DEBUG(dbgs() << "\n");
-    return CCV->second;
+    return std::make_pair(CCV->second, false);
   }
 
   // The algorithm here is fairly simple. The goal is to prove that
@@ -141,15 +152,17 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
   // If we already got here once, and didn't get to an answer (if we
   // did, it would have been cached below), we must be stuck in
   // mutually recursive phi nodes or something
-  if (!Visited.insert(P).second) {
-    llvm_unreachable("Whoops, found mutually recursive memory phis");
-    return P;
-  }
-  
+  // TODO: Ensure we skip past phi nodes that we end up revisiting
+  if (!Visited.insert(P).second)
+    return std::make_pair(P, true);
+
   // Look through 1 argument phi nodes
-  if (P->getNumIncomingValues() == 1)
-    Result = getClobberingHeapVersion(P->getIncomingValue(0), Loc, Visited);
-  else {
+  if (P->getNumIncomingValues() == 1) {
+    auto SingleResult =
+        getClobberingHeapVersion(P->getIncomingValue(0), Loc, Visited);
+    HitVisited = SingleResult.second;
+    Result = SingleResult.first;
+  } else {
     // Find the most dominating argument first
     // For heap intrinsics, these *must* be instructions of some sort
     MemoryAccess *DominatingArg = P->getIncomingValue(0);
@@ -159,8 +172,8 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
         DominatingArg = Arg;
     }
 
-    MemoryAccess *TargetVersion =
-        getClobberingHeapVersion(DominatingArg, Loc, Visited);
+    auto TargetResult = getClobberingHeapVersion(DominatingArg, Loc, Visited);
+    MemoryAccess *TargetVersion = TargetResult.first;
     Result = TargetVersion;
 
     // Now reduce it against the others
@@ -169,17 +182,19 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
       if (Arg == DominatingArg)
         continue;
 
-      MemoryAccess *HeapVersionForArg =
-          getClobberingHeapVersion(Arg, Loc, Visited);
+      auto ArgResult = getClobberingHeapVersion(Arg, Loc, Visited);
+      MemoryAccess *HeapVersionForArg = ArgResult.first;
+
       if (TargetVersion != HeapVersionForArg) {
         Result = P;
+        HitVisited = ArgResult.second;
         break;
       }
     }
   }
   CachedClobberingVersion.insert(
       std::make_pair(std::make_pair(P, Loc), Result));
-  return Result;
+  return std::make_pair(Result, HitVisited);
 }
 
 // For a given heap version, walk backwards using Memory SSA and find
@@ -188,7 +203,7 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
 // X = heapVersionDef(Y)
 //  heapversionuse(X)
 
-MemoryAccess *
+std::pair<MemoryAccess *, bool>
 MemorySSA::getClobberingHeapVersion(MemoryAccess *HV,
                                     const AliasAnalysis::Location &Loc,
                                     SmallPtrSet<MemoryAccess *, 32> &Visited) {
@@ -207,7 +222,7 @@ MemorySSA::getClobberingHeapVersion(MemoryAccess *HV,
       MemoryDef *MD = dyn_cast<MemoryDef>(UseVersion);
       assert(MD && "Use linked to something that is not a def");
       if (MD->getUseOperand() == nullptr)
-        return CurrVersion;
+        return std::make_pair(CurrVersion, false);
       // First memory SSA intrinsic in the function is a
       // heapversionnew with a constant
       // operand. If the memory is defined outside the function, we will
@@ -226,7 +241,7 @@ MemorySSA::getClobberingHeapVersion(MemoryAccess *HV,
                      << " is ");
         DEBUG(dbgs() << getVersionNumberFromAccess(CCV->second));
         DEBUG(dbgs() << "\n");
-        return CCV->second;
+        return std::make_pair(CCV->second, false);
       }
 
       // If it's a call, get mod ref info, and if we have a mod,
@@ -250,7 +265,7 @@ MemorySSA::getClobberingHeapVersion(MemoryAccess *HV,
     // Walk from def to def
     CurrVersion = NextVersion;
   }
-  return CurrVersion;
+  return std::make_pair(CurrVersion, false);
 }
 
 // For a given instruction, walk backwards using Memory SSA and find
@@ -275,7 +290,7 @@ MemoryAccess *MemorySSA::getClobberingHeapVersion(Instruction *I) {
 
   SmallPtrSet<MemoryAccess *, 32> Visited;
   MemoryAccess *FinalVersion =
-      getClobberingHeapVersion(StartingVersion, Loc, Visited);
+      getClobberingHeapVersion(StartingVersion, Loc, Visited).first;
 
   CachedClobberingVersion.insert(
       std::make_pair(std::make_pair(StartingVersion, Loc), FinalVersion));
