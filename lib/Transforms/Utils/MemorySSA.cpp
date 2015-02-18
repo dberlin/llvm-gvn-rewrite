@@ -162,14 +162,22 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
     HitVisited = SingleResult.second;
     Result = SingleResult.first;
   } else {
-    // Find the most dominating argument first, if there is one. It
+    // Find the most dominating non-phiargument first, if there is one. It
     // will be a shorter walk
-    MemoryAccess *DominatingArg = P->getIncomingValue(0);
-    for (unsigned i = 1; i < P->getNumIncomingValues(); ++i) {
-      MemoryAccess *Arg = P->getIncomingValue(i);
-      if (DT->dominates(Arg->getBlock(), DominatingArg->getBlock()))
-        DominatingArg = Arg;
-    }
+    MemoryAccess *DominatingArg = nullptr;
+    for (unsigned i = 0; i < P->getNumIncomingValues(); ++i)
+      if (!isa<MemoryPhi>(P->getIncomingValue(i)))
+	DominatingArg = P->getIncomingValue(i);
+    // Oh well, they are all defined by phi nodes, just choose one
+    if (!DominatingArg)
+      DominatingArg = P->getIncomingValue(0);
+    if (!isa<MemoryPhi>(DominatingArg))
+      for (unsigned i = 1; i < P->getNumIncomingValues(); ++i) {
+	MemoryAccess *Arg = P->getIncomingValue(i);
+	if (!isa<MemoryPhi>(Arg) &&
+	    DT->dominates(Arg->getBlock(), DominatingArg->getBlock()))
+	  DominatingArg = Arg;
+      }
 
     auto TargetResult = getClobberingHeapVersion(DominatingArg, Loc, Visited);
     MemoryAccess *TargetVersion = TargetResult.first;
@@ -182,6 +190,8 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
         continue;
 
       auto ArgResult = getClobberingHeapVersion(Arg, Loc, Visited);
+      if (ArgResult.second)
+	continue;
       MemoryAccess *HeapVersionForArg = ArgResult.first;
       // If they aren't the same, abort, we must be clobbered by one
       // or the other.
