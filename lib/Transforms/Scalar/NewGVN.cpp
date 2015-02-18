@@ -204,7 +204,7 @@ private:
   Expression *createConstantExpression(Constant *);
   Expression *createStoreExpression(StoreInst *, MemoryAccess *);
   Expression *createLoadExpression(LoadInst *, MemoryAccess *);
-  Expression *createCallExpression(CallInst *);
+  Expression *createCallExpression(CallInst *, MemoryAccess *);
   Expression *createInsertValueExpression(InsertValueInst *);
   Expression *uniquifyExpression(Expression *);
   Expression *createCmpExpression(unsigned, Type *, CmpInst::Predicate, Value *,
@@ -462,8 +462,8 @@ Expression *NewGVN::createConstantExpression(Constant *C) {
   return E;
 }
 
-Expression *NewGVN::createCallExpression(CallInst *CI) {
-  CallExpression *E = new CallExpression(CI);
+Expression *NewGVN::createCallExpression(CallInst *CI, MemoryAccess *HV) {
+  CallExpression *E = new CallExpression(CI, HV);
   setBasicExpressionInfo(CI, E);
   return E;
 }
@@ -526,7 +526,12 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
 Expression *NewGVN::performSymbolicCallEvaluation(Instruction *I,
                                                   BasicBlock *B) {
   CallInst *CI = cast<CallInst>(I);
-  return createCallExpression(CI);
+  if (AA->doesNotAccessMemory(CI))
+    return createCallExpression(CI, nullptr);
+  else if (AA->onlyReadsMemory(CI))
+    return createCallExpression(CI, MSSA->getClobberingHeapVersion(CI));
+  else
+    return NULL;
 }
 
 // performSymbolicPHIEvaluation - Evaluate PHI nodes symbolically, and
@@ -536,8 +541,8 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
   PHIExpression *E = cast<PHIExpression>(createPHIExpression(I));
   E->setOpcode(I->getOpcode());
   if (E->VarArgs.empty()) {
-    // DEBUG(dbgs() << "Simplified PHI node " << I << " to undef"
-    //              << "\n");
+    DEBUG(dbgs() << "Simplified PHI node " << I << " to undef"
+                 << "\n");
     delete E;
     return createVariableExpression(UndefValue::get(I->getType()));
   }
@@ -1007,9 +1012,6 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI) {
       if (ConstantExpression *CE = dyn_cast<ConstantExpression>(E)) {
         CondEvaluated = CE->getConstantValue();
       }
-      // Do not delete here, it will get deleted when we destroy all the
-      // expressions
-      // delete E;
     } else if (isa<ConstantInt>(Cond)) {
       CondEvaluated = Cond;
     }
