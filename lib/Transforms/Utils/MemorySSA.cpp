@@ -368,29 +368,21 @@ MemoryAccess *MemorySSA::getClobberingHeapVersion(Instruction *I) {
 void MemorySSA::computeLiveInBlocks(
     const AccessMap &BlockAccesses,
     const SmallPtrSetImpl<BasicBlock *> &DefBlocks,
-    const SmallPtrSetImpl<BasicBlock *> &UseBlocks,
+    const SmallVector<BasicBlock *, 32> &UseBlocks,
     SmallPtrSetImpl<BasicBlock *> &LiveInBlocks) {
-  const bool DefBigger = DefBlocks.size() > UseBlocks.size();
-  const SmallPtrSetImpl<BasicBlock *> &CheckSet =
-      DefBigger ? DefBlocks : UseBlocks;
-  const SmallPtrSetImpl<BasicBlock *> &StartSet =
-      DefBigger ? UseBlocks : DefBlocks;
 
+  
   // To determine liveness, we must iterate through the predecessors of blocks
   // where the def is live.  Blocks are added to the worklist if we need to
-  // check their predecessors.  Start with all the blocks of the
-  // smaller of (def, use) set, and check the other set.
-
-  SmallVector<BasicBlock *, 64> LiveInBlockWorklist(StartSet.begin(),
-                                                    StartSet.end());
-
+  // check their predecessors.  Start with all the using blocks.
+  
+  SmallVector<BasicBlock *, 64> LiveInBlockWorklist(UseBlocks.begin(), UseBlocks.end());
   // If any of the using blocks is also a definition block, check to see if the
   // definition occurs before or after the use.  If it happens before the use,
   // the value isn't really live-in.
   for (unsigned i = 0, e = LiveInBlockWorklist.size(); i != e; ++i) {
     BasicBlock *BB = LiveInBlockWorklist[i];
-
-    if (!CheckSet.count(BB))
+    if (!DefBlocks.count(BB))
       continue;
 
     // Okay, this is a block that both uses and defines the value.  If the first
@@ -443,12 +435,9 @@ void MemorySSA::determineInsertionPoint(AccessMap &BlockAccesses) {
   SmallPtrSet<BasicBlock *, 32> DefBlocks;
   DefBlocks.insert(DefiningBlocks.begin(), DefiningBlocks.end());
 
-  SmallPtrSet<BasicBlock *, 32> UseBlocks;
-  UseBlocks.insert(UsingBlocks.begin(), UsingBlocks.end());
-
   SmallPtrSet<BasicBlock *, 32> LiveInBlocks;
 
-  computeLiveInBlocks(BlockAccesses, DefBlocks, UseBlocks, LiveInBlocks);
+  computeLiveInBlocks(BlockAccesses, DefBlocks, UsingBlocks, LiveInBlocks);
   // Use a priority queue keyed on dominator tree level so that inserted nodes
   // are handled from the bottom of the dominator tree upwards.
   typedef std::pair<DomTreeNode *, unsigned> DomTreeNodePair;
