@@ -98,77 +98,12 @@ unsigned int getVersionNumberFromAccess(MemoryAccess *MA) {
 }
 }
 
-bool MemorySSA::walkChainFromPhiToTarget(
-    MemoryPhi *Phi, MemoryAccess *Target, MemoryAccess *Use,
-    const AliasAnalysis::Location &Loc,
-    SmallPtrSet<MemoryAccess *, 32> &Visited) {
-  while (Use != Target) {
-    if (MemoryPhi *UsePhi = dyn_cast<MemoryPhi>(Use)) {
-      // If we already hit this argument, at least this part of the
-      // walk was successful (If for some reason, another argument
-      // of the phi node does not work out, we will return false from
-      // *that* visit.
-      if (!Visited.insert(Use).second)
-        return true;
-      auto Result = getClobberingHeapVersion(UsePhi, Loc, Visited);
-      if (!Result.first || !Result.second)
-        return false;
-      Use = Result.first;
-      continue;
-    } else {
-      MemoryDef *Def = dyn_cast<MemoryDef>(Use);
-      assert(Def && "Use should have led us to either a def or a phi");
-      // If we hit the top before we hit target, we failed
-      if (isDefaultMemoryDef(Def))
-        return false;
-
-      Instruction *DefMemoryInst = Def->getMemoryInst();
-      assert(DefMemoryInst &&
-             "Defining instruction not actually an instruction");
-
-      // If it's a call, get mod ref info, and if we have a mod,
-      // we are done. Otherwise grab alias location, see if they
-      // alias, and if they do, we are done.
-      // Otherwise, continue
-      if (CallInst *CI = dyn_cast<CallInst>(DefMemoryInst)) {
-        if (AA->getModRefInfo(CI, Loc) & AliasAnalysis::Mod)
-          return false;
-      } else if (AA->alias(getLocationForAA(AA, DefMemoryInst), Loc) !=
-                 AliasAnalysis::NoAlias)
-        return false;
-      Use = Def->getUseOperand();
-      continue;
-    }
-  }
-  return true;
-}
-
 bool MemorySSA::isDefaultMemoryDef(const MemoryAccess *MA) const {
   if (const MemoryDef *MD = dyn_cast<const MemoryDef>(MA))
     if (MD->getUseOperand() == nullptr)
       return true;
 
   return false;
-}
-
-MemoryAccess *
-MemorySSA::lookThroughPhiArguments(MemoryPhi *Phi, MemoryAccess *PhiArg0,
-                                   MemoryAccess *PhiArg1,
-                                   const AliasAnalysis::Location &Loc,
-                                   SmallPtrSet<MemoryAccess *, 32> &Visited) {
-  if (PhiArg0 == PhiArg1)
-    return PhiArg0;
-  if (isDefaultMemoryDef(PhiArg0) ||
-      (!isDefaultMemoryDef(PhiArg1) &&
-       DT->dominates(PhiArg0->getBlock(), PhiArg1->getBlock()))) {
-    if (walkChainFromPhiToTarget(Phi, PhiArg0, PhiArg1, Loc, Visited))
-      return PhiArg0;
-  } else if (isDefaultMemoryDef(PhiArg1) ||
-             DT->dominates(PhiArg1->getBlock(), PhiArg0->getBlock())) {
-    if (walkChainFromPhiToTarget(Phi, PhiArg1, PhiArg0, Loc, Visited))
-      return PhiArg1;
-  }
-  return nullptr;
 }
 
 // Get the clobbering heap version for a phi node and alias location
@@ -227,8 +162,8 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
     HitVisited = SingleResult.second;
     Result = SingleResult.first;
   } else {
-    // Find the most dominating argument first
-    // For heap intrinsics, these *must* be instructions of some sort
+    // Find the most dominating argument first, if there is one. It
+    // will be a shorter walk
     MemoryAccess *DominatingArg = P->getIncomingValue(0);
     for (unsigned i = 1; i < P->getNumIncomingValues(); ++i) {
       MemoryAccess *Arg = P->getIncomingValue(i);
@@ -248,7 +183,10 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
 
       auto ArgResult = getClobberingHeapVersion(Arg, Loc, Visited);
       MemoryAccess *HeapVersionForArg = ArgResult.first;
-
+      // If they aren't the same, abort, we must be clobbered by one
+      // or the other.
+      // (Currently, we return the phi node, we could track which one
+      // is clobbering)
       if (TargetVersion != HeapVersionForArg) {
         Result = P;
         HitVisited = ArgResult.second;
@@ -261,11 +199,8 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
   return std::make_pair(Result, HitVisited);
 }
 
-// For a given heap version, walk backwards using Memory SSA and find
-// the heap version that actually clobbers Loc.
-// x The intrisics look like
-// X = heapVersionDef(Y)
-//  heapversionuse(X)
+// For a given MemoryAccess, walk backwards using Memory SSA and find
+// the MemoryAccess that actually clobbers Loc.
 
 std::pair<MemoryAccess *, bool>
 MemorySSA::getClobberingHeapVersion(MemoryAccess *HV,
@@ -279,7 +214,7 @@ MemorySSA::getClobberingHeapVersion(MemoryAccess *HV,
     if (MemoryUse *MU = dyn_cast<MemoryUse>(UseVersion))
       UseVersion = MU->getUseOperand();
 
-    // Either a call to a memory SSA intrinsic or a phi node
+    // Should be either a Memory Def or a Phi node at this point
     if (MemoryPhi *P = dyn_cast<MemoryPhi>(UseVersion))
       return getClobberingHeapVersion(P, Loc, Visited);
     else {
@@ -371,12 +306,11 @@ void MemorySSA::computeLiveInBlocks(
     const SmallVector<BasicBlock *, 32> &UseBlocks,
     SmallPtrSetImpl<BasicBlock *> &LiveInBlocks) {
 
-  
   // To determine liveness, we must iterate through the predecessors of blocks
   // where the def is live.  Blocks are added to the worklist if we need to
   // check their predecessors.  Start with all the using blocks.
-  
-  SmallVector<BasicBlock *, 64> LiveInBlockWorklist(UseBlocks.begin(), UseBlocks.end());
+  SmallVector<BasicBlock *, 64> LiveInBlockWorklist(UseBlocks.begin(),
+                                                    UseBlocks.end());
   // If any of the using blocks is also a definition block, check to see if the
   // definition occurs before or after the use.  If it happens before the use,
   // the value isn't really live-in.
@@ -613,7 +547,6 @@ void MemorySSA::buildMemorySSA(Function &F) {
   BasicBlock &StartingPoint = F.getEntryBlock();
   MemoryAccess *DefaultAccess =
       new MemoryDef(0, nullptr, nullptr, &StartingPoint);
-  MemoryAccess *AvailableValue = DefaultAccess;
 
   for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
     std::list<MemoryAccess *> *Accesses = nullptr;
@@ -642,7 +575,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
 
       // Defs are already uses, so use && def is handled elsewhere
       if (use && !def) {
-        MemoryUse *MU = new MemoryUse(AvailableValue, &*BI, FI);
+        MemoryUse *MU = new MemoryUse(nullptr, &*BI, FI);
         InstructionToMemoryAccess.insert(std::make_pair(&*BI, MU));
         UsingBlocks.push_back(FI);
         if (!Accesses) {
@@ -652,11 +585,9 @@ void MemorySSA::buildMemorySSA(Function &F) {
         Accesses->push_back(MU);
       }
       if (def) {
-        MemoryDef *MD =
-            new MemoryDef(++NextHeapVersion, AvailableValue, &*BI, FI);
+        MemoryDef *MD = new MemoryDef(++NextHeapVersion, nullptr, &*BI, FI);
         InstructionToMemoryAccess.insert(std::make_pair(&*BI, MD));
         DefiningBlocks.push_back(FI);
-        AvailableValue = MD;
         if (!Accesses) {
           Accesses = new std::list<MemoryAccess *>;
           PerBlockAccesses.insert(std::make_pair(FI, Accesses));
@@ -719,7 +650,7 @@ void MemoryPhi::print(raw_ostream &OS) {
     if (BB->hasName())
       OS << BB->getName();
     else
-      OS << "unnamed block";
+      BB->printAsOperand(OS, false);
     OS << ",";
     assert((isa<MemoryDef>(MA) || isa<MemoryPhi>(MA)) &&
            "Phi node should have referred to def or another phi");

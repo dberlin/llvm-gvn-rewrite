@@ -131,6 +131,7 @@ private:
   CallExpression(const CallExpression &); // Do not implement
 protected:
   CallInst *CI;
+  MemoryAccess *HeapVersion;
 
 public:
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -138,10 +139,11 @@ public:
   static inline bool classof(const Expression *EB) {
     return EB->getExpressionType() == ExpressionTypeCall;
   }
-  CallExpression(CallInst *C) {
+  CallExpression(CallInst *C, MemoryAccess *HV) {
 
     EType = ExpressionTypeCall;
     CI = C;
+    HeapVersion = HV;
   }
 
   virtual ~CallExpression() {}
@@ -153,6 +155,8 @@ public:
       return false;
     // Calls are unequal unless they have the same arguments
     if (VarArgs != OE.VarArgs)
+      return false;
+    if (HeapVersion != OE.HeapVersion)
       return false;
     return true;
   }
