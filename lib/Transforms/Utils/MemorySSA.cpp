@@ -166,17 +166,20 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
     // will be a shorter walk
     MemoryAccess *DominatingArg = nullptr;
     for (unsigned i = 0; i < P->getNumIncomingValues(); ++i)
-      if (!isa<MemoryPhi>(P->getIncomingValue(i)))
-	DominatingArg = P->getIncomingValue(i);
+      if (!isa<MemoryPhi>(P->getIncomingValue(i))) {
+        DominatingArg = P->getIncomingValue(i);
+        break;
+      }
+
     // Oh well, they are all defined by phi nodes, just choose one
     if (!DominatingArg)
       DominatingArg = P->getIncomingValue(0);
     if (!isa<MemoryPhi>(DominatingArg))
       for (unsigned i = 1; i < P->getNumIncomingValues(); ++i) {
-	MemoryAccess *Arg = P->getIncomingValue(i);
-	if (!isa<MemoryPhi>(Arg) &&
-	    DT->dominates(Arg->getBlock(), DominatingArg->getBlock()))
-	  DominatingArg = Arg;
+        MemoryAccess *Arg = P->getIncomingValue(i);
+        if (!isa<MemoryPhi>(Arg) &&
+            DT->dominates(Arg->getBlock(), DominatingArg->getBlock()))
+          DominatingArg = Arg;
       }
 
     auto TargetResult = getClobberingHeapVersion(DominatingArg, Loc, Visited);
@@ -191,7 +194,7 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
 
       auto ArgResult = getClobberingHeapVersion(Arg, Loc, Visited);
       if (ArgResult.second)
-	continue;
+        continue;
       MemoryAccess *HeapVersionForArg = ArgResult.first;
       // If they aren't the same, abort, we must be clobbered by one
       // or the other.
