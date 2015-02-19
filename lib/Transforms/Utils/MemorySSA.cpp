@@ -257,8 +257,8 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *HV,
       // we are done. Otherwise grab alias location, see if they
       // alias, and if they do, we are done.
       // Otherwise, continue
-      if (CallInst *CI = dyn_cast<CallInst>(DefMemoryInst)) {
-        if (AA->getModRefInfo(CI, Loc) & AliasAnalysis::Mod)
+      if (isa<CallInst>(DefMemoryInst) || isa<InvokeInst>(DefMemoryInst)) { 
+        if (AA->getModRefInfo(DefMemoryInst, Loc) & AliasAnalysis::Mod)
           break;
       } else if (AA->alias(getLocationForAA(AA, DefMemoryInst), Loc) !=
                  AliasAnalysis::NoAlias)
@@ -572,10 +572,9 @@ void MemorySSA::buildMemorySSA(Function &F) {
         def = true;
       } else {
         AliasAnalysis::Location Loc;
-        // Skip marking ourselves as heap new/use even when AA is off
-        if (CallInst *CI = dyn_cast<CallInst>(BI)) {
-          Loc.Ptr = CI;
-        }
+        // FIXME: BasicAA crashes on calls if Loc.Ptr is null
+        if (isa<CallInst>(BI) || isa<InvokeInst>(BI))
+          Loc.Ptr = BI;
         AliasAnalysis::ModRefResult ModRef = AA->getModRefInfo(BI, Loc);
         if (ModRef & AliasAnalysis::Mod)
           def = true;
