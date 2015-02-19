@@ -49,7 +49,7 @@ public:
 
   virtual void emitBasicBlockStartAnnot(const BasicBlock *BB,
                                         formatted_raw_ostream &OS) {
-    MemoryAccess *MA = MSSA->getHeapVersion(BB);
+    MemoryAccess *MA = MSSA->getMemoryAccess(BB);
     if (MA) {
       OS << "; ";
       MA->print(OS);
@@ -59,7 +59,7 @@ public:
 
   virtual void emitInstructionAnnot(const Instruction *I,
                                     formatted_raw_ostream &OS) {
-    MemoryAccess *MA = MSSA->getHeapVersion(I);
+    MemoryAccess *MA = MSSA->getMemoryAccess(I);
     if (MA) {
       OS << "; ";
       MA->print(OS);
@@ -98,7 +98,7 @@ unsigned int getVersionNumberFromAccess(MemoryAccess *MA) {
 }
 }
 
-bool MemorySSA::isDefaultMemoryDef(const MemoryAccess *MA) const {
+bool MemorySSA::isLiveOnEntryDef(const MemoryAccess *MA) const {
   if (const MemoryDef *MD = dyn_cast<const MemoryDef>(MA))
     if (MD->getUseOperand() == nullptr)
       return true;
@@ -109,9 +109,9 @@ bool MemorySSA::isDefaultMemoryDef(const MemoryAccess *MA) const {
 // Get the clobbering heap version for a phi node and alias location
 
 std::pair<MemoryAccess *, bool>
-MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
-                                    const AliasAnalysis::Location &Loc,
-                                    SmallPtrSet<MemoryAccess *, 32> &Visited) {
+MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
+                                     const AliasAnalysis::Location &Loc,
+                                     SmallPtrSet<MemoryAccess *, 32> &Visited) {
 
   bool HitVisited = false;
 
@@ -158,7 +158,7 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
   // Look through 1 argument phi nodes
   if (P->getNumIncomingValues() == 1) {
     auto SingleResult =
-        getClobberingHeapVersion(P->getIncomingValue(0), Loc, Visited);
+        getClobberingMemoryAccess(P->getIncomingValue(0), Loc, Visited);
     HitVisited = SingleResult.second;
     Result = SingleResult.first;
   } else {
@@ -182,7 +182,7 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
           DominatingArg = Arg;
       }
 
-    auto TargetResult = getClobberingHeapVersion(DominatingArg, Loc, Visited);
+    auto TargetResult = getClobberingMemoryAccess(DominatingArg, Loc, Visited);
     MemoryAccess *TargetVersion = TargetResult.first;
     Result = TargetVersion;
 
@@ -192,7 +192,7 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
       if (Arg == DominatingArg)
         continue;
 
-      auto ArgResult = getClobberingHeapVersion(Arg, Loc, Visited);
+      auto ArgResult = getClobberingMemoryAccess(Arg, Loc, Visited);
       if (ArgResult.second)
         continue;
       MemoryAccess *HeapVersionForArg = ArgResult.first;
@@ -216,9 +216,9 @@ MemorySSA::getClobberingHeapVersion(MemoryPhi *P,
 // the MemoryAccess that actually clobbers Loc.
 
 std::pair<MemoryAccess *, bool>
-MemorySSA::getClobberingHeapVersion(MemoryAccess *HV,
-                                    const AliasAnalysis::Location &Loc,
-                                    SmallPtrSet<MemoryAccess *, 32> &Visited) {
+MemorySSA::getClobberingMemoryAccess(MemoryAccess *HV,
+                                     const AliasAnalysis::Location &Loc,
+                                     SmallPtrSet<MemoryAccess *, 32> &Visited) {
   MemoryAccess *CurrVersion = HV;
   while (true) {
     MemoryAccess *UseVersion = CurrVersion;
@@ -229,12 +229,12 @@ MemorySSA::getClobberingHeapVersion(MemoryAccess *HV,
 
     // Should be either a Memory Def or a Phi node at this point
     if (MemoryPhi *P = dyn_cast<MemoryPhi>(UseVersion))
-      return getClobberingHeapVersion(P, Loc, Visited);
+      return getClobberingMemoryAccess(P, Loc, Visited);
     else {
       MemoryDef *MD = dyn_cast<MemoryDef>(UseVersion);
       assert(MD && "Use linked to something that is not a def");
       // If we hit the top, stop
-      if (isDefaultMemoryDef(MD))
+      if (isLiveOnEntryDef(MD))
         return std::make_pair(CurrVersion, false);
       Instruction *DefMemoryInst = MD->getMemoryInst();
       assert(DefMemoryInst &&
@@ -280,12 +280,12 @@ MemorySSA::getClobberingHeapVersion(MemoryAccess *HV,
 // For a given instruction, walk backwards using Memory SSA and find
 // the heap version that actually clobbers this one, skipping "false"
 // versions along the way
-MemoryAccess *MemorySSA::getClobberingHeapVersion(Instruction *I) {
+MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
 
   // First extract our location, then start walking until it is clobbered
 
   const AliasAnalysis::Location Loc = getLocationForAA(AA, I);
-  MemoryAccess *StartingVersion = getHeapVersion(I);
+  MemoryAccess *StartingVersion = getMemoryAccess(I);
   ++NumClobberCacheLookups;
   auto CCV = CachedClobberingVersion.find(std::make_pair(StartingVersion, Loc));
 
@@ -299,7 +299,7 @@ MemoryAccess *MemorySSA::getClobberingHeapVersion(Instruction *I) {
 
   SmallPtrSet<MemoryAccess *, 32> Visited;
   MemoryAccess *FinalVersion =
-      getClobberingHeapVersion(StartingVersion, Loc, Visited).first;
+      getClobberingMemoryAccess(StartingVersion, Loc, Visited).first;
 
   CachedClobberingVersion.insert(
       std::make_pair(std::make_pair(StartingVersion, Loc), FinalVersion));
@@ -551,16 +551,12 @@ void MemorySSA::buildMemorySSA(Function &F) {
       BBNumbers[I] = ID++;
   }
 
-  // We temporarily maintain lists of memory accesses per-block.
-  // We don't need them once the use-def form is built.
+  // We temporarily maintain lists of memory accesses per-block,
+  // trading time for memory. We could just look up the memory access
+  // for every possible instruction in the stream.  Instead, we built
+  // lists, and then throw it out once the use-def form is built.
   AccessMap PerBlockAccesses;
-  // Otherwise, we have to construct SSA form.
-  SmallVector<PHINode *, 8> NewPHIs;
-
-  BasicBlock &StartingPoint = F.getEntryBlock();
-  MemoryAccess *DefaultAccess =
-      new MemoryDef(0, nullptr, nullptr, &StartingPoint);
-
+  
   for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
     std::list<MemoryAccess *> *Accesses = nullptr;
     for (auto BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
@@ -609,7 +605,15 @@ void MemorySSA::buildMemorySSA(Function &F) {
       }
     }
   }
+  // Determine where our PHI's should go
   determineInsertionPoint(PerBlockAccesses);
+
+  // We create an access to represent "live on entry"
+  BasicBlock &StartingPoint = F.getEntryBlock();
+  MemoryAccess *DefaultAccess =
+      new MemoryDef(0, nullptr, nullptr, &StartingPoint);
+
+  // Now do regular SSA renaming
   std::vector<RenamePassData> RenamePassWorklist;
   RenamePassWorklist.push_back({F.begin(), nullptr, DefaultAccess});
   do {
@@ -643,7 +647,7 @@ void MemorySSA::dump(Function &F, const AccessMap &AM) {
   }
 }
 
-MemoryAccess *MemorySSA::getHeapVersion(const Value *I) {
+MemoryAccess *MemorySSA::getMemoryAccess(const Value *I) {
   return InstructionToMemoryAccess.lookup(I);
 }
 
