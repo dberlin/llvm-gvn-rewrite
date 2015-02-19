@@ -488,9 +488,9 @@ Expression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *HV) {
   E->setOpcode(0);
   Value *Operand = lookupOperandLeader(LI->getPointerOperand());
   E->VarArgs.push_back(Operand);
-
-  // TODO heap version lookup
-
+  // TODO: Value number heap versions. We may be able to discover
+  // things alias analysis can't on it's own (IE that a store and a
+  // load have the same value, and thus, it isn't clobbering the load)
   return E;
 }
 
@@ -986,14 +986,24 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
                    << " was reachable, but new edge to it found\n");
       // We've made an edge reachable to an existing block, which may
       // impact predicates.
-      // Otherwise, only mark the phi nodes as touched
+      // Otherwise, only mark the phi nodes as touched, as they are
+      // the only thing that depend on new edges. Anything using their
+      // values will get propagated to if necessary
       auto BI = To->begin();
       while (isa<PHINode>(BI)) {
         TouchedInstructions.insert(BI);
         ++BI;
       }
       // Propagate the change downstream.
-      propagateChangeInEdge(To);
+      // TODO: I don't see how it's necessary to mark random
+      // downstream instructions as suddenly touched.  They should get
+      // propagated to in the normal course of business.  If we had
+      // predicates, this would make sense, since the predicates do
+      // not have use info, so you don't know which downstream
+      // instructions were inferred based on them (though that could
+      // be tracked)
+
+      // propagateChangeInEdge(To);
     }
   }
 }
@@ -1078,7 +1088,7 @@ void NewGVN::propagateChangeInEdge(BasicBlock *Dest) {
   // the block.
   DomTreeNode *DTN = DT->getNode(Dest);
   // TODO(dannyb): This differs slightly from the published algorithm,
-  // verify it The published algorithm touches all instructions, we
+  // verify it. The published algorithm touches all instructions, we
   // only touch the phi nodes.  This is because there should be no
   // other values that can *directly* change as a result of edge
   // reachability. If the phi node ends up changing congruence classes,
