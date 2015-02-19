@@ -632,7 +632,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
 
   DEBUG(F.print(dbgs(), new MemorySSAAnnotatedWriter(this)));
   DEBUG(verifyDefUses(F));
-  
+
   for (auto DI = PerBlockAccesses.begin(), DE = PerBlockAccesses.end();
        DI != DE; ++DI) {
     delete DI->second;
@@ -649,9 +649,9 @@ void MemorySSA::dump(Function &F, const AccessMap &AM) {
   }
 }
 
-static void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) 
-{
-  assert ((isa<MemoryDef>(Def) || isa<MemoryPhi>(Def)) && "Memory definition should have been a def or a phi");
+static void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
+  assert((isa<MemoryDef>(Def) || isa<MemoryPhi>(Def)) &&
+         "Memory definition should have been a def or a phi");
   bool foundit = false;
   for (auto UI = Def->use_begin(), UE = Def->use_end(); UI != UE; ++UI)
     if (&*UI == Use) {
@@ -659,7 +659,7 @@ static void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use)
       break;
     }
 
-  assert (foundit && "Did not find use in def's use list");
+  assert(foundit && "Did not find use in def's use list");
 }
 
 void MemorySSA::verifyDefUses(Function &F) {
@@ -667,30 +667,28 @@ void MemorySSA::verifyDefUses(Function &F) {
     // Phi nodes are attached to basic blocks
     MemoryAccess *MA = getMemoryAccess(FI);
     if (MA) {
-      assert(isa<MemoryPhi>(MA) && "Something other than phi node on basic block");
+      assert(isa<MemoryPhi>(MA) &&
+             "Something other than phi node on basic block");
       MemoryPhi *MP = cast<MemoryPhi>(MA);
       for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i)
-	verifyUseInDefs(MP->getIncomingValue(i), MP);
+        verifyUseInDefs(MP->getIncomingValue(i), MP);
     }
     for (auto BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
       MA = getMemoryAccess(BI);
       if (MA) {
-	if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
-	  verifyUseInDefs(MU->getUseOperand(), MU);
-	else if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
-	  verifyUseInDefs(MD->getUseOperand(), MD);
-	else if (MemoryPhi *MP = dyn_cast<MemoryPhi>(MA)) {
-	  for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i)
-	    verifyUseInDefs(MP->getIncomingValue(i), MP);
-	}
-	
+        if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
+          verifyUseInDefs(MU->getUseOperand(), MU);
+        else if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
+          verifyUseInDefs(MD->getUseOperand(), MD);
+        else if (MemoryPhi *MP = dyn_cast<MemoryPhi>(MA)) {
+          for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i)
+            verifyUseInDefs(MP->getIncomingValue(i), MP);
+        }
       }
     }
   }
 }
 
-      
-  
 MemoryAccess *MemorySSA::getMemoryAccess(const Value *I) {
   return InstructionToMemoryAccess.lookup(I);
 }
@@ -730,4 +728,3 @@ void MemoryUse::print(raw_ostream &OS) {
   OS << getVersionNumberFromAccess(UO);
   OS << ")";
 }
-
