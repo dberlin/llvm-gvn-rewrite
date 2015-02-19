@@ -80,6 +80,10 @@ AliasAnalysis::Location getLocationForAA(AliasAnalysis *AA, Instruction *Inst) {
     return AA->getLocation(I);
   else if (auto *I = dyn_cast<AtomicRMWInst>(Inst))
     return AA->getLocation(I);
+  else if (auto *I = dyn_cast<CallInst>(Inst))
+    return AliasAnalysis::Location(I);
+  else if (auto *I = dyn_cast<InvokeInst>(Inst))
+    return AliasAnalysis::Location(I);
   else
     llvm_unreachable("unsupported memory instruction");
 }
