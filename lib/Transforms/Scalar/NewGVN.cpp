@@ -531,9 +531,10 @@ Expression *NewGVN::performSymbolicCallEvaluation(Instruction *I,
   if (AA->doesNotAccessMemory(CI))
     return createCallExpression(CI, nullptr);
   else if (AA->onlyReadsMemory(CI))
-    return createCallExpression(CI, MSSA->getClobberingMemoryAccess(CI));
+    return nullptr;
+    //    return createCallExpression(CI, MSSA->getClobberingMemoryAccess(CI));
   else
-    return NULL;
+    return nullptr;
 }
 
 // performSymbolicPHIEvaluation - Evaluate PHI nodes symbolically, and
