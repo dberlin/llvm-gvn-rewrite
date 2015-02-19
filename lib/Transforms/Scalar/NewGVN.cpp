@@ -500,7 +500,7 @@ Expression *NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *HV) {
   // Need opcodes to match on loads and store
   E->setOpcode(0);
   Value *Operand = lookupOperandLeader(SI->getPointerOperand());
-  E->VarArgs.push_back(Operand);  
+  E->VarArgs.push_back(Operand);
   // TODO: Value number heap versions. We may be able to discover
   // things alias analysis can't on it's own (IE that a store and a
   // load have the same value, and thus, it isn't clobbering the load)

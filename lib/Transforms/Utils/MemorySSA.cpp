@@ -370,17 +370,24 @@ void MemorySSA::computeLiveInBlocks(
   }
 }
 
-unsigned MemorySSA::getNumPreds(const BasicBlock *BB) {
-  unsigned &NP = BBNumPreds[BB];
-  if (NP == 0)
-    NP = std::distance(pred_begin(BB), pred_end(BB)) + 1;
-  return NP - 1;
+void MemorySSA::computeBBNumbers(Function &F,
+                                 DenseMap<BasicBlock *, unsigned> &BBNumbers) {
+  // Assign unique ids to basic blocks
+  unsigned ID = 0;
+  for (auto I = F.begin(), E = F.end(); I != E; ++I)
+    BBNumbers[I] = ID++;
 }
 
-void MemorySSA::determineInsertionPoint(AccessMap &BlockAccesses) {
-  // Unique the set of defining blocks for efficient lookup.
-  SmallPtrSet<BasicBlock *, 32> DefBlocks;
-  DefBlocks.insert(DefiningBlocks.begin(), DefiningBlocks.end());
+void MemorySSA::determineInsertionPoint(
+    Function &F, AccessMap &BlockAccesses,
+    const SmallPtrSet<BasicBlock *, 32> DefBlocks,
+    const SmallVector<BasicBlock *, 32> UsingBlocks) {
+  // Compute dominator levels and BB numbers
+  DenseMap<DomTreeNode *, unsigned> DomLevels;
+  computeDomLevels(DomLevels);
+
+  DenseMap<BasicBlock *, unsigned> BBNumbers;
+  computeBBNumbers(F, BBNumbers);
 
   SmallPtrSet<BasicBlock *, 32> LiveInBlocks;
 
@@ -468,7 +475,8 @@ void MemorySSA::determineInsertionPoint(AccessMap &BlockAccesses) {
 
 void MemorySSA::renamePass(BasicBlock *BB, BasicBlock *Pred,
                            MemoryAccess *IncomingVal, AccessMap &BlockAccesses,
-                           std::vector<RenamePassData> &Worklist) {
+                           std::vector<RenamePassData> &Worklist,
+                           SmallPtrSet<BasicBlock *, 16> &Visited) {
 NextIteration:
   auto Accesses = BlockAccesses.lookup(BB);
 
@@ -479,6 +487,8 @@ NextIteration:
     assert(NumEdges && "Must be at least one edge from Pred to BB!");
     for (unsigned i = 0; i != NumEdges; ++i)
       Phi->addIncoming(IncomingVal, Pred);
+    IncomingVal->addUse(Phi);
+
     IncomingVal = Phi;
   }
 
@@ -524,39 +534,31 @@ NextIteration:
   goto NextIteration;
 }
 
-void MemorySSA::buildMemorySSA(Function &F) {
-  // If we haven't computed dominator tree levels, do so now.
-  if (DomLevels.empty()) {
-    SmallVector<DomTreeNode *, 32> Worklist;
+void MemorySSA::computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels) {
+  SmallVector<DomTreeNode *, 32> Worklist;
 
-    DomTreeNode *Root = DT->getRootNode();
-    DomLevels[Root] = 0;
-    Worklist.push_back(Root);
+  DomTreeNode *Root = DT->getRootNode();
+  DomLevels[Root] = 0;
+  Worklist.push_back(Root);
 
-    while (!Worklist.empty()) {
-      DomTreeNode *Node = Worklist.pop_back_val();
-      unsigned ChildLevel = DomLevels[Node] + 1;
-      for (auto CI = Node->begin(), CE = Node->end(); CI != CE; ++CI) {
-        DomLevels[*CI] = ChildLevel;
-        Worklist.push_back(*CI);
-      }
+  while (!Worklist.empty()) {
+    DomTreeNode *Node = Worklist.pop_back_val();
+    unsigned ChildLevel = DomLevels[Node] + 1;
+    for (auto CI = Node->begin(), CE = Node->end(); CI != CE; ++CI) {
+      DomLevels[*CI] = ChildLevel;
+      Worklist.push_back(*CI);
     }
   }
+}
 
-  // If we haven't computed a numbering for the BB's in the function, do so
-  // now.
-  if (BBNumbers.empty()) {
-    unsigned ID = 0;
-    for (auto I = F.begin(), E = F.end(); I != E; ++I)
-      BBNumbers[I] = ID++;
-  }
-
+void MemorySSA::buildMemorySSA(Function &F) {
   // We temporarily maintain lists of memory accesses per-block,
   // trading time for memory. We could just look up the memory access
   // for every possible instruction in the stream.  Instead, we built
   // lists, and then throw it out once the use-def form is built.
   AccessMap PerBlockAccesses;
-  
+  SmallPtrSet<BasicBlock *, 32> DefiningBlocks;
+  SmallVector<BasicBlock *, 32> UsingBlocks;
   for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
     std::list<MemoryAccess *> *Accesses = nullptr;
     for (auto BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
@@ -596,7 +598,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
       if (def) {
         MemoryDef *MD = new MemoryDef(++NextHeapVersion, nullptr, &*BI, FI);
         InstructionToMemoryAccess.insert(std::make_pair(&*BI, MD));
-        DefiningBlocks.push_back(FI);
+        DefiningBlocks.insert(FI);
         if (!Accesses) {
           Accesses = new std::list<MemoryAccess *>;
           PerBlockAccesses.insert(std::make_pair(FI, Accesses));
@@ -606,7 +608,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
     }
   }
   // Determine where our PHI's should go
-  determineInsertionPoint(PerBlockAccesses);
+  determineInsertionPoint(F, PerBlockAccesses, DefiningBlocks, UsingBlocks);
 
   // We create an access to represent "live on entry"
   BasicBlock &StartingPoint = F.getEntryBlock();
@@ -614,27 +616,27 @@ void MemorySSA::buildMemorySSA(Function &F) {
       new MemoryDef(0, nullptr, nullptr, &StartingPoint);
 
   // Now do regular SSA renaming
+  /// The set of basic blocks the renamer has already visited.
+  ///
+  SmallPtrSet<BasicBlock *, 16> Visited;
+
   std::vector<RenamePassData> RenamePassWorklist;
   RenamePassWorklist.push_back({F.begin(), nullptr, DefaultAccess});
   do {
     RenamePassData RPD;
     RPD.swap(RenamePassWorklist.back());
     RenamePassWorklist.pop_back();
-    renamePass(RPD.BB, RPD.Pred, RPD.MA, PerBlockAccesses, RenamePassWorklist);
+    renamePass(RPD.BB, RPD.Pred, RPD.MA, PerBlockAccesses, RenamePassWorklist,
+               Visited);
   } while (!RenamePassWorklist.empty());
 
   DEBUG(F.print(dbgs(), new MemorySSAAnnotatedWriter(this)));
-
+  DEBUG(verifyDefUses(F));
+  
   for (auto DI = PerBlockAccesses.begin(), DE = PerBlockAccesses.end();
        DI != DE; ++DI) {
     delete DI->second;
   }
-  PerBlockAccesses.clear();
-  Visited.clear();
-  BBNumbers.clear();
-  BBNumPreds.clear();
-  DefiningBlocks.clear();
-  UsingBlocks.clear();
 }
 
 void MemorySSA::dump(Function &F, const AccessMap &AM) {
@@ -647,6 +649,48 @@ void MemorySSA::dump(Function &F, const AccessMap &AM) {
   }
 }
 
+static void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) 
+{
+  assert ((isa<MemoryDef>(Def) || isa<MemoryPhi>(Def)) && "Memory definition should have been a def or a phi");
+  bool foundit = false;
+  for (auto UI = Def->use_begin(), UE = Def->use_end(); UI != UE; ++UI)
+    if (&*UI == Use) {
+      foundit = true;
+      break;
+    }
+
+  assert (foundit && "Did not find use in def's use list");
+}
+
+void MemorySSA::verifyDefUses(Function &F) {
+  for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
+    // Phi nodes are attached to basic blocks
+    MemoryAccess *MA = getMemoryAccess(FI);
+    if (MA) {
+      assert(isa<MemoryPhi>(MA) && "Something other than phi node on basic block");
+      MemoryPhi *MP = cast<MemoryPhi>(MA);
+      for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i)
+	verifyUseInDefs(MP->getIncomingValue(i), MP);
+    }
+    for (auto BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
+      MA = getMemoryAccess(BI);
+      if (MA) {
+	if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
+	  verifyUseInDefs(MU->getUseOperand(), MU);
+	else if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
+	  verifyUseInDefs(MD->getUseOperand(), MD);
+	else if (MemoryPhi *MP = dyn_cast<MemoryPhi>(MA)) {
+	  for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i)
+	    verifyUseInDefs(MP->getIncomingValue(i), MP);
+	}
+	
+      }
+    }
+  }
+}
+
+      
+  
 MemoryAccess *MemorySSA::getMemoryAccess(const Value *I) {
   return InstructionToMemoryAccess.lookup(I);
 }
@@ -657,6 +701,7 @@ void MemoryDef::print(raw_ostream &OS) {
      << "MemoryDef(";
   OS << getVersionNumberFromAccess(UO) << ")";
 }
+
 void MemoryPhi::print(raw_ostream &OS) {
   OS << getDefVersion() << " = "
      << "MemoryPhi(";
@@ -678,9 +723,11 @@ void MemoryPhi::print(raw_ostream &OS) {
   }
   OS << ")";
 }
+
 void MemoryUse::print(raw_ostream &OS) {
   MemoryAccess *UO = getUseOperand();
   OS << "MemoryUse(";
   OS << getVersionNumberFromAccess(UO);
   OS << ")";
 }
+
