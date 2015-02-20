@@ -127,7 +127,7 @@ class NewGVN : public FunctionPass {
   AliasAnalysis *AA;
   MemorySSA *MSSA;
   BumpPtrAllocator ExpressionAllocator;
-  
+
   // Congruence class info
   DenseMap<Value *, CongruenceClass *> ValueToClass;
   struct ComparingExpressionInfo {
@@ -220,6 +220,9 @@ private:
   CongruenceClass *createSingletonCongruenceClass(Value *Member,
                                                   BasicBlock *BB) {
     CongruenceClass *CClass = createCongruenceClass(Member, NULL);
+    if (Instruction *I = dyn_cast<Instruction>(Member))
+      assert(I->getParent() == BB && "What");
+
     CClass->members.insert(std::make_pair(Member, BB));
     ValueToClass[Member] = CClass;
     return CClass;
@@ -941,7 +944,11 @@ void NewGVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
                    << "\n");
       VClass->members.erase(std::make_pair(V, BB));
       // assert(std::find(EClass->members.begin(), EClass->members.end(), V) ==
-      // EClass->members.end() && "Tried to add something to members twice!");
+      // EClass->members.end() && "Tried to add something to members
+      // twice!");
+      if (Instruction *I = dyn_cast<Instruction>(V))
+        assert(I->getParent() == BB && "What");
+
       EClass->members.insert(std::make_pair(V, BB));
       ValueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
@@ -1135,7 +1142,8 @@ void NewGVN::cleanupTables() {
   ValueToClass.clear();
   for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
     if (CongruenceClasses[i]->members.size() > 10)
-      DEBUG(dbgs() << "Congruence class " << i << " has " << CongruenceClasses[i]->members.size() << " members\n");
+      DEBUG(dbgs() << "Congruence class " << i << " has "
+                   << CongruenceClasses[i]->members.size() << " members\n");
     delete CongruenceClasses[i];
 
     CongruenceClasses[i] = NULL;

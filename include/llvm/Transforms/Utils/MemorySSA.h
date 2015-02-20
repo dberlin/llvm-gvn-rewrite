@@ -15,8 +15,6 @@
 #ifndef LLVM_TRANSFORMS_UTILS_MEMORYSSA_H
 #define LLVM_TRANSFORMS_UTILS_MEMORYSSA_H
 #include "llvm/Analysis/AliasAnalysis.h"
-#include "llvm/ADT/ilist.h"
-#include "llvm/ADT/ilist_node.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -81,7 +79,7 @@ class Function;
 // with built-in disambiguation in GCC have shown this to not be
 // useful for what it buys you.
 
-class MemoryAccess : public ilist_node<MemoryAccess> {
+class MemoryAccess {
 
 public:
   enum AccessType { AccessUse, AccessDef, AccessPhi };
@@ -89,7 +87,7 @@ public:
   // Because we are not values, we have to define our own use type.
   // Being a value would be memory intensive, and we don't need all
   // the functionality/problems that brings us
-  typedef iplist<MemoryAccess> UseListType;
+  typedef std::list<MemoryAccess *> UseListType;
 
   // Methods for support type inquiry through isa, cast, and
   // dyn_cast
@@ -220,14 +218,14 @@ private:
   AliasAnalysis *AA;
   DominatorTree *DT;
   BumpPtrAllocator MemoryAccessAllocator;
-  
+
   // Memory SSA mappings
   DenseMap<const Value *, MemoryAccess *> InstructionToMemoryAccess;
   DenseMap<std::pair<MemoryAccess *, AliasAnalysis::Location>, MemoryAccess *>
       CachedClobberingVersion;
 
   // Memory SSA building info
-
+  MemoryAccess *LiveOnEntryDef;
   unsigned int NextHeapVersion;
 
   typedef DenseMap<BasicBlock *, std::list<MemoryAccess *> *> AccessMap;
@@ -249,7 +247,8 @@ public:
 
 private:
   bool isLiveOnEntryDef(const MemoryAccess *MA) const;
-
+  void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use);
+  
   std::pair<MemoryAccess *, bool>
   getClobberingMemoryAccess(MemoryPhi *Phi, const AliasAnalysis::Location &,
                             SmallPtrSet<MemoryAccess *, 32> &);
@@ -268,6 +267,8 @@ private:
   void computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels);
   void computeBBNumbers(Function &F,
                         DenseMap<BasicBlock *, unsigned> &BBNumbers);
+  void markNullsAsLiveOnEntry(AccessMap &BlockAccesses, BasicBlock *BB);
+
   void verifyDefUses(Function &F);
 
   struct RenamePassData {

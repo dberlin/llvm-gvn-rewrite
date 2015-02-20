@@ -103,11 +103,7 @@ unsigned int getVersionNumberFromAccess(MemoryAccess *MA) {
 }
 
 bool MemorySSA::isLiveOnEntryDef(const MemoryAccess *MA) const {
-  if (const MemoryDef *MD = dyn_cast<const MemoryDef>(MA))
-    if (MD->getUseOperand() == nullptr)
-      return true;
-
-  return false;
+  return MA == LiveOnEntryDef;
 }
 
 // Get the clobbering heap version for a phi node and alias location
@@ -261,7 +257,7 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *HV,
       // we are done. Otherwise grab alias location, see if they
       // alias, and if they do, we are done.
       // Otherwise, continue
-      if (isa<CallInst>(DefMemoryInst) || isa<InvokeInst>(DefMemoryInst)) { 
+      if (isa<CallInst>(DefMemoryInst) || isa<InvokeInst>(DefMemoryInst)) {
         if (AA->getModRefInfo(DefMemoryInst, Loc) & AliasAnalysis::Mod)
           break;
       } else if (AA->alias(getLocationForAA(AA, DefMemoryInst), Loc) !=
@@ -279,7 +275,7 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *HV,
     CurrVersion = NextVersion;
   }
   CachedClobberingVersion.insert(
-      std::make_pair(std::make_pair(HV, Loc), CurrVersion));  
+      std::make_pair(std::make_pair(HV, Loc), CurrVersion));
   return std::make_pair(CurrVersion, false);
 }
 
@@ -472,7 +468,8 @@ void MemorySSA::determineInsertionPoint(
       Accesses = new std::list<MemoryAccess *>;
       BlockAccesses.insert(std::make_pair(BB, Accesses));
     }
-    MemoryPhi *Phi = new (MemoryAccessAllocator) MemoryPhi(++NextHeapVersion, BB);
+    MemoryPhi *Phi =
+        new (MemoryAccessAllocator) MemoryPhi(++NextHeapVersion, BB);
     InstructionToMemoryAccess.insert(std::make_pair(BB, Phi));
     // Phi goes first
     Accesses->push_front(Phi);
@@ -557,6 +554,34 @@ void MemorySSA::computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels) {
   }
 }
 
+void MemorySSA::markNullsAsLiveOnEntry(AccessMap &BlockAccesses, BasicBlock *BB) 
+{
+  auto Accesses = BlockAccesses.lookup(BB);
+  if (!Accesses)
+    return;
+
+  for (auto AI = Accesses->begin(), AE = Accesses->end(); AI != AE; ) {
+    auto Next = std::next(AI);
+    // If we have a phi, just remove it. We are going to replace all
+    // users with live on entry.
+    if (MemoryPhi *P = dyn_cast<MemoryPhi>(*AI)) {
+      delete P;
+      Accesses->erase(AI);
+    }
+    else if (MemoryUse *U = dyn_cast<MemoryUse>(*AI)) 
+      {
+	U->setUseOperand(LiveOnEntryDef);
+	LiveOnEntryDef->addUse(U);
+      }
+    else if (MemoryDef *D = dyn_cast<MemoryDef>(*AI))
+      {
+	D->setUseOperand(LiveOnEntryDef);
+	LiveOnEntryDef->addUse(D);
+      }
+    AI = Next; 
+  }
+}
+
 void MemorySSA::buildMemorySSA(Function &F) {
   // We temporarily maintain lists of memory accesses per-block,
   // trading time for memory. We could just look up the memory access
@@ -565,6 +590,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
   AccessMap PerBlockAccesses;
   SmallPtrSet<BasicBlock *, 32> DefiningBlocks;
   SmallVector<BasicBlock *, 32> UsingBlocks;
+
   for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
     std::list<MemoryAccess *> *Accesses = nullptr;
     for (auto BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
@@ -591,7 +617,8 @@ void MemorySSA::buildMemorySSA(Function &F) {
 
       // Defs are already uses, so use && def is handled elsewhere
       if (use && !def) {
-        MemoryUse *MU = new (MemoryAccessAllocator) MemoryUse(nullptr, &*BI, FI);
+        MemoryUse *MU =
+            new (MemoryAccessAllocator) MemoryUse(nullptr, &*BI, FI);
         InstructionToMemoryAccess.insert(std::make_pair(&*BI, MU));
         UsingBlocks.push_back(FI);
         if (!Accesses) {
@@ -601,7 +628,8 @@ void MemorySSA::buildMemorySSA(Function &F) {
         Accesses->push_back(MU);
       }
       if (def) {
-        MemoryDef *MD = new (MemoryAccessAllocator) MemoryDef(++NextHeapVersion, nullptr, &*BI, FI);
+        MemoryDef *MD = new (MemoryAccessAllocator)
+            MemoryDef(++NextHeapVersion, nullptr, &*BI, FI);
         InstructionToMemoryAccess.insert(std::make_pair(&*BI, MD));
         DefiningBlocks.insert(FI);
         if (!Accesses) {
@@ -617,16 +645,16 @@ void MemorySSA::buildMemorySSA(Function &F) {
 
   // We create an access to represent "live on entry"
   BasicBlock &StartingPoint = F.getEntryBlock();
-  MemoryAccess *DefaultAccess =
-    new (MemoryAccessAllocator) MemoryDef(0, nullptr, nullptr, &StartingPoint);
-
+  LiveOnEntryDef = new (MemoryAccessAllocator)
+      MemoryDef(0, nullptr, nullptr, &StartingPoint);
+  
   // Now do regular SSA renaming
   /// The set of basic blocks the renamer has already visited.
   ///
   SmallPtrSet<BasicBlock *, 16> Visited;
-
+  
   std::vector<RenamePassData> RenamePassWorklist;
-  RenamePassWorklist.push_back({F.begin(), nullptr, DefaultAccess});
+  RenamePassWorklist.push_back({F.begin(), nullptr, LiveOnEntryDef});
   do {
     RenamePassData RPD;
     RPD.swap(RenamePassWorklist.back());
@@ -635,6 +663,16 @@ void MemorySSA::buildMemorySSA(Function &F) {
                Visited);
   } while (!RenamePassWorklist.empty());
 
+  // At this point, we may have unreachable accesses
+  // Mark them with the live on entry variable
+  if (Visited.size() != F.size()) {
+    for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
+      if (!Visited.count(FI)) {
+	markNullsAsLiveOnEntry(PerBlockAccesses, FI);
+      }
+    }
+  }
+  
   DEBUG(F.print(dbgs(), new MemorySSAAnnotatedWriter(this)));
   verifyDefUses(F);
 
@@ -654,12 +692,19 @@ void MemorySSA::dump(Function &F, const AccessMap &AM) {
   }
 }
 
-static void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
+void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
+  // The live on entry use may cause us to get a NULL def here
+  if (Def == nullptr) {
+    assert(isLiveOnEntryDef(Use) &&
+           "Null def but use not point to live on entry def");
+    return;
+  }
+
   assert((isa<MemoryDef>(Def) || isa<MemoryPhi>(Def)) &&
          "Memory definition should have been a def or a phi");
   bool foundit = false;
   for (auto UI = Def->use_begin(), UE = Def->use_end(); UI != UE; ++UI)
-    if (&*UI == Use) {
+    if (*UI == Use) {
       foundit = true;
       break;
     }
