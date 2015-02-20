@@ -508,10 +508,10 @@ NextIteration:
 
       if (MemoryUse *MU = dyn_cast<MemoryUse>(*LI)) {
         MU->setUseOperand(IncomingVal);
-	IncomingVal->addUse(MU);
+        IncomingVal->addUse(MU);
       } else if (MemoryDef *MD = dyn_cast<MemoryDef>(*LI)) {
         MD->setUseOperand(IncomingVal);
-	IncomingVal->addUse(MD);
+        IncomingVal->addUse(MD);
         IncomingVal = MD;
       }
     }
@@ -552,31 +552,27 @@ void MemorySSA::computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels) {
   }
 }
 
-void MemorySSA::markNullsAsLiveOnEntry(AccessMap &BlockAccesses, BasicBlock *BB) 
-{
+void MemorySSA::markNullsAsLiveOnEntry(AccessMap &BlockAccesses,
+                                       BasicBlock *BB) {
   auto Accesses = BlockAccesses.lookup(BB);
   if (!Accesses)
     return;
 
-  for (auto AI = Accesses->begin(), AE = Accesses->end(); AI != AE; ) {
+  for (auto AI = Accesses->begin(), AE = Accesses->end(); AI != AE;) {
     auto Next = std::next(AI);
     // If we have a phi, just remove it. We are going to replace all
     // users with live on entry.
     if (MemoryPhi *P = dyn_cast<MemoryPhi>(*AI)) {
       delete P;
       Accesses->erase(AI);
+    } else if (MemoryUse *U = dyn_cast<MemoryUse>(*AI)) {
+      U->setUseOperand(LiveOnEntryDef);
+      LiveOnEntryDef->addUse(U);
+    } else if (MemoryDef *D = dyn_cast<MemoryDef>(*AI)) {
+      D->setUseOperand(LiveOnEntryDef);
+      LiveOnEntryDef->addUse(D);
     }
-    else if (MemoryUse *U = dyn_cast<MemoryUse>(*AI)) 
-      {
-	U->setUseOperand(LiveOnEntryDef);
-	LiveOnEntryDef->addUse(U);
-      }
-    else if (MemoryDef *D = dyn_cast<MemoryDef>(*AI))
-      {
-	D->setUseOperand(LiveOnEntryDef);
-	LiveOnEntryDef->addUse(D);
-      }
-    AI = Next; 
+    AI = Next;
   }
 }
 
@@ -645,12 +641,12 @@ void MemorySSA::buildMemorySSA(Function &F) {
   BasicBlock &StartingPoint = F.getEntryBlock();
   LiveOnEntryDef = new (MemoryAccessAllocator)
       MemoryDef(0, nullptr, nullptr, &StartingPoint);
-  
+
   // Now do regular SSA renaming
   /// The set of basic blocks the renamer has already visited.
   ///
   SmallPtrSet<BasicBlock *, 16> Visited;
-  
+
   std::vector<RenamePassData> RenamePassWorklist;
   RenamePassWorklist.push_back({F.begin(), nullptr, LiveOnEntryDef});
   do {
@@ -666,11 +662,11 @@ void MemorySSA::buildMemorySSA(Function &F) {
   if (Visited.size() != F.size()) {
     for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
       if (!Visited.count(FI)) {
-	markNullsAsLiveOnEntry(PerBlockAccesses, FI);
+        markNullsAsLiveOnEntry(PerBlockAccesses, FI);
       }
     }
   }
-  
+
   DEBUG(F.print(dbgs(), new MemorySSAAnnotatedWriter(this)));
   DEBUG(verifyDefUses(F));
 
@@ -700,8 +696,9 @@ void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
 
   assert((isa<MemoryDef>(Def) || isa<MemoryPhi>(Def)) &&
          "Memory definition should have been a def or a phi");
-  
-  assert(std::find(Def->use_begin(), Def->use_end(), Use) != Def->use_end() && "Did not find use in def's use list");
+
+  assert(std::find(Def->use_begin(), Def->use_end(), Use) != Def->use_end() &&
+         "Did not find use in def's use list");
 }
 
 void MemorySSA::verifyDefUses(Function &F) {

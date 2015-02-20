@@ -248,7 +248,7 @@ public:
 private:
   bool isLiveOnEntryDef(const MemoryAccess *MA) const;
   void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use);
-  
+
   std::pair<MemoryAccess *, bool>
   getClobberingMemoryAccess(MemoryPhi *Phi, const AliasAnalysis::Location &,
                             SmallPtrSet<MemoryAccess *, 32> &);
