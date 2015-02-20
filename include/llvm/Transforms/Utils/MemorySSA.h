@@ -1,0 +1,295 @@
+//===- MemorySSA.h - Build Memory SSA ----------------------------*- C++
+//-*-===//
+//
+//                     The LLVM Compiler Infrastructure
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+//
+// This file exposes an interface to building/using memory SSA to walk memory
+// instructions using a use/def graph
+//
+//===----------------------------------------------------------------------===//
+#ifndef LLVM_TRANSFORMS_UTILS_MEMORYSSA_H
+#define LLVM_TRANSFORMS_UTILS_MEMORYSSA_H
+#include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/ADT/ilist.h"
+#include "llvm/ADT/ilist_node.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Support/Allocator.h"
+#include <list>
+namespace llvm {
+
+class BasicBlock;
+class DominatorTree;
+class Function;
+
+// Memory SSA class builds an SSA form that links together the
+// loads, stores, and clobbers (atomics, calls, etc) of a program,
+// so they can be walked easily.
+// Additionally, it does a trivial form of "heap versioning"
+// Every time the memory state changes in the program, we generate a
+// new heap version
+// It generates MemoryDef/Uses/Phis that are overlayed on top of the existing
+// instructions
+
+// As a trivial example,
+// define i32 @main() #0 {
+// entry:
+//   %call = call noalias i8* @_Znwm(i64 4) #2
+//   %0 = bitcast i8* %call to i32*
+//   %call1 = call noalias i8* @_Znwm(i64 4) #2
+//   %1 = bitcast i8* %call1 to i32*
+//   store i32 5, i32* %0, align 4
+//   store i32 7, i32* %1, align 4
+//   %2 = load i32* %0, align 4
+//   %3 = load i32* %1, align 4
+//   %add = add nsw i32 %2, %3
+//   ret i32 %add
+// }
+// Will become
+//  define i32 @main() #0 {
+// entry:
+//   ; 1 = MemoryDef(0)
+//   %call = call noalias i8* @_Znwm(i64 4) #3
+//   %2 = bitcast i8* %call to i32*
+//   ; 2 = MemoryDef(1)
+//   %call1 = call noalias i8* @_Znwm(i64 4) #3
+//   %4 = bitcast i8* %call1 to i32*
+//   ; 3 = MemoryDef(2)
+//   store i32 5, i32* %2, align 4
+//   ; 4 = MemoryDef(3)
+//   store i32 7, i32* %4, align 4
+//   ; MemoryUse(4)
+//   %7 = load i32* %2, align 4
+//   ; MemoryUse(4)
+//   %8 = load i32* %4, align 4
+//   %add = add nsw i32 %7, %8
+//   ret i32 %add
+// }
+// Given this form, all the stores that could ever effect the load
+// at %8 can be gotten by using the memory use associated with it,
+// and walking from use to def until you hit the top of the function.
+
+// Each def also has a list of uses
+// Also note that it does not attempt any disambiguation, it is simply
+// linking together the instructions.  Attempts for years to do varied forms
+// with built-in disambiguation in GCC have shown this to not be
+// useful for what it buys you.
+
+class MemoryAccess : public ilist_node<MemoryAccess> {
+
+public:
+  enum AccessType { AccessUse, AccessDef, AccessPhi };
+
+  // Because we are not values, we have to define our own use type.
+  // Being a value would be memory intensive, and we don't need all
+  // the functionality/problems that brings us
+  typedef iplist<MemoryAccess> UseListType;
+
+  // Methods for support type inquiry through isa, cast, and
+  // dyn_cast
+  static inline bool classof(const MemoryAccess *) { return true; }
+
+  AccessType getType() const { return Type; }
+  MemoryAccess() {}
+  virtual ~MemoryAccess() {}
+
+  UseListType::iterator use_begin() { return UseList.begin(); }
+  UseListType::iterator use_end() { return UseList.end(); }
+  UseListType::const_iterator use_begin() const { return UseList.begin(); }
+  UseListType::const_iterator use_end() const { return UseList.end(); }
+  UseListType::reverse_iterator use_rbegin() { return UseList.rbegin(); }
+  UseListType::reverse_iterator use_rend() { return UseList.rend(); }
+  UseListType::const_reverse_iterator use_rbegin() const {
+    return UseList.rbegin();
+  }
+  UseListType::const_reverse_iterator use_rend() const {
+    return UseList.rend();
+  }
+  BasicBlock *getBlock() const { return Block; }
+
+  void addUse(MemoryAccess *Use) {
+    assert((Type == AccessDef || Type == AccessPhi) &&
+           "Trying to add a use to a MemoryUse");
+    UseList.push_back(Use);
+  }
+  virtual void print(raw_ostream &OS) {}
+
+protected:
+  MemoryAccess(AccessType AT, BasicBlock *BB) : Type(AT), Block(BB) {}
+
+private:
+  MemoryAccess(const MemoryAccess &);
+  void operator=(const MemoryAccess &);
+  AccessType Type;
+  UseListType UseList;
+  BasicBlock *Block;
+};
+inline raw_ostream &operator<<(raw_ostream &OS, MemoryAccess &MA) {
+  MA.print(OS);
+  return OS;
+}
+
+class MemoryUse : public MemoryAccess {
+public:
+  MemoryUse(MemoryAccess *UO, Instruction *MI, BasicBlock *BB)
+      : MemoryUse(UO, AccessUse, MI, BB) {}
+
+  MemoryAccess *getUseOperand() const { return UseOperand; }
+  void setUseOperand(MemoryAccess *UO) { UseOperand = UO; }
+  Instruction *getMemoryInst() const { return MemoryInst; }
+  void setMemoryInst(Instruction *MI) { MemoryInst = MI; }
+
+  static inline bool classof(const MemoryUse *) { return true; }
+  static inline bool classof(const MemoryAccess *MA) {
+    return MA->getType() == AccessUse;
+  }
+  virtual void print(raw_ostream &OS);
+
+protected:
+  MemoryUse(MemoryAccess *UO, AccessType AT, Instruction *MI, BasicBlock *BB)
+      : MemoryAccess(AT, BB), UseOperand(UO), MemoryInst(MI) {}
+
+private:
+  MemoryAccess *UseOperand;
+  Instruction *MemoryInst;
+};
+
+// All defs also have a use
+class MemoryDef : public MemoryUse {
+public:
+  MemoryDef(unsigned int DV, MemoryAccess *UO, Instruction *MI, BasicBlock *BB)
+      : MemoryUse(UO, AccessDef, MI, BB), DefVersion(DV) {}
+
+  unsigned int getDefVersion() { return DefVersion; }
+  void setDefVersion(unsigned int v) { DefVersion = v; }
+
+  static inline bool classof(const MemoryDef *) { return true; }
+  static inline bool classof(const MemoryUse *MA) {
+    return MA->getType() == AccessDef;
+  }
+
+  static inline bool classof(const MemoryAccess *MA) {
+    return MA->getType() == AccessDef;
+  }
+  virtual void print(raw_ostream &OS);
+
+private:
+  unsigned int DefVersion;
+};
+class MemoryPhi : public MemoryAccess {
+public:
+  MemoryPhi(unsigned int DV, BasicBlock *BB)
+      : MemoryAccess(AccessPhi, BB), DefVersion(DV) {}
+  unsigned int getNumIncomingValues() { return Args.size(); }
+  void addIncoming(MemoryAccess *MA, BasicBlock *BB) {
+    Args.push_back(std::make_pair(BB, MA));
+  }
+  void setIncomingValue(unsigned int v, MemoryAccess *MA) {
+    std::pair<BasicBlock *, MemoryAccess *> &Val = Args[v];
+    Val.second = MA;
+  }
+  MemoryAccess *getIncomingValue(unsigned int v) { return Args[v].second; }
+  void setIncomingBlock(unsigned int v, BasicBlock *BB) {
+    std::pair<BasicBlock *, MemoryAccess *> &Val = Args[v];
+    Val.first = BB;
+  }
+  BasicBlock *getIncomingBlock(unsigned int v) { return Args[v].first; }
+  unsigned int getDefVersion() { return DefVersion; }
+  void setDefVersion(unsigned int v) { DefVersion = v; }
+  static inline bool classof(const MemoryPhi *) { return true; }
+  static inline bool classof(const MemoryAccess *MA) {
+    return MA->getType() == AccessPhi;
+  }
+
+  virtual void print(raw_ostream &OS);
+
+private:
+  SmallVector<std::pair<BasicBlock *, MemoryAccess *>, 8> Args;
+  unsigned int DefVersion;
+};
+
+class MemorySSA {
+
+private:
+  AliasAnalysis *AA;
+  DominatorTree *DT;
+  BumpPtrAllocator MemoryAccessAllocator;
+  
+  // Memory SSA mappings
+  DenseMap<const Value *, MemoryAccess *> InstructionToMemoryAccess;
+  DenseMap<std::pair<MemoryAccess *, AliasAnalysis::Location>, MemoryAccess *>
+      CachedClobberingVersion;
+
+  // Memory SSA building info
+
+  unsigned int NextHeapVersion;
+
+  typedef DenseMap<BasicBlock *, std::list<MemoryAccess *> *> AccessMap;
+
+public:
+  MemorySSA(AliasAnalysis *A, DominatorTree *D)
+      : AA(A), DT(D), NextHeapVersion(1) {}
+  // Memory SSA related stuff
+  void buildMemorySSA(Function &F);
+  // Given a memory defining/using/clobbering instruction, give you
+  // the nearest dominating actual clobber (by skipping non-aliasing
+  // def links)
+  MemoryAccess *getClobberingMemoryAccess(Instruction *);
+  // Given a memory using/clobbering/etc instruction, get the heap version
+  // intrinsic
+  // associated with it
+  MemoryAccess *getMemoryAccess(const Value *I);
+  void dump(Function &F, const AccessMap &MA);
+
+private:
+  bool isLiveOnEntryDef(const MemoryAccess *MA) const;
+
+  std::pair<MemoryAccess *, bool>
+  getClobberingMemoryAccess(MemoryPhi *Phi, const AliasAnalysis::Location &,
+                            SmallPtrSet<MemoryAccess *, 32> &);
+  std::pair<MemoryAccess *, bool>
+  getClobberingMemoryAccess(MemoryAccess *, const AliasAnalysis::Location &,
+                            SmallPtrSet<MemoryAccess *, 32> &);
+
+  void computeLiveInBlocks(const AccessMap &BlockAccesses,
+                           const SmallPtrSetImpl<BasicBlock *> &DefBlocks,
+                           const SmallVector<BasicBlock *, 32> &UseBlocks,
+                           SmallPtrSetImpl<BasicBlock *> &LiveInBlocks);
+  void
+  determineInsertionPoint(Function &F, AccessMap &BlockAccesses,
+                          const SmallPtrSet<BasicBlock *, 32> DefiningBlocks,
+                          const SmallVector<BasicBlock *, 32> UsingBlocks);
+  void computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels);
+  void computeBBNumbers(Function &F,
+                        DenseMap<BasicBlock *, unsigned> &BBNumbers);
+  void verifyDefUses(Function &F);
+
+  struct RenamePassData {
+    BasicBlock *BB;
+    BasicBlock *Pred;
+    MemoryAccess *MA;
+
+    RenamePassData() : BB(nullptr), Pred(nullptr), MA(nullptr) {}
+
+    RenamePassData(BasicBlock *B, BasicBlock *P, MemoryAccess *M)
+        : BB(B), Pred(P), MA(M) {}
+    void swap(RenamePassData &RHS) {
+      std::swap(BB, RHS.BB);
+      std::swap(Pred, RHS.Pred);
+      std::swap(MA, RHS.MA);
+    }
+  };
+
+  void renamePass(BasicBlock *BB, BasicBlock *Pred, MemoryAccess *IncomingVal,
+                  AccessMap &BlockAccesses,
+                  std::vector<RenamePassData> &Worklist,
+                  SmallPtrSet<BasicBlock *, 16> &Visited);
+};
+}
+#endif
