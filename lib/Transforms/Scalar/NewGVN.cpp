@@ -97,7 +97,7 @@ namespace {
 // just use constants/etc as leaders
 
 struct CongruenceClass {
-  typedef DenseSet<std::pair<Value *, BasicBlock *>> MemberSet;
+  typedef SmallPtrSet<Value *, 4> MemberSet;
   static uint32_t nextCongruenceNum;
   uint32_t id;
   Value *leader;
@@ -106,10 +106,12 @@ struct CongruenceClass {
   Expression *expression;
   // Actual members of this class.  These are the things the same everywhere
   MemberSet members;
+  typedef DenseSet<std::pair<Value *, BasicBlock *>> EquivalenceSet;
+
   // Noted equivalences.  These are things that are equivalence to
   // this class over certain paths.  This could be replaced with
   // proper predicate support during analysis.
-  MemberSet equivalences;
+  EquivalenceSet equivalences;
   bool dead;
   explicit CongruenceClass()
       : id(nextCongruenceNum++), leader(0), expression(0), dead(false) {}
@@ -223,7 +225,7 @@ private:
     if (Instruction *I = dyn_cast<Instruction>(Member))
       assert(I->getParent() == BB && "What");
 
-    CClass->members.insert(std::make_pair(Member, BB));
+    CClass->members.insert(Member);
     ValueToClass[Member] = CClass;
     return CClass;
   }
@@ -942,14 +944,14 @@ void NewGVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
     if (VClass != EClass) {
       DEBUG(dbgs() << "New congruence class for " << V << " is " << EClass->id
                    << "\n");
-      VClass->members.erase(std::make_pair(V, BB));
+      VClass->members.erase(V);
       // assert(std::find(EClass->members.begin(), EClass->members.end(), V) ==
       // EClass->members.end() && "Tried to add something to members
       // twice!");
       if (Instruction *I = dyn_cast<Instruction>(V))
         assert(I->getParent() == BB && "What");
 
-      EClass->members.insert(std::make_pair(V, BB));
+      EClass->members.insert(V);
       ValueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
       if (VClass->members.empty() && VClass != InitialClass) {
@@ -965,12 +967,13 @@ void NewGVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
         // delete VClass;
       } else if (VClass->leader == V) {
         // TODO: Check what happens if expression represented the leader
-        VClass->leader = VClass->members.begin()->first;
+        VClass->leader = *(VClass->members.begin());
+
         for (auto LI = VClass->members.begin(), LE = VClass->members.end();
              LI != LE; ++LI) {
-          if (Instruction *I = dyn_cast<Instruction>(LI->first))
+          if (Instruction *I = dyn_cast<Instruction>(*LI))
             TouchedInstructions.insert(I);
-          ChangedValues.insert(LI->first);
+          ChangedValues.insert(*LI);
         }
       }
     }
@@ -1121,14 +1124,14 @@ void NewGVN::initializeCongruenceClasses(Function &F) {
   CongruenceClass::MemberSet InitialValues;
   for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
     for (auto BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
-      InitialValues.insert(std::make_pair(BI, FI));
+      InitialValues.insert(BI);
     }
   }
 
   InitialClass = createCongruenceClass(NULL, NULL);
   for (auto LI = InitialValues.begin(), LE = InitialValues.end(); LI != LE;
        ++LI)
-    ValueToClass[LI->first] = InitialClass;
+    ValueToClass[*LI] = InitialClass;
   InitialClass->members.swap(InitialValues);
 
   // Initialize arguments to be in their own unique congruence classes
