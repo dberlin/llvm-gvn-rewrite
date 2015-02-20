@@ -508,12 +508,10 @@ NextIteration:
 
       if (MemoryUse *MU = dyn_cast<MemoryUse>(*LI)) {
         MU->setUseOperand(IncomingVal);
-        if (IncomingVal)
-          IncomingVal->addUse(MU);
+	IncomingVal->addUse(MU);
       } else if (MemoryDef *MD = dyn_cast<MemoryDef>(*LI)) {
         MD->setUseOperand(IncomingVal);
-        if (IncomingVal)
-          IncomingVal->addUse(MD);
+	IncomingVal->addUse(MD);
         IncomingVal = MD;
       }
     }
@@ -702,14 +700,8 @@ void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
 
   assert((isa<MemoryDef>(Def) || isa<MemoryPhi>(Def)) &&
          "Memory definition should have been a def or a phi");
-  bool foundit = false;
-  for (auto UI = Def->use_begin(), UE = Def->use_end(); UI != UE; ++UI)
-    if (*UI == Use) {
-      foundit = true;
-      break;
-    }
-
-  assert(foundit && "Did not find use in def's use list");
+  
+  assert(std::find(Def->use_begin(), Def->use_end(), Use) != Def->use_end() && "Did not find use in def's use list");
 }
 
 void MemorySSA::verifyDefUses(Function &F) {
