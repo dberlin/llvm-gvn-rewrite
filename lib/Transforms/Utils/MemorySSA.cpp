@@ -674,7 +674,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
   }
   
   DEBUG(F.print(dbgs(), new MemorySSAAnnotatedWriter(this)));
-  verifyDefUses(F);
+  DEBUG(verifyDefUses(F));
 
   for (auto DI = PerBlockAccesses.begin(), DE = PerBlockAccesses.end();
        DI != DE; ++DI) {
