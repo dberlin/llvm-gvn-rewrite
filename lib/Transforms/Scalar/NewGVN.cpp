@@ -126,6 +126,8 @@ class NewGVN : public FunctionPass {
   AssumptionCache *AC;
   AliasAnalysis *AA;
   MemorySSA *MSSA;
+  BumpPtrAllocator ExpressionAllocator;
+  
   // Congruence class info
   DenseMap<Value *, CongruenceClass *> ValueToClass;
   struct ComparingExpressionInfo {
@@ -161,7 +163,6 @@ class NewGVN : public FunctionPass {
   // occurring as often.
   ExpressionClassMap MemoryExpressionToClass;
   DenseSet<Expression *, ComparingExpressionInfo> UniquedExpressions;
-  DenseSet<Expression *> ExpressionToDelete;
   DenseSet<Value *> ChangedValues;
   DenseSet<std::pair<BasicBlock *, BasicBlock *>> ReachableEdges;
   DenseSet<BasicBlock *> ReachableBlocks;
@@ -269,7 +270,7 @@ INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_END(NewGVN, "newgvn", "Global Value Numbering", false, false)
 Expression *NewGVN::createPHIExpression(Instruction *I) {
   PHINode *PN = cast<PHINode>(I);
-  PHIExpression *E = new PHIExpression(I->getParent());
+  PHIExpression *E = new (ExpressionAllocator) PHIExpression(I->getParent());
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
 
@@ -304,7 +305,7 @@ void NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E) {
 Expression *NewGVN::createCmpExpression(unsigned Opcode, Type *Type,
                                         CmpInst::Predicate Predicate,
                                         Value *LHS, Value *RHS) {
-  BasicExpression *E = new BasicExpression();
+  BasicExpression *E = new (ExpressionAllocator) BasicExpression();
   E->setType(Type);
   E->setOpcode((Opcode << 8) | Predicate);
   LHS = lookupOperandLeader(LHS);
@@ -327,7 +328,7 @@ Expression *NewGVN::checkSimplificationResults(Expression *E, Instruction *I,
     DEBUG(dbgs() << "Simplified " << *I << " to "
                  << " constant " << *C << "\n");
     NumGVNOpsSimplified++;
-    delete E;
+    //    delete E;
     return createConstantExpression(C);
   }
   CongruenceClass *CC = ValueToClass.lookup(V);
@@ -335,14 +336,14 @@ Expression *NewGVN::checkSimplificationResults(Expression *E, Instruction *I,
     DEBUG(dbgs() << "Simplified " << *I << " to "
                  << " expression " << *V << "\n");
     NumGVNOpsSimplified++;
-    delete E;
+    //    delete E;
     return CC->expression;
   }
   return NULL;
 }
 
 Expression *NewGVN::createExpression(Instruction *I) {
-  BasicExpression *E = new BasicExpression();
+  BasicExpression *E = new (ExpressionAllocator) BasicExpression();
   setBasicExpressionInfo(I, E);
 
   if (I->isCommutative()) {
@@ -431,19 +432,18 @@ Expression *NewGVN::createExpression(Instruction *I) {
 Expression *NewGVN::uniquifyExpression(Expression *E) {
   auto P = UniquedExpressions.insert(E);
   if (!P.second && *(P.first) != E) {
-    // We rely on the expression either never being inserted into
-    // expressionsToDelete, or properly removed by our caller.
-
-    assert(!ExpressionToDelete.count(E) &&
-           "This expression should not be in expressionsToDelete");
-    delete E;
+    // // We rely on the expression either never being inserted into
+    // // expressionsToDelete, or properly removed by our caller.
+    // assert(!ExpressionToDelete.count(E) &&
+    // 	   "This expression should not be in expressionsToDelete");
+    // delete E;
     return *(P.first);
   }
   return E;
 }
 
 Expression *NewGVN::createInsertValueExpression(InsertValueInst *I) {
-  InsertValueExpression *E = new InsertValueExpression();
+  InsertValueExpression *E = new (ExpressionAllocator) InsertValueExpression();
   setBasicExpressionInfo(I, E);
   for (auto II = I->idx_begin(), IE = I->idx_end(); II != IE; ++II)
     E->intargs.push_back(*II);
@@ -451,19 +451,19 @@ Expression *NewGVN::createInsertValueExpression(InsertValueInst *I) {
 }
 
 Expression *NewGVN::createVariableExpression(Value *V) {
-  VariableExpression *E = new VariableExpression(V);
+  VariableExpression *E = new (ExpressionAllocator) VariableExpression(V);
   E->setOpcode(V->getValueID());
   return E;
 }
 
 Expression *NewGVN::createConstantExpression(Constant *C) {
-  ConstantExpression *E = new ConstantExpression(C);
+  ConstantExpression *E = new (ExpressionAllocator) ConstantExpression(C);
   E->setOpcode(C->getValueID());
   return E;
 }
 
 Expression *NewGVN::createCallExpression(CallInst *CI, MemoryAccess *HV) {
-  CallExpression *E = new CallExpression(CI, HV);
+  CallExpression *E = new (ExpressionAllocator) CallExpression(CI, HV);
   setBasicExpressionInfo(CI, E);
   return E;
 }
@@ -482,7 +482,7 @@ Value *NewGVN::lookupOperandLeader(Value *V) {
 }
 
 Expression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *HV) {
-  LoadExpression *E = new LoadExpression(LI, HV);
+  LoadExpression *E = new (ExpressionAllocator) LoadExpression(LI, HV);
   E->setType(LI->getType());
   // Need opcodes to match on loads and store
   E->setOpcode(0);
@@ -495,7 +495,7 @@ Expression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *HV) {
 }
 
 Expression *NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *HV) {
-  StoreExpression *E = new StoreExpression(SI, HV);
+  StoreExpression *E = new (ExpressionAllocator) StoreExpression(SI, HV);
   E->setType(SI->getType());
   // Need opcodes to match on loads and store
   E->setOpcode(0);
@@ -545,7 +545,7 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
   if (E->VarArgs.empty()) {
     DEBUG(dbgs() << "Simplified PHI node " << I << " to undef"
                  << "\n");
-    delete E;
+    //    delete E;
     return createVariableExpression(UndefValue::get(I->getType()));
   }
 
@@ -575,7 +575,7 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
     DEBUG(dbgs() << "Simplified PHI node " << I << " to " << *AllSameValue
                  << "\n");
 
-    delete E;
+    //    delete E;
     return performSymbolicEvaluation(AllSameValue, B);
   }
   return E;
@@ -668,7 +668,6 @@ Expression *NewGVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
 
   if (isa<ConstantExpression>(E) || isa<VariableExpression>(E))
     E = uniquifyExpression(E);
-  ExpressionToDelete.insert(E);
   return E;
 }
 /// replaceAllDominatedUsesWith - Replace all uses of 'From' with 'To'
@@ -814,7 +813,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       // split out of the class.
 
       CongruenceClass *CC = ExpressionToClass.lookup(E);
-      delete E;
+      //      delete E;
       // If we didn't find a congruence class, there is no equivalent
       // instruction already
       if (CC) {
@@ -1135,21 +1134,13 @@ void NewGVN::cleanupTables() {
 
   ValueToClass.clear();
   for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
+    if (CongruenceClasses[i]->members.size() > 10)
+      DEBUG(dbgs() << "Congruence class " << i << " has " << CongruenceClasses[i]->members.size() << " members\n");
     delete CongruenceClasses[i];
+
     CongruenceClasses[i] = NULL;
   }
-
-  // DenseSet iterator invalidation rules mean we can't
-  std::vector<Expression *> toDelete;
-  for (auto DI = ExpressionToDelete.begin(), DE = ExpressionToDelete.end();
-       DI != DE; ++DI)
-    toDelete.push_back(*DI);
-  ExpressionToDelete.clear();
-  for (unsigned i = 0, e = toDelete.size(); i != e; ++i) {
-    delete toDelete[i];
-    toDelete[i] = nullptr;
-  }
-
+  ExpressionAllocator.Reset();
   CongruenceClasses.clear();
   ExpressionToClass.clear();
   MemoryExpressionToClass.clear();

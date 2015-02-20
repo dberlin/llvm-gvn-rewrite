@@ -278,6 +278,8 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *HV,
     // Walk from def to def
     CurrVersion = NextVersion;
   }
+  CachedClobberingVersion.insert(
+      std::make_pair(std::make_pair(HV, Loc), CurrVersion));  
   return std::make_pair(CurrVersion, false);
 }
 
@@ -470,7 +472,7 @@ void MemorySSA::determineInsertionPoint(
       Accesses = new std::list<MemoryAccess *>;
       BlockAccesses.insert(std::make_pair(BB, Accesses));
     }
-    MemoryPhi *Phi = new MemoryPhi(++NextHeapVersion, BB);
+    MemoryPhi *Phi = new (MemoryAccessAllocator) MemoryPhi(++NextHeapVersion, BB);
     InstructionToMemoryAccess.insert(std::make_pair(BB, Phi));
     // Phi goes first
     Accesses->push_front(Phi);
@@ -589,7 +591,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
 
       // Defs are already uses, so use && def is handled elsewhere
       if (use && !def) {
-        MemoryUse *MU = new MemoryUse(nullptr, &*BI, FI);
+        MemoryUse *MU = new (MemoryAccessAllocator) MemoryUse(nullptr, &*BI, FI);
         InstructionToMemoryAccess.insert(std::make_pair(&*BI, MU));
         UsingBlocks.push_back(FI);
         if (!Accesses) {
@@ -599,7 +601,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
         Accesses->push_back(MU);
       }
       if (def) {
-        MemoryDef *MD = new MemoryDef(++NextHeapVersion, nullptr, &*BI, FI);
+        MemoryDef *MD = new (MemoryAccessAllocator) MemoryDef(++NextHeapVersion, nullptr, &*BI, FI);
         InstructionToMemoryAccess.insert(std::make_pair(&*BI, MD));
         DefiningBlocks.insert(FI);
         if (!Accesses) {
@@ -616,7 +618,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
   // We create an access to represent "live on entry"
   BasicBlock &StartingPoint = F.getEntryBlock();
   MemoryAccess *DefaultAccess =
-      new MemoryDef(0, nullptr, nullptr, &StartingPoint);
+    new (MemoryAccessAllocator) MemoryDef(0, nullptr, nullptr, &StartingPoint);
 
   // Now do regular SSA renaming
   /// The set of basic blocks the renamer has already visited.
@@ -634,7 +636,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
   } while (!RenamePassWorklist.empty());
 
   DEBUG(F.print(dbgs(), new MemorySSAAnnotatedWriter(this)));
-  DEBUG(verifyDefUses(F));
+  verifyDefUses(F);
 
   for (auto DI = PerBlockAccesses.begin(), DE = PerBlockAccesses.end();
        DI != DE; ++DI) {
