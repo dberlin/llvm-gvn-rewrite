@@ -222,9 +222,6 @@ private:
   CongruenceClass *createSingletonCongruenceClass(Value *Member,
                                                   BasicBlock *BB) {
     CongruenceClass *CClass = createCongruenceClass(Member, NULL);
-    if (Instruction *I = dyn_cast<Instruction>(Member))
-      assert(I->getParent() == BB && "What");
-
     CClass->members.insert(Member);
     ValueToClass[Member] = CClass;
     return CClass;
@@ -866,7 +863,8 @@ static bool isOnlyReachableViaThisEdge(BasicBlock *Src, BasicBlock *Dst,
 void NewGVN::markUsersTouched(Value *V) {
   // Now mark the users as touched
   for (auto UI = V->use_begin(), UE = V->use_end(); UI != UE; ++UI) {
-    Instruction *User = cast<Instruction>(*UI);
+    Instruction *User = dyn_cast<Instruction>(UI->getUser());
+    assert(User && "Use of value not within an instruction?");
     TouchedInstructions.insert(User);
   }
 }
@@ -948,9 +946,6 @@ void NewGVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
       // assert(std::find(EClass->members.begin(), EClass->members.end(), V) ==
       // EClass->members.end() && "Tried to add something to members
       // twice!");
-      if (Instruction *I = dyn_cast<Instruction>(V))
-        assert(I->getParent() == BB && "What");
-
       EClass->members.insert(V);
       ValueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
@@ -1183,12 +1178,8 @@ bool NewGVN::runOnFunction(Function &F) {
   uint32_t ICount = 0;
 
   // Count number of instructions for sizing of hash tables
-  unsigned NumBasicBlocks = F.size();
-  DEBUG(dbgs() << "Found " << NumBasicBlocks << " basic blocks\n");
   for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI)
-    for (auto BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
-      ++ICount;
-    }
+    ICount += FI->size();
 
   // Ensure we don't end up resizing the expressionToClass map, as
   // that can be quite expensive. At most, we have one expression per
