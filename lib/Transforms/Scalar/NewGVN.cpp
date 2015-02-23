@@ -193,6 +193,7 @@ private:
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<TargetLibraryInfoWrapperPass>();
     AU.addRequired<MemoryDependenceAnalysis>();
+    AU.addRequired<MemorySSA>();
     AU.addRequired<AliasAnalysis>();
 
     AU.addPreserved<DominatorTreeWrapperPass>();
@@ -1170,10 +1171,7 @@ bool NewGVN::runOnFunction(Function &F) {
   AC = &getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
   TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
   AA = &getAnalysis<AliasAnalysis>();
-  MSSA = new MemorySSA(AA, DT);
-  // We have to build memory SSA before we mess around with the
-  // congruence classes
-  MSSA->buildMemorySSA(F);
+  MSSA = &getAnalysis<MemorySSA>();
 
   uint32_t ICount = 0;
 
@@ -1242,6 +1240,5 @@ bool NewGVN::runOnFunction(Function &F) {
     }
   }
   cleanupTables();
-  delete MSSA;
   return Changed;
 }

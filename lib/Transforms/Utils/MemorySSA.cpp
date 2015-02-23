@@ -41,11 +41,16 @@ using namespace llvm;
 STATISTIC(NumClobberCacheLookups, "Number of Memory SSA version cache lookups");
 STATISTIC(NumClobberCacheHits, "Number of Memory SSA version cache hits");
 
+INITIALIZE_PASS_BEGIN(MemorySSA, "memoryssa", "Memory SSA", false, true)
+INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
+INITIALIZE_PASS_END(MemorySSA, "memoryssa", "Memory SSA", false, true);
+
 class MemorySSAAnnotatedWriter : public AssemblyAnnotationWriter {
-  MemorySSA *MSSA;
+  const MemorySSA *MSSA;
 
 public:
-  MemorySSAAnnotatedWriter(MemorySSA *M) : MSSA(M) {}
+  MemorySSAAnnotatedWriter(const MemorySSA *M) : MSSA(M) {}
 
   virtual void emitBasicBlockStartAnnot(const BasicBlock *BB,
                                         formatted_raw_ostream &OS) {
@@ -99,6 +104,13 @@ unsigned int getVersionNumberFromAccess(MemoryAccess *MA) {
   else if (MemoryUse *Use = dyn_cast<MemoryUse>(MA))
     return getVersionNumberFromAccess(Use->getUseOperand());
   llvm_unreachable("Was not a definition that has a version");
+}
+void addUse(MemoryAccess *User, MemoryAccess *Use) {
+  if (MemoryDef *Def = dyn_cast<MemoryDef>(User))
+    Def->addUse(Use);
+  else if (MemoryPhi *Phi = dyn_cast<MemoryPhi>(User))
+    Phi->addUse(Use);
+  llvm_unreachable("Can only add uses to defs or phis");
 }
 }
 
@@ -382,8 +394,8 @@ void MemorySSA::computeBBNumbers(Function &F,
 
 void MemorySSA::determineInsertionPoint(
     Function &F, AccessMap &BlockAccesses,
-    const SmallPtrSet<BasicBlock *, 32> DefBlocks,
-    const SmallVector<BasicBlock *, 32> UsingBlocks) {
+    const SmallPtrSetImpl<BasicBlock *> &DefBlocks,
+    const SmallVector<BasicBlock *, 32> &UsingBlocks) {
   // Compute dominator levels and BB numbers
   DenseMap<DomTreeNode *, unsigned> DomLevels;
   computeDomLevels(DomLevels);
@@ -490,7 +502,7 @@ NextIteration:
     assert(NumEdges && "Must be at least one edge from Pred to BB!");
     for (unsigned i = 0; i != NumEdges; ++i)
       Phi->addIncoming(IncomingVal, Pred);
-    IncomingVal->addUse(Phi);
+    addUse(IncomingVal, Phi);
 
     IncomingVal = Phi;
   }
@@ -508,10 +520,10 @@ NextIteration:
 
       if (MemoryUse *MU = dyn_cast<MemoryUse>(*LI)) {
         MU->setUseOperand(IncomingVal);
-        IncomingVal->addUse(MU);
+        addUse(IncomingVal, MU);
       } else if (MemoryDef *MD = dyn_cast<MemoryDef>(*LI)) {
         MD->setUseOperand(IncomingVal);
-        IncomingVal->addUse(MD);
+        addUse(IncomingVal, MD);
         IncomingVal = MD;
       }
     }
@@ -567,13 +579,51 @@ void MemorySSA::markNullsAsLiveOnEntry(AccessMap &BlockAccesses,
       Accesses->erase(AI);
     } else if (MemoryUse *U = dyn_cast<MemoryUse>(*AI)) {
       U->setUseOperand(LiveOnEntryDef);
-      LiveOnEntryDef->addUse(U);
+      addUse(LiveOnEntryDef, U);
     } else if (MemoryDef *D = dyn_cast<MemoryDef>(*AI)) {
       D->setUseOperand(LiveOnEntryDef);
-      LiveOnEntryDef->addUse(D);
+      addUse(LiveOnEntryDef, D);
     }
     AI = Next;
   }
+}
+
+char MemorySSA::ID = 0;
+
+MemorySSA::MemorySSA()
+    : FunctionPass(ID), LiveOnEntryDef(nullptr), NextHeapVersion(0) {
+  initializeMemorySSAPass(*PassRegistry::getPassRegistry());
+}
+
+MemorySSA::~MemorySSA() {}
+
+void MemorySSA::releaseMemory() {
+  DEBUG(dbgs() << "Release Memory called\n");
+  CachedClobberingVersion.clear();
+  InstructionToMemoryAccess.clear();
+  // Erase the uses
+  for (auto IMI = InstructionToMemoryAccess.begin(),
+            IME = InstructionToMemoryAccess.end();
+       IMI != IME; ++IMI)
+    delete IMI->second;
+
+  MemoryAccessAllocator.Reset();
+  NextHeapVersion = 0;
+}
+
+void MemorySSA::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.setPreservesAll();
+  AU.addRequiredTransitive<AliasAnalysis>();
+  AU.addRequired<DominatorTreeWrapperPass>();
+}
+
+bool MemorySSA::runOnFunction(Function &F) {
+  this->F = &F;
+  DEBUG(dbgs() << "Run on function called\n");
+  AA = &getAnalysis<AliasAnalysis>();
+  DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
+  buildMemorySSA(F);
+  return false;
 }
 
 void MemorySSA::buildMemorySSA(Function &F) {
@@ -676,14 +726,11 @@ void MemorySSA::buildMemorySSA(Function &F) {
   }
 }
 
-void MemorySSA::dump(Function &F, const AccessMap &AM) {
-  for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
-    auto L = AM.lookup(FI);
-    if (L) {
-      for (auto LI = L->begin(), LE = L->end(); LI != LE; ++LI)
-        dbgs() << *(*LI) << "\n";
-    }
-  }
+void MemorySSA::print(raw_ostream &OS, const Module *M) const {
+  F->print(OS, new MemorySSAAnnotatedWriter(this));
+}
+void MemorySSA::dump(Function &F) {
+  F.print(dbgs(), new MemorySSAAnnotatedWriter(this));
 }
 
 void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
@@ -694,11 +741,13 @@ void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
     return;
   }
 
-  assert((isa<MemoryDef>(Def) || isa<MemoryPhi>(Def)) &&
-         "Memory definition should have been a def or a phi");
-
-  assert(std::find(Def->use_begin(), Def->use_end(), Use) != Def->use_end() &&
-         "Did not find use in def's use list");
+  if (MemoryDef *D = dyn_cast<MemoryDef>(Def))
+    assert(std::find(D->use_begin(), D->use_end(), Use) != D->use_end() &&
+           "Did not find use in def's use list");
+  else if (MemoryPhi *P = dyn_cast<MemoryPhi>(Def))
+    assert(std::find(P->use_begin(), P->use_end(), Use) != P->use_end() &&
+           "Did not find use in def's use list");
+  llvm_unreachable("Memory definition should have been a def or a phi");
 }
 
 void MemorySSA::verifyDefUses(Function &F) {
@@ -728,7 +777,7 @@ void MemorySSA::verifyDefUses(Function &F) {
   }
 }
 
-MemoryAccess *MemorySSA::getMemoryAccess(const Value *I) {
+MemoryAccess *MemorySSA::getMemoryAccess(const Value *I) const {
   return InstructionToMemoryAccess.lookup(I);
 }
 
