@@ -96,26 +96,8 @@ public:
   AccessType getType() const { return Type; }
   MemoryAccess() {}
   virtual ~MemoryAccess() {}
-
-  UseListType::iterator use_begin() { return UseList.begin(); }
-  UseListType::iterator use_end() { return UseList.end(); }
-  UseListType::const_iterator use_begin() const { return UseList.begin(); }
-  UseListType::const_iterator use_end() const { return UseList.end(); }
-  UseListType::reverse_iterator use_rbegin() { return UseList.rbegin(); }
-  UseListType::reverse_iterator use_rend() { return UseList.rend(); }
-  UseListType::const_reverse_iterator use_rbegin() const {
-    return UseList.rbegin();
-  }
-  UseListType::const_reverse_iterator use_rend() const {
-    return UseList.rend();
-  }
   BasicBlock *getBlock() const { return Block; }
 
-  void addUse(MemoryAccess *Use) {
-    assert((Type == AccessDef || Type == AccessPhi) &&
-           "Trying to add a use to a MemoryUse");
-    UseList.push_back(Use);
-  }
   virtual void print(raw_ostream &OS) {}
 
 protected:
@@ -125,7 +107,6 @@ private:
   MemoryAccess(const MemoryAccess &);
   void operator=(const MemoryAccess &);
   AccessType Type;
-  UseListType UseList;
   BasicBlock *Block;
 };
 inline raw_ostream &operator<<(raw_ostream &OS, MemoryAccess &MA) {
@@ -177,8 +158,23 @@ public:
   }
   virtual void print(raw_ostream &OS);
 
+  UseListType::iterator use_begin() { return UseList.begin(); }
+  UseListType::iterator use_end() { return UseList.end(); }
+  UseListType::const_iterator use_begin() const { return UseList.begin(); }
+  UseListType::const_iterator use_end() const { return UseList.end(); }
+  UseListType::reverse_iterator use_rbegin() { return UseList.rbegin(); }
+  UseListType::reverse_iterator use_rend() { return UseList.rend(); }
+  UseListType::const_reverse_iterator use_rbegin() const {
+    return UseList.rbegin();
+  }
+  UseListType::const_reverse_iterator use_rend() const {
+    return UseList.rend();
+  }
+  void addUse(MemoryAccess *Use) { UseList.push_back(Use); }
+
 private:
   unsigned int DefVersion;
+  UseListType UseList;
 };
 class MemoryPhi : public MemoryAccess {
 public:
@@ -206,18 +202,33 @@ public:
   }
 
   virtual void print(raw_ostream &OS);
+  UseListType::iterator use_begin() { return UseList.begin(); }
+  UseListType::iterator use_end() { return UseList.end(); }
+  UseListType::const_iterator use_begin() const { return UseList.begin(); }
+  UseListType::const_iterator use_end() const { return UseList.end(); }
+  UseListType::reverse_iterator use_rbegin() { return UseList.rbegin(); }
+  UseListType::reverse_iterator use_rend() { return UseList.rend(); }
+  UseListType::const_reverse_iterator use_rbegin() const {
+    return UseList.rbegin();
+  }
+  UseListType::const_reverse_iterator use_rend() const {
+    return UseList.rend();
+  }
+  void addUse(MemoryAccess *Use) { UseList.push_back(Use); }
 
 private:
   SmallVector<std::pair<BasicBlock *, MemoryAccess *>, 8> Args;
   unsigned int DefVersion;
+  UseListType UseList;
 };
 
-class MemorySSA {
+class MemorySSA : public FunctionPass {
 
 private:
   AliasAnalysis *AA;
   DominatorTree *DT;
   BumpPtrAllocator MemoryAccessAllocator;
+  Function *F;
 
   // Memory SSA mappings
   DenseMap<const Value *, MemoryAccess *> InstructionToMemoryAccess;
@@ -231,19 +242,27 @@ private:
   typedef DenseMap<BasicBlock *, std::list<MemoryAccess *> *> AccessMap;
 
 public:
-  MemorySSA(AliasAnalysis *A, DominatorTree *D)
-      : AA(A), DT(D), NextHeapVersion(1) {}
+  MemorySSA();
+  ~MemorySSA();
+  static char ID;
+
+  bool runOnFunction(Function &) override;
+
+  void releaseMemory() override;
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+
   // Memory SSA related stuff
   void buildMemorySSA(Function &F);
   // Given a memory defining/using/clobbering instruction, give you
-  // the nearest dominating actual clobber (by skipping non-aliasing
+  // the nearest dominating clobbering Memory Access (by skipping non-aliasing
   // def links)
   MemoryAccess *getClobberingMemoryAccess(Instruction *);
-  // Given a memory using/clobbering/etc instruction, get the heap version
-  // intrinsic
-  // associated with it
-  MemoryAccess *getMemoryAccess(const Value *I);
-  void dump(Function &F, const AccessMap &MA);
+  // Given a memory using/clobbering/etc instruction, get the
+  // MemorySSA access associaed with it
+  MemoryAccess *getMemoryAccess(const Value *I) const;
+  void dump(Function &F);
+  void print(raw_ostream &OS, const Module *M) const override;
 
 private:
   bool isLiveOnEntryDef(const MemoryAccess *MA) const;
@@ -262,8 +281,8 @@ private:
                            SmallPtrSetImpl<BasicBlock *> &LiveInBlocks);
   void
   determineInsertionPoint(Function &F, AccessMap &BlockAccesses,
-                          const SmallPtrSet<BasicBlock *, 32> DefiningBlocks,
-                          const SmallVector<BasicBlock *, 32> UsingBlocks);
+                          const SmallPtrSetImpl<BasicBlock *> &DefiningBlocks,
+                          const SmallVector<BasicBlock *, 32> &UsingBlocks);
   void computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels);
   void computeBBNumbers(Function &F,
                         DenseMap<BasicBlock *, unsigned> &BBNumbers);
