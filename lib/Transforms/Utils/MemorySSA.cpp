@@ -110,7 +110,8 @@ void addUse(MemoryAccess *User, MemoryAccess *Use) {
     Def->addUse(Use);
   else if (MemoryPhi *Phi = dyn_cast<MemoryPhi>(User))
     Phi->addUse(Use);
-  llvm_unreachable("Can only add uses to defs or phis");
+  else
+    llvm_unreachable("Can only add uses to defs or phis");
 }
 }
 
@@ -747,7 +748,8 @@ void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
   else if (MemoryPhi *P = dyn_cast<MemoryPhi>(Def))
     assert(std::find(P->use_begin(), P->use_end(), Use) != P->use_end() &&
            "Did not find use in def's use list");
-  llvm_unreachable("Memory definition should have been a def or a phi");
+  else
+    llvm_unreachable("Memory definition should have been a def or a phi");
 }
 
 void MemorySSA::verifyDefUses(Function &F) {
