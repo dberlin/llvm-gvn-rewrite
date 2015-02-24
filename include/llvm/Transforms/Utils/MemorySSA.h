@@ -84,11 +84,6 @@ class MemoryAccess {
 public:
   enum AccessType { AccessUse, AccessDef, AccessPhi };
 
-  // Because we are not values, we have to define our own use type.
-  // Being a value would be memory intensive, and we don't need all
-  // the functionality/problems that brings us
-  typedef std::list<MemoryAccess *> UseListType;
-
   // Methods for support type inquiry through isa, cast, and
   // dyn_cast
   static inline bool classof(const MemoryAccess *) { return true; }
@@ -99,8 +94,18 @@ public:
   BasicBlock *getBlock() const { return Block; }
 
   virtual void print(raw_ostream &OS) {}
+  typedef MemoryAccess **iterator;
+  typedef MemoryAccess **const const_iterator;
+
+  /* iterator use_begin() { return UseList; } */
+  /* iterator use_end() { return UseList + NumUses; } */
+  const_iterator use_begin() const { return UseList; }
+  const_iterator use_end() const { return UseList + NumUses; }
 
 protected:
+  friend class MemorySSA;
+  // We automatically allocate the right amount of space
+  void addUse(MemoryAccess *Use) { UseList[NumUses++] = Use; }
   MemoryAccess(AccessType AT, BasicBlock *BB) : Type(AT), Block(BB) {}
 
 private:
@@ -108,6 +113,8 @@ private:
   void operator=(const MemoryAccess &);
   AccessType Type;
   BasicBlock *Block;
+  unsigned int NumUses;
+  MemoryAccess **UseList;
 };
 inline raw_ostream &operator<<(raw_ostream &OS, MemoryAccess &MA) {
   MA.print(OS);
@@ -157,24 +164,11 @@ public:
     return MA->getType() == AccessDef;
   }
   virtual void print(raw_ostream &OS);
-
-  UseListType::iterator use_begin() { return UseList.begin(); }
-  UseListType::iterator use_end() { return UseList.end(); }
-  UseListType::const_iterator use_begin() const { return UseList.begin(); }
-  UseListType::const_iterator use_end() const { return UseList.end(); }
-  UseListType::reverse_iterator use_rbegin() { return UseList.rbegin(); }
-  UseListType::reverse_iterator use_rend() { return UseList.rend(); }
-  UseListType::const_reverse_iterator use_rbegin() const {
-    return UseList.rbegin();
-  }
-  UseListType::const_reverse_iterator use_rend() const {
-    return UseList.rend();
-  }
-  void addUse(MemoryAccess *Use) { UseList.push_back(Use); }
+  typedef MemoryAccess **iterator;
+  typedef const MemoryAccess **const_iterator;
 
 private:
   unsigned int DefVersion;
-  UseListType UseList;
 };
 class MemoryPhi : public MemoryAccess {
 public:
@@ -202,24 +196,10 @@ public:
   }
 
   virtual void print(raw_ostream &OS);
-  UseListType::iterator use_begin() { return UseList.begin(); }
-  UseListType::iterator use_end() { return UseList.end(); }
-  UseListType::const_iterator use_begin() const { return UseList.begin(); }
-  UseListType::const_iterator use_end() const { return UseList.end(); }
-  UseListType::reverse_iterator use_rbegin() { return UseList.rbegin(); }
-  UseListType::reverse_iterator use_rend() { return UseList.rend(); }
-  UseListType::const_reverse_iterator use_rbegin() const {
-    return UseList.rbegin();
-  }
-  UseListType::const_reverse_iterator use_rend() const {
-    return UseList.rend();
-  }
-  void addUse(MemoryAccess *Use) { UseList.push_back(Use); }
 
 private:
   SmallVector<std::pair<BasicBlock *, MemoryAccess *>, 8> Args;
   unsigned int DefVersion;
-  UseListType UseList;
 };
 
 class MemorySSA : public FunctionPass {
@@ -267,7 +247,7 @@ public:
 private:
   bool isLiveOnEntryDef(const MemoryAccess *MA) const;
   void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use);
-
+  typedef DenseMap<MemoryAccess *, std::list<MemoryAccess *> *> UseMap;
   std::pair<MemoryAccess *, bool>
   getClobberingMemoryAccess(MemoryPhi *Phi, const AliasAnalysis::Location &,
                             SmallPtrSet<MemoryAccess *, 32> &);
@@ -286,8 +266,10 @@ private:
   void computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels);
   void computeBBNumbers(Function &F,
                         DenseMap<BasicBlock *, unsigned> &BBNumbers);
-  void markNullsAsLiveOnEntry(AccessMap &BlockAccesses, BasicBlock *BB);
-
+  void markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses, BasicBlock *BB,
+                                    UseMap &Uses);
+  void addUses(UseMap &Uses);
+  void addUseToMap(UseMap &, MemoryAccess *, MemoryAccess *);
   void verifyDefUses(Function &F);
 
   struct RenamePassData {
@@ -309,7 +291,7 @@ private:
   void renamePass(BasicBlock *BB, BasicBlock *Pred, MemoryAccess *IncomingVal,
                   AccessMap &BlockAccesses,
                   std::vector<RenamePassData> &Worklist,
-                  SmallPtrSet<BasicBlock *, 16> &Visited);
+                  SmallPtrSet<BasicBlock *, 16> &Visited, UseMap &Uses);
 };
 }
 #endif
