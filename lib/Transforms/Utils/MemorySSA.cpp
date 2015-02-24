@@ -1,6 +1,5 @@
 
-//===- MemorySSA.cpp - Memory SSA Builder
-//----------------------------------===//
+//===- MemorySSA.cpp - Memory SSA Builder----------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -46,6 +45,7 @@ INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(MemorySSA, "memoryssa", "Memory SSA", false, true);
 
+// An annotator class to print memory ssa information in comments
 class MemorySSAAnnotatedWriter : public AssemblyAnnotationWriter {
   const MemorySSA *MSSA;
 
@@ -74,6 +74,10 @@ public:
 };
 
 namespace {
+
+// This is mostly ripped from MemoryDependenceAnalysis, updated to
+// handle call instructions properly
+
 AliasAnalysis::Location getLocationForAA(AliasAnalysis *AA, Instruction *Inst) {
   if (auto *I = dyn_cast<LoadInst>(Inst))
     return AA->getLocation(I);
@@ -93,6 +97,7 @@ AliasAnalysis::Location getLocationForAA(AliasAnalysis *AA, Instruction *Inst) {
     llvm_unreachable("unsupported memory instruction");
 }
 
+// This is used when printing out version numbers in the dumper
 unsigned int getVersionNumberFromAccess(MemoryAccess *MA) {
   if (MA == nullptr)
     return 0;
@@ -105,22 +110,13 @@ unsigned int getVersionNumberFromAccess(MemoryAccess *MA) {
     return getVersionNumberFromAccess(Use->getUseOperand());
   llvm_unreachable("Was not a definition that has a version");
 }
-void addUse(MemoryAccess *User, MemoryAccess *Use) {
-  if (MemoryDef *Def = dyn_cast<MemoryDef>(User))
-    Def->addUse(Use);
-  else if (MemoryPhi *Phi = dyn_cast<MemoryPhi>(User))
-    Phi->addUse(Use);
-  else
-    llvm_unreachable("Can only add uses to defs or phis");
-}
 }
 
 bool MemorySSA::isLiveOnEntryDef(const MemoryAccess *MA) const {
   return MA == LiveOnEntryDef;
 }
 
-// Get the clobbering heap version for a phi node and alias location
-
+// Get the clobbering memory access for a phi node and alias location
 std::pair<MemoryAccess *, bool>
 MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
                                      const AliasAnalysis::Location &Loc,
@@ -163,8 +159,12 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
 
   // If we already got here once, and didn't get to an answer (if we
   // did, it would have been cached below), we must be stuck in
-  // mutually recursive phi nodes or something
-  // TODO: Ensure we skip past phi nodes that we end up revisiting
+  // mutually recursive phi nodes.  In that case, the correct answer
+  // is "we can ignore the phi node if all the other arguments turn
+  // out okay" (since it cycles between itself and the other
+  // arguments).  We return true here, and are careful to make sure we
+  // only pass through "true" when we are giving results
+  // for the cycle itself.
   if (!Visited.insert(P).second)
     return std::make_pair(P, true);
 
@@ -176,7 +176,7 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
     Result = SingleResult.first;
   } else {
     // Find the most dominating non-phiargument first, if there is one. It
-    // will be a shorter walk
+    // will be the one with the shortest walk.
     MemoryAccess *DominatingArg = nullptr;
     for (unsigned i = 0; i < P->getNumIncomingValues(); ++i)
       if (!isa<MemoryPhi>(P->getIncomingValue(i))) {
@@ -196,8 +196,8 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
       }
 
     auto TargetResult = getClobberingMemoryAccess(DominatingArg, Loc, Visited);
-    MemoryAccess *TargetVersion = TargetResult.first;
-    Result = TargetVersion;
+    MemoryAccess *TargetClobber = TargetResult.first;
+    Result = TargetClobber;
 
     // Now reduce it against the others
     for (unsigned i = 0; i < P->getNumIncomingValues(); ++i) {
@@ -206,33 +206,36 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
         continue;
 
       auto ArgResult = getClobberingMemoryAccess(Arg, Loc, Visited);
+      // If we hit ourselves from this arg, skip this arg
       if (ArgResult.second)
         continue;
-      MemoryAccess *HeapVersionForArg = ArgResult.first;
+      MemoryAccess *ClobberForArg = ArgResult.first;
       // If they aren't the same, abort, we must be clobbered by one
       // or the other.
-      // (Currently, we return the phi node, we could track which one
-      // is clobbering)
-      if (TargetVersion != HeapVersionForArg) {
+      // (Currently, we return the phi node, we could track which argument
+      // is clobbering if something wanted)
+      if (TargetClobber != ClobberForArg) {
         Result = P;
         HitVisited = ArgResult.second;
         break;
       }
     }
   }
+  // Cache our result
   CachedClobberingVersion.insert(
       std::make_pair(std::make_pair(P, Loc), Result));
+
   return std::make_pair(Result, HitVisited);
 }
 
 // For a given MemoryAccess, walk backwards using Memory SSA and find
-// the MemoryAccess that actually clobbers Loc.
-
+// the MemoryAccess that actually clobbers Loc.  The second part of
+// the pair we return is whether we hit a cyclic phi node.
 std::pair<MemoryAccess *, bool>
-MemorySSA::getClobberingMemoryAccess(MemoryAccess *HV,
+MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
                                      const AliasAnalysis::Location &Loc,
                                      SmallPtrSet<MemoryAccess *, 32> &Visited) {
-  MemoryAccess *CurrVersion = HV;
+  MemoryAccess *CurrVersion = MA;
   while (true) {
     MemoryAccess *UseVersion = CurrVersion;
 
@@ -252,7 +255,7 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *HV,
       Instruction *DefMemoryInst = MD->getMemoryInst();
       assert(DefMemoryInst &&
              "Defining instruction not actually an instruction");
-      // While we can do lookups, we can't sanely do inserts unless we
+      // While we can do lookups, we can't sanely do inserts here unless we
       // were to track every thing we saw along the way, since we don't
       // know where we will stop.
       ++NumClobberCacheLookups;
@@ -288,17 +291,16 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *HV,
     CurrVersion = NextVersion;
   }
   CachedClobberingVersion.insert(
-      std::make_pair(std::make_pair(HV, Loc), CurrVersion));
+      std::make_pair(std::make_pair(MA, Loc), CurrVersion));
   return std::make_pair(CurrVersion, false);
 }
 
 // For a given instruction, walk backwards using Memory SSA and find
-// the heap version that actually clobbers this one, skipping "false"
-// versions along the way
+// the memory access that actually clobbers this one, skipping non-aliasing
+// ones along the way
 MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
 
   // First extract our location, then start walking until it is clobbered
-
   const AliasAnalysis::Location Loc = getLocationForAA(AA, I);
   MemoryAccess *StartingVersion = getMemoryAccess(I);
   ++NumClobberCacheLookups;
@@ -327,6 +329,9 @@ MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
 
   return FinalVersion;
 }
+
+// This is the same as PromoteMemoryToRegister's version.  The goal is
+// to compute blocks in which a memory-access is Live-In.
 
 void MemorySSA::computeLiveInBlocks(
     const AccessMap &BlockAccesses,
@@ -385,6 +390,8 @@ void MemorySSA::computeLiveInBlocks(
   }
 }
 
+// We need a unique numbering for each BB.
+
 void MemorySSA::computeBBNumbers(Function &F,
                                  DenseMap<BasicBlock *, unsigned> &BBNumbers) {
   // Assign unique ids to basic blocks
@@ -392,6 +399,9 @@ void MemorySSA::computeBBNumbers(Function &F,
   for (auto I = F.begin(), E = F.end(); I != E; ++I)
     BBNumbers[I] = ID++;
 }
+
+// This is the same algorithm as PromoteMemoryToRegister's phi
+// placement algorithm.
 
 void MemorySSA::determineInsertionPoint(
     Function &F, AccessMap &BlockAccesses,
@@ -489,10 +499,14 @@ void MemorySSA::determineInsertionPoint(
   }
 }
 
+// Standard SSA renaming pass. Same algorithm as
+// PromoteMemoryToRegisters
+
 void MemorySSA::renamePass(BasicBlock *BB, BasicBlock *Pred,
                            MemoryAccess *IncomingVal, AccessMap &BlockAccesses,
                            std::vector<RenamePassData> &Worklist,
-                           SmallPtrSet<BasicBlock *, 16> &Visited) {
+                           SmallPtrSet<BasicBlock *, 16> &Visited,
+                           UseMap &Uses) {
 NextIteration:
   auto Accesses = BlockAccesses.lookup(BB);
 
@@ -503,7 +517,7 @@ NextIteration:
     assert(NumEdges && "Must be at least one edge from Pred to BB!");
     for (unsigned i = 0; i != NumEdges; ++i)
       Phi->addIncoming(IncomingVal, Pred);
-    addUse(IncomingVal, Phi);
+    addUseToMap(Uses, IncomingVal, Phi);
 
     IncomingVal = Phi;
   }
@@ -521,10 +535,10 @@ NextIteration:
 
       if (MemoryUse *MU = dyn_cast<MemoryUse>(*LI)) {
         MU->setUseOperand(IncomingVal);
-        addUse(IncomingVal, MU);
+        addUseToMap(Uses, IncomingVal, MU);
       } else if (MemoryDef *MD = dyn_cast<MemoryDef>(*LI)) {
         MD->setUseOperand(IncomingVal);
-        addUse(IncomingVal, MD);
+        addUseToMap(Uses, IncomingVal, MD);
         IncomingVal = MD;
       }
     }
@@ -565,8 +579,12 @@ void MemorySSA::computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels) {
   }
 }
 
-void MemorySSA::markNullsAsLiveOnEntry(AccessMap &BlockAccesses,
-                                       BasicBlock *BB) {
+// Handle unreachable block acccesses by deleting phi nodes in
+// unreachable blocks, and marking all other unreachable
+// memoryaccesses as being uses of the live on entry definition
+void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
+                                             BasicBlock *BB, UseMap &Uses) {
+
   auto Accesses = BlockAccesses.lookup(BB);
   if (!Accesses)
     return;
@@ -580,10 +598,10 @@ void MemorySSA::markNullsAsLiveOnEntry(AccessMap &BlockAccesses,
       Accesses->erase(AI);
     } else if (MemoryUse *U = dyn_cast<MemoryUse>(*AI)) {
       U->setUseOperand(LiveOnEntryDef);
-      addUse(LiveOnEntryDef, U);
+      addUseToMap(Uses, LiveOnEntryDef, U);
     } else if (MemoryDef *D = dyn_cast<MemoryDef>(*AI)) {
       D->setUseOperand(LiveOnEntryDef);
-      addUse(LiveOnEntryDef, D);
+      addUseToMap(Uses, LiveOnEntryDef, D);
     }
     AI = Next;
   }
@@ -599,15 +617,8 @@ MemorySSA::MemorySSA()
 MemorySSA::~MemorySSA() {}
 
 void MemorySSA::releaseMemory() {
-  DEBUG(dbgs() << "Release Memory called\n");
   CachedClobberingVersion.clear();
   InstructionToMemoryAccess.clear();
-  // Erase the uses
-  for (auto IMI = InstructionToMemoryAccess.begin(),
-            IME = InstructionToMemoryAccess.end();
-       IMI != IME; ++IMI)
-    delete IMI->second;
-
   MemoryAccessAllocator.Reset();
   NextHeapVersion = 0;
 }
@@ -618,9 +629,32 @@ void MemorySSA::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<DominatorTreeWrapperPass>();
 }
 
+void MemorySSA::addUseToMap(UseMap &Uses, MemoryAccess *User,
+                            MemoryAccess *Use) {
+  std::list<MemoryAccess *> *UseList;
+  UseList = Uses.lookup(User);
+  if (!UseList) {
+    UseList = new std::list<MemoryAccess *>;
+    Uses.insert(std::make_pair(User, UseList));
+  }
+
+  UseList->push_back(Use);
+}
+
+// Build the actual use lists out of the use map
+void MemorySSA::addUses(UseMap &Uses) {
+  for (auto DI = Uses.begin(), DE = Uses.end(); DI != DE; ++DI) {
+    std::list<MemoryAccess *> *UseList = DI->second;
+    MemoryAccess *User = DI->first;
+    User->UseList =
+        MemoryAccessAllocator.Allocate<MemoryAccess *>(UseList->size());
+    for (auto UI = UseList->begin(), UE = UseList->end(); UI != UE; ++UI)
+      User->addUse(*UI);
+  }
+}
+
 bool MemorySSA::runOnFunction(Function &F) {
   this->F = &F;
-  DEBUG(dbgs() << "Run on function called\n");
   AA = &getAnalysis<AliasAnalysis>();
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   buildMemorySSA(F);
@@ -630,7 +664,7 @@ bool MemorySSA::runOnFunction(Function &F) {
 void MemorySSA::buildMemorySSA(Function &F) {
   // We temporarily maintain lists of memory accesses per-block,
   // trading time for memory. We could just look up the memory access
-  // for every possible instruction in the stream.  Instead, we built
+  // for every possible instruction in the stream.  Instead, we build
   // lists, and then throw it out once the use-def form is built.
   AccessMap PerBlockAccesses;
   SmallPtrSet<BasicBlock *, 32> DefiningBlocks;
@@ -655,12 +689,11 @@ void MemorySSA::buildMemorySSA(Function &F) {
         AliasAnalysis::ModRefResult ModRef = AA->getModRefInfo(BI, Loc);
         if (ModRef & AliasAnalysis::Mod)
           def = true;
-        // Defs are already uses
         if (ModRef & AliasAnalysis::Ref)
           use = true;
       }
 
-      // Defs are already uses, so use && def is handled elsewhere
+      // Defs are already uses, so use && def == def
       if (use && !def) {
         MemoryUse *MU =
             new (MemoryAccessAllocator) MemoryUse(nullptr, &*BI, FI);
@@ -688,15 +721,22 @@ void MemorySSA::buildMemorySSA(Function &F) {
   // Determine where our PHI's should go
   determineInsertionPoint(F, PerBlockAccesses, DefiningBlocks, UsingBlocks);
 
-  // We create an access to represent "live on entry"
+  // We create an access to represent "live on entry", for things like
+  // arguments or users of globals. We do not actually insert it in to
+  // the IR.
   BasicBlock &StartingPoint = F.getEntryBlock();
   LiveOnEntryDef = new (MemoryAccessAllocator)
       MemoryDef(0, nullptr, nullptr, &StartingPoint);
 
   // Now do regular SSA renaming
-  /// The set of basic blocks the renamer has already visited.
-  ///
   SmallPtrSet<BasicBlock *, 16> Visited;
+
+  // Uses are allocated and built once for a memory access, then are
+  // immutable. In order to count how many we need for a given memory
+  // access, we first add all the uses to lists in a densemap, then
+  // later we will convert it into an array and place it in the right
+  // place
+  UseMap Uses;
 
   std::vector<RenamePassData> RenamePassWorklist;
   RenamePassWorklist.push_back({F.begin(), nullptr, LiveOnEntryDef});
@@ -705,25 +745,40 @@ void MemorySSA::buildMemorySSA(Function &F) {
     RPD.swap(RenamePassWorklist.back());
     RenamePassWorklist.pop_back();
     renamePass(RPD.BB, RPD.Pred, RPD.MA, PerBlockAccesses, RenamePassWorklist,
-               Visited);
+               Visited, Uses);
   } while (!RenamePassWorklist.empty());
 
-  // At this point, we may have unreachable accesses
-  // Mark them with the live on entry variable
+  // At this point, we may have unreachable blocks with unreachable accesses
+  // Given any uses in unreachable blocks the live on entry definition
   if (Visited.size() != F.size()) {
     for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
       if (!Visited.count(FI)) {
-        markNullsAsLiveOnEntry(PerBlockAccesses, FI);
+        markUnreachableAsLiveOnEntry(PerBlockAccesses, FI, Uses);
       }
     }
   }
 
-  DEBUG(F.print(dbgs(), new MemorySSAAnnotatedWriter(this)));
+  // Now convert our use lists into real uses
+  addUses(Uses);
+
   DEBUG(verifyDefUses(F));
 
+  // Delete our access lists
   for (auto DI = PerBlockAccesses.begin(), DE = PerBlockAccesses.end();
        DI != DE; ++DI) {
     delete DI->second;
+  }
+
+  // Densemap does not like when you delete or change the value during
+  // iteration.
+  std::vector<std::list<MemoryAccess *> *> UseListsToDelete;
+  for (auto DI = Uses.begin(), DE = Uses.end(); DI != DE; ++DI) {
+    UseListsToDelete.push_back(DI->second);
+  }
+  Uses.clear();
+  for (unsigned i = 0, e = UseListsToDelete.size(); i != e; ++i) {
+    delete UseListsToDelete[i];
+    UseListsToDelete[i] = nullptr;
   }
 }
 
@@ -741,16 +796,13 @@ void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
            "Null def but use not point to live on entry def");
     return;
   }
-
-  if (MemoryDef *D = dyn_cast<MemoryDef>(Def))
-    assert(std::find(D->use_begin(), D->use_end(), Use) != D->use_end() &&
-           "Did not find use in def's use list");
-  else if (MemoryPhi *P = dyn_cast<MemoryPhi>(Def))
-    assert(std::find(P->use_begin(), P->use_end(), Use) != P->use_end() &&
-           "Did not find use in def's use list");
-  else
-    llvm_unreachable("Memory definition should have been a def or a phi");
+  assert(std::find(Def->use_begin(), Def->use_end(), Use) != Def->use_end() &&
+         "Did not find use in def's use list");
 }
+
+// Verify the immediate use information, by walking all the memory
+// accesses and verifying that, for each use, it appears in the
+// appropriate def's use list
 
 void MemorySSA::verifyDefUses(Function &F) {
   for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
@@ -779,6 +831,7 @@ void MemorySSA::verifyDefUses(Function &F) {
   }
 }
 
+// Get a memory access for an instruction
 MemoryAccess *MemorySSA::getMemoryAccess(const Value *I) const {
   return InstructionToMemoryAccess.lookup(I);
 }
