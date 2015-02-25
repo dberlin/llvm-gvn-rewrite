@@ -451,7 +451,8 @@ void MemorySSA::determineInsertionPoint(
       Accesses = new std::list<MemoryAccess *>;
       BlockAccesses.insert(std::make_pair(BB, Accesses));
     }
-    MemoryPhi *Phi = new (MemoryAccessAllocator) MemoryPhi(BB);
+    MemoryPhi *Phi = new (MemoryAccessAllocator)
+        MemoryPhi(BB, std::distance(pred_begin(BB), pred_end(BB)));
     InstructionToMemoryAccess.insert(std::make_pair(BB, Phi));
     // Phi goes first
     Accesses->push_front(Phi);

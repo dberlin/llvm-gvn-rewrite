@@ -162,7 +162,10 @@ public:
 };
 class MemoryPhi : public MemoryAccess {
 public:
-  MemoryPhi(BasicBlock *BB) : MemoryAccess(AccessPhi, BB) {}
+  MemoryPhi(BasicBlock *BB, unsigned int NumPreds)
+      : MemoryAccess(AccessPhi, BB) {
+    Args.reserve(NumPreds);
+  }
   unsigned int getNumIncomingValues() { return Args.size(); }
   void addIncoming(MemoryAccess *MA, BasicBlock *BB) {
     Args.push_back(std::make_pair(BB, MA));
