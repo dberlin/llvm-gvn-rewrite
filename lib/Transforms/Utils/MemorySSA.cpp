@@ -155,7 +155,7 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
   // dominates the others, but the algorithm will still use one of the
   // arguments's version number to compare against, coming up with
   // correct answers.
-  MemoryAccess *Result;
+  MemoryAccess *Result = nullptr;
 
   // If we already got here once, and didn't get to an answer (if we
   // did, it would have been cached below), we must be stuck in
@@ -175,50 +175,36 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
     HitVisited = SingleResult.second;
     Result = SingleResult.first;
   } else {
-    // Find the most dominating non-phiargument first, if there is one. It
-    // will be the one with the shortest walk.
-    MemoryAccess *DominatingArg = nullptr;
-    for (unsigned i = 0; i < P->getNumIncomingValues(); ++i)
-      if (!isa<MemoryPhi>(P->getIncomingValue(i))) {
-        DominatingArg = P->getIncomingValue(i);
-        break;
-      }
-
-    // Oh well, they are all defined by phi nodes, just choose one
-    if (!DominatingArg)
-      DominatingArg = P->getIncomingValue(0);
-    if (!isa<MemoryPhi>(DominatingArg))
-      for (unsigned i = 1; i < P->getNumIncomingValues(); ++i) {
-        MemoryAccess *Arg = P->getIncomingValue(i);
-        if (!isa<MemoryPhi>(Arg) &&
-            DT->dominates(Arg->getBlock(), DominatingArg->getBlock()))
-          DominatingArg = Arg;
-      }
-
-    auto TargetResult = getClobberingMemoryAccess(DominatingArg, Loc, Visited);
-    MemoryAccess *TargetClobber = TargetResult.first;
-    Result = TargetClobber;
-
-    // Now reduce it against the others
+    MemoryAccess *TargetResult = nullptr;
+    
+    // This is true if we hit ourselves from every argument
+    bool AllVisited = true;
     for (unsigned i = 0; i < P->getNumIncomingValues(); ++i) {
       MemoryAccess *Arg = P->getIncomingValue(i);
-      if (Arg == DominatingArg)
-        continue;
-
       auto ArgResult = getClobberingMemoryAccess(Arg, Loc, Visited);
-      // If we hit ourselves from this arg, skip this arg
-      if (ArgResult.second)
-        continue;
-      MemoryAccess *ClobberForArg = ArgResult.first;
-      // If they aren't the same, abort, we must be clobbered by one
-      // or the other.
-      // (Currently, we return the phi node, we could track which argument
-      // is clobbering if something wanted)
-      if (TargetClobber != ClobberForArg) {
-        Result = P;
-        HitVisited = ArgResult.second;
-        break;
+      if (!ArgResult.second) {
+	AllVisited = false;
+	// Fill in target result we are looking for if we haven't so far
+	// Otherwise check the argument is equal to the last one
+	if (!TargetResult) {    
+	  TargetResult = ArgResult.first;
+	}
+	else if (TargetResult != ArgResult.first) 
+	  {
+	    Result = P;
+	    HitVisited = false;
+	    break;
+	  }
+	
       }
+    }
+    //  See if we completed either with all visited, or with success
+    if (!Result && AllVisited) {
+      Result = P;
+      HitVisited = true;
+    } else if (!Result && TargetResult) {
+      Result = TargetResult;
+      HitVisited = false;
     }
   }
   // Cache our result
