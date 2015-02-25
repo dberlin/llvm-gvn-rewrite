@@ -78,7 +78,6 @@ class BasicBlock;
 class DominatorTree;
 class Function;
 
-
 class MemoryAccess {
 
 public:
@@ -88,7 +87,7 @@ public:
   // dyn_cast
   static inline bool classof(const MemoryAccess *) { return true; }
 
-  AccessType getType() const { return Type; }
+  AccessType getAccessType() const { return AccessType; }
   virtual ~MemoryAccess() {}
   BasicBlock *getBlock() const { return Block; }
 
@@ -106,12 +105,12 @@ protected:
   // We automatically allocate the right amount of space
   void addUse(MemoryAccess *Use) { UseList[NumUses++] = Use; }
   MemoryAccess(AccessType AT, BasicBlock *BB)
-      : Type(AT), Block(BB), NumUses(0) {}
+      : AccessType(AT), Block(BB), NumUses(0) {}
 
 private:
   MemoryAccess(const MemoryAccess &);
   void operator=(const MemoryAccess &);
-  AccessType Type;
+  AccessType AccessType;
   BasicBlock *Block;
   unsigned int NumUses;
   MemoryAccess **UseList;
@@ -129,12 +128,13 @@ public:
 
   static inline bool classof(const MemoryUse *) { return true; }
   static inline bool classof(const MemoryAccess *MA) {
-    return MA->getType() == AccessUse;
+    return MA->getAccessType() == AccessUse;
   }
   virtual void print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo);
 
 protected:
-  MemoryUse(MemoryAccess *UO, AccessType AT, Instruction *MI, BasicBlock *BB)
+  MemoryUse(MemoryAccess *UO, enum AccessType AT, Instruction *MI,
+            BasicBlock *BB)
       : MemoryAccess(AT, BB), UseOperand(UO), MemoryInst(MI) {}
 
 private:
@@ -150,11 +150,11 @@ public:
 
   static inline bool classof(const MemoryDef *) { return true; }
   static inline bool classof(const MemoryUse *MA) {
-    return MA->getType() == AccessDef;
+    return MA->getAccessType() == AccessDef;
   }
 
   static inline bool classof(const MemoryAccess *MA) {
-    return MA->getType() == AccessDef;
+    return MA->getAccessType() == AccessDef;
   }
   virtual void print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo);
   typedef MemoryAccess **iterator;
@@ -179,7 +179,7 @@ public:
   BasicBlock *getIncomingBlock(unsigned int v) { return Args[v].first; }
   static inline bool classof(const MemoryPhi *) { return true; }
   static inline bool classof(const MemoryAccess *MA) {
-    return MA->getType() == AccessPhi;
+    return MA->getAccessType() == AccessPhi;
   }
 
   virtual void print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo);
