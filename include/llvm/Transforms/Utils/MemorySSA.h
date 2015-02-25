@@ -89,7 +89,6 @@ public:
   static inline bool classof(const MemoryAccess *) { return true; }
 
   AccessType getType() const { return Type; }
-  MemoryAccess() {}
   virtual ~MemoryAccess() {}
   BasicBlock *getBlock() const { return Block; }
 
@@ -106,7 +105,8 @@ protected:
   friend class MemorySSA;
   // We automatically allocate the right amount of space
   void addUse(MemoryAccess *Use) { UseList[NumUses++] = Use; }
-  MemoryAccess(AccessType AT, BasicBlock *BB) : Type(AT), Block(BB) {}
+  MemoryAccess(AccessType AT, BasicBlock *BB)
+      : Type(AT), Block(BB), NumUses(0) {}
 
 private:
   MemoryAccess(const MemoryAccess &);
