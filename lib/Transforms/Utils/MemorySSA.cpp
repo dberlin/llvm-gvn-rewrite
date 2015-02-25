@@ -205,7 +205,7 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
 
     // If we started with a heap use, walk to the def
     if (MemoryUse *MU = dyn_cast<MemoryUse>(UseVersion))
-      UseVersion = MU->getUseOperand();
+      UseVersion = MU->getDefiningAccess();
 
     // Should be either a Memory Def or a Phi node at this point
     if (MemoryPhi *P = dyn_cast<MemoryPhi>(UseVersion))
@@ -245,7 +245,8 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
         break;
     }
 
-    MemoryAccess *NextVersion = cast<MemoryDef>(UseVersion)->getUseOperand();
+    MemoryAccess *NextVersion =
+        cast<MemoryDef>(UseVersion)->getDefiningAccess();
     // Walk from def to def
     CurrVersion = NextVersion;
   }
@@ -492,16 +493,16 @@ NextIteration:
         continue;
 
       if (MemoryUse *MU = dyn_cast<MemoryUse>(*LI)) {
-        MU->setUseOperand(IncomingVal);
+        MU->setDefiningAccess(IncomingVal);
 #if OPTIMIZE_USES
         auto RealVal = getClobberingMemoryAccess(MU->getMemoryInst());
 #else
         auto RealVal = IncomingVal;
 #endif
-        MU->setUseOperand(RealVal);
+        MU->setDefiningAccess(RealVal);
         addUseToMap(Uses, RealVal, MU);
       } else if (MemoryDef *MD = dyn_cast<MemoryDef>(*LI)) {
-        MD->setUseOperand(IncomingVal);
+        MD->setDefiningAccess(IncomingVal);
         addUseToMap(Uses, IncomingVal, MD);
         IncomingVal = MD;
       }
@@ -561,10 +562,10 @@ void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
       delete P;
       Accesses->erase(AI);
     } else if (MemoryUse *U = dyn_cast<MemoryUse>(*AI)) {
-      U->setUseOperand(LiveOnEntryDef);
+      U->setDefiningAccess(LiveOnEntryDef);
       addUseToMap(Uses, LiveOnEntryDef, U);
     } else if (MemoryDef *D = dyn_cast<MemoryDef>(*AI)) {
-      D->setUseOperand(LiveOnEntryDef);
+      D->setDefiningAccess(LiveOnEntryDef);
       addUseToMap(Uses, LiveOnEntryDef, D);
     }
     AI = Next;
@@ -781,9 +782,9 @@ void MemorySSA::verifyDefUses(Function &F) {
       MA = getMemoryAccess(BI);
       if (MA) {
         if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
-          verifyUseInDefs(MU->getUseOperand(), MU);
+          verifyUseInDefs(MU->getDefiningAccess(), MU);
         else if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
-          verifyUseInDefs(MD->getUseOperand(), MD);
+          verifyUseInDefs(MD->getDefiningAccess(), MD);
         else if (MemoryPhi *MP = dyn_cast<MemoryPhi>(MA)) {
           for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i)
             verifyUseInDefs(MP->getIncomingValue(i), MP);
@@ -799,7 +800,7 @@ MemoryAccess *MemorySSA::getMemoryAccess(const Value *I) const {
 }
 
 void MemoryDef::print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo) {
-  MemoryAccess *UO = getUseOperand();
+  MemoryAccess *UO = getDefiningAccess();
   OS << SlotInfo.insert(this) << " = "
      << "MemoryDef(";
   OS << SlotInfo.insert(UO) << ")";
@@ -828,7 +829,7 @@ void MemoryPhi::print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo) {
 }
 
 void MemoryUse::print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo) {
-  MemoryAccess *UO = getUseOperand();
+  MemoryAccess *UO = getDefiningAccess();
   OS << "MemoryUse(";
   OS << SlotInfo.insert(UO);
   OS << ")";
