@@ -18,6 +18,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/UniqueVector.h"
 #include "llvm/Support/Allocator.h"
 #include <list>
 namespace llvm {
@@ -92,7 +93,7 @@ public:
   virtual ~MemoryAccess() {}
   BasicBlock *getBlock() const { return Block; }
 
-  virtual void print(raw_ostream &OS) {}
+  virtual void print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo) {}
   typedef MemoryAccess **iterator;
   typedef MemoryAccess **const const_iterator;
 
@@ -116,10 +117,6 @@ private:
   unsigned int NumUses;
   MemoryAccess **UseList;
 };
-inline raw_ostream &operator<<(raw_ostream &OS, MemoryAccess &MA) {
-  MA.print(OS);
-  return OS;
-}
 
 class MemoryUse : public MemoryAccess {
 public:
@@ -135,7 +132,7 @@ public:
   static inline bool classof(const MemoryAccess *MA) {
     return MA->getType() == AccessUse;
   }
-  virtual void print(raw_ostream &OS);
+  virtual void print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo);
 
 protected:
   MemoryUse(MemoryAccess *UO, AccessType AT, Instruction *MI, BasicBlock *BB)
@@ -149,11 +146,8 @@ private:
 // All defs also have a use
 class MemoryDef : public MemoryUse {
 public:
-  MemoryDef(unsigned int DV, MemoryAccess *UO, Instruction *MI, BasicBlock *BB)
-      : MemoryUse(UO, AccessDef, MI, BB), DefVersion(DV) {}
-
-  unsigned int getDefVersion() { return DefVersion; }
-  void setDefVersion(unsigned int v) { DefVersion = v; }
+  MemoryDef(MemoryAccess *UO, Instruction *MI, BasicBlock *BB)
+      : MemoryUse(UO, AccessDef, MI, BB) {}
 
   static inline bool classof(const MemoryDef *) { return true; }
   static inline bool classof(const MemoryUse *MA) {
@@ -163,17 +157,13 @@ public:
   static inline bool classof(const MemoryAccess *MA) {
     return MA->getType() == AccessDef;
   }
-  virtual void print(raw_ostream &OS);
+  virtual void print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo);
   typedef MemoryAccess **iterator;
   typedef const MemoryAccess **const_iterator;
-
-private:
-  unsigned int DefVersion;
 };
 class MemoryPhi : public MemoryAccess {
 public:
-  MemoryPhi(unsigned int DV, BasicBlock *BB)
-      : MemoryAccess(AccessPhi, BB), DefVersion(DV) {}
+  MemoryPhi(BasicBlock *BB) : MemoryAccess(AccessPhi, BB) {}
   unsigned int getNumIncomingValues() { return Args.size(); }
   void addIncoming(MemoryAccess *MA, BasicBlock *BB) {
     Args.push_back(std::make_pair(BB, MA));
@@ -188,18 +178,15 @@ public:
     Val.first = BB;
   }
   BasicBlock *getIncomingBlock(unsigned int v) { return Args[v].first; }
-  unsigned int getDefVersion() { return DefVersion; }
-  void setDefVersion(unsigned int v) { DefVersion = v; }
   static inline bool classof(const MemoryPhi *) { return true; }
   static inline bool classof(const MemoryAccess *MA) {
     return MA->getType() == AccessPhi;
   }
 
-  virtual void print(raw_ostream &OS);
+  virtual void print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo);
 
 private:
   SmallVector<std::pair<BasicBlock *, MemoryAccess *>, 8> Args;
-  unsigned int DefVersion;
 };
 
 class MemorySSA : public FunctionPass {
@@ -217,7 +204,6 @@ private:
 
   // Memory SSA building info
   MemoryAccess *LiveOnEntryDef;
-  unsigned int NextHeapVersion;
 
   typedef DenseMap<BasicBlock *, std::list<MemoryAccess *> *> AccessMap;
 
