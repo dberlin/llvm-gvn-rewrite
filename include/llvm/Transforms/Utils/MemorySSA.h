@@ -10,30 +10,13 @@
 //
 // This file exposes an interface to building/using memory SSA to walk memory
 // instructions using a use/def graph
-//
-//===----------------------------------------------------------------------===//
-#ifndef LLVM_TRANSFORMS_UTILS_MEMORYSSA_H
-#define LLVM_TRANSFORMS_UTILS_MEMORYSSA_H
-#include "llvm/Analysis/AliasAnalysis.h"
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/UniqueVector.h"
-#include "llvm/Support/Allocator.h"
-#include <list>
-namespace llvm {
 
-class BasicBlock;
-class DominatorTree;
-class Function;
-
-// Memory SSA class builds an SSA form that links together the
-// loads, stores, and clobbers (atomics, calls, etc) of a program,
-// so they can be walked easily.
-// Additionally, it does a trivial form of "heap versioning"
-// Every time the memory state changes in the program, we generate a
-// new heap version
-// It generates MemoryDef/Uses/Phis that are overlayed on top of the existing
+// Memory SSA class builds an SSA form that links together memory
+// access instructions such loads, stores, and clobbers (atomics,
+// calls, etc), so they can be walked easily.  Additionally, it does a
+// trivial form of "heap versioning" Every time the memory state
+// changes in the program, we generate a new heap version It generates
+// MemoryDef/Uses/Phis that are overlayed on top of the existing
 // instructions
 
 // As a trivial example,
@@ -76,9 +59,25 @@ class Function;
 
 // Each def also has a list of uses
 // Also note that it does not attempt any disambiguation, it is simply
-// linking together the instructions.  Attempts for years to do varied forms
-// with built-in disambiguation in GCC have shown this to not be
-// useful for what it buys you.
+// linking together the instructions.
+
+//
+//===----------------------------------------------------------------------===//
+#ifndef LLVM_TRANSFORMS_UTILS_MEMORYSSA_H
+#define LLVM_TRANSFORMS_UTILS_MEMORYSSA_H
+#include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/UniqueVector.h"
+#include "llvm/Support/Allocator.h"
+#include <list>
+namespace llvm {
+
+class BasicBlock;
+class DominatorTree;
+class Function;
+
 
 class MemoryAccess {
 
