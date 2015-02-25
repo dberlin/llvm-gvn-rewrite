@@ -138,23 +138,11 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
   // the phi node doesn't matter for this alias location, and to get
   // to whatever version occurs before the *split* point that caused
   // the phi node.
-  // To do this, we
-  // First, find the most dominating phi node argument, then see if we
-  // end up with the same version between that and all the other phi
-  // nodes.
-  // This is because there are only two cases we can walk through:
+  // There are only two cases we can walk through:
   // 1. One argument dominates the other, and the other's version is a
   // "false" one.
-  // 2. All the arguments have the same version number, and that
-  // version is a false one for this location.
-  // In both of these cases, we should arrive at the same version
-  // number for all arguments. If we don't. we can't ignore this phi
-  // node, because this means at least one of the arguments has a
-  // memory operation that affects us.
-  // In the #2 case, we will not actually find an argument that
-  // dominates the others, but the algorithm will still use one of the
-  // arguments's version number to compare against, coming up with
-  // correct answers.
+  // 2. All of the arguments are false version numbers that eventually
+  // lead back to some common version number
   MemoryAccess *Result = nullptr;
 
   // If we already got here once, and didn't get to an answer (if we
@@ -176,26 +164,23 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
     Result = SingleResult.first;
   } else {
     MemoryAccess *TargetResult = nullptr;
-    
+
     // This is true if we hit ourselves from every argument
     bool AllVisited = true;
     for (unsigned i = 0; i < P->getNumIncomingValues(); ++i) {
       MemoryAccess *Arg = P->getIncomingValue(i);
       auto ArgResult = getClobberingMemoryAccess(Arg, Loc, Visited);
       if (!ArgResult.second) {
-	AllVisited = false;
-	// Fill in target result we are looking for if we haven't so far
-	// Otherwise check the argument is equal to the last one
-	if (!TargetResult) {    
-	  TargetResult = ArgResult.first;
-	}
-	else if (TargetResult != ArgResult.first) 
-	  {
-	    Result = P;
-	    HitVisited = false;
-	    break;
-	  }
-	
+        AllVisited = false;
+        // Fill in target result we are looking for if we haven't so far
+        // Otherwise check the argument is equal to the last one
+        if (!TargetResult) {
+          TargetResult = ArgResult.first;
+        } else if (TargetResult != ArgResult.first) {
+          Result = P;
+          HitVisited = false;
+          break;
+        }
       }
     }
     //  See if we completed either with all visited, or with success
@@ -746,7 +731,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
 
   // Now convert our use lists into real uses
   addUses(Uses);
-
+  DEBUG(dump(F));
   DEBUG(verifyDefUses(F));
 
   // Delete our access lists
