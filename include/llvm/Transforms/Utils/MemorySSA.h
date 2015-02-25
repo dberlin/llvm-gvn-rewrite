@@ -118,11 +118,11 @@ private:
 
 class MemoryUse : public MemoryAccess {
 public:
-  MemoryUse(MemoryAccess *UO, Instruction *MI, BasicBlock *BB)
-      : MemoryUse(UO, AccessUse, MI, BB) {}
+  MemoryUse(MemoryAccess *DMA, Instruction *MI, BasicBlock *BB)
+      : MemoryUse(DMA, AccessUse, MI, BB) {}
 
-  MemoryAccess *getUseOperand() const { return UseOperand; }
-  void setUseOperand(MemoryAccess *UO) { UseOperand = UO; }
+  MemoryAccess *getDefiningAccess() const { return DefiningAccess; }
+  void setDefiningAccess(MemoryAccess *DMA) { DefiningAccess = DMA; }
   Instruction *getMemoryInst() const { return MemoryInst; }
   void setMemoryInst(Instruction *MI) { MemoryInst = MI; }
 
@@ -133,20 +133,20 @@ public:
   virtual void print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo);
 
 protected:
-  MemoryUse(MemoryAccess *UO, enum AccessType AT, Instruction *MI,
+  MemoryUse(MemoryAccess *DMA, enum AccessType AT, Instruction *MI,
             BasicBlock *BB)
-      : MemoryAccess(AT, BB), UseOperand(UO), MemoryInst(MI) {}
+      : MemoryAccess(AT, BB), DefiningAccess(DMA), MemoryInst(MI) {}
 
 private:
-  MemoryAccess *UseOperand;
+  MemoryAccess *DefiningAccess;
   Instruction *MemoryInst;
 };
 
 // All defs also have a use
 class MemoryDef : public MemoryUse {
 public:
-  MemoryDef(MemoryAccess *UO, Instruction *MI, BasicBlock *BB)
-      : MemoryUse(UO, AccessDef, MI, BB) {}
+  MemoryDef(MemoryAccess *DMA, Instruction *MI, BasicBlock *BB)
+      : MemoryUse(DMA, AccessDef, MI, BB) {}
 
   static inline bool classof(const MemoryDef *) { return true; }
   static inline bool classof(const MemoryUse *MA) {
