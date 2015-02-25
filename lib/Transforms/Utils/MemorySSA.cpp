@@ -16,6 +16,7 @@
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/ADT/UniqueVector.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/IR/AssemblyAnnotationWriter.h"
@@ -45,9 +46,15 @@ INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(MemorySSA, "memoryssa", "Memory SSA", false, true);
 
+// This is a temporary (IE will be deleted once consensus is reached
+// in the review) flag to determine whether we should optimize uses
+// while building so they point to the nearest actual clobber
+#define OPTIMIZE_USES 1
+
 // An annotator class to print memory ssa information in comments
 class MemorySSAAnnotatedWriter : public AssemblyAnnotationWriter {
   const MemorySSA *MSSA;
+  UniqueVector<MemoryAccess *> SlotInfo;
 
 public:
   MemorySSAAnnotatedWriter(const MemorySSA *M) : MSSA(M) {}
@@ -57,7 +64,7 @@ public:
     MemoryAccess *MA = MSSA->getMemoryAccess(BB);
     if (MA) {
       OS << "; ";
-      MA->print(OS);
+      MA->print(OS, SlotInfo);
       OS << "\n";
     }
   }
@@ -67,7 +74,7 @@ public:
     MemoryAccess *MA = MSSA->getMemoryAccess(I);
     if (MA) {
       OS << "; ";
-      MA->print(OS);
+      MA->print(OS, SlotInfo);
       OS << "\n";
     }
   }
@@ -96,20 +103,6 @@ AliasAnalysis::Location getLocationForAA(AliasAnalysis *AA, Instruction *Inst) {
   else
     llvm_unreachable("unsupported memory instruction");
 }
-
-// This is used when printing out version numbers in the dumper
-unsigned int getVersionNumberFromAccess(MemoryAccess *MA) {
-  if (MA == nullptr)
-    return 0;
-
-  if (MemoryDef *Def = dyn_cast<MemoryDef>(MA))
-    return Def->getDefVersion();
-  else if (MemoryPhi *Phi = dyn_cast<MemoryPhi>(MA))
-    return Phi->getDefVersion();
-  else if (MemoryUse *Use = dyn_cast<MemoryUse>(MA))
-    return getVersionNumberFromAccess(Use->getUseOperand());
-  llvm_unreachable("Was not a definition that has a version");
-}
 }
 
 bool MemorySSA::isLiveOnEntryDef(const MemoryAccess *MA) const {
@@ -128,8 +121,8 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
   auto CCV = CachedClobberingVersion.find(std::make_pair(P, Loc));
   if (CCV != CachedClobberingVersion.end()) {
     ++NumClobberCacheHits;
-    DEBUG(dbgs() << "Cached Memory SSA version for " << *P << " is ");
-    DEBUG(dbgs() << getVersionNumberFromAccess(CCV->second));
+    DEBUG(dbgs() << "Cached Memory SSA pointer for " << (uintptr_t)P << " is ");
+    DEBUG(dbgs() << (uintptr_t)CCV->second);
     DEBUG(dbgs() << "\n");
     return std::make_pair(CCV->second, false);
   }
@@ -233,9 +226,9 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
       auto CCV = CachedClobberingVersion.find(std::make_pair(UseVersion, Loc));
       if (CCV != CachedClobberingVersion.end()) {
         ++NumClobberCacheHits;
-        DEBUG(dbgs() << "Cached Memory SSA version for " << *DefMemoryInst
+        DEBUG(dbgs() << "Cached Memory SSA pointer for " << *DefMemoryInst
                      << " is ");
-        DEBUG(dbgs() << getVersionNumberFromAccess(CCV->second));
+        DEBUG(dbgs() << (uintptr_t)CCV->second);
         DEBUG(dbgs() << "\n");
         return std::make_pair(CCV->second, false);
       }
@@ -253,11 +246,6 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
     }
 
     MemoryAccess *NextVersion = cast<MemoryDef>(UseVersion)->getUseOperand();
-    DEBUG(dbgs() << "Walking memory SSA from version ");
-    DEBUG(dbgs() << getVersionNumberFromAccess(CurrVersion));
-    DEBUG(dbgs() << " to version ");
-    DEBUG(dbgs() << getVersionNumberFromAccess(NextVersion));
-    DEBUG(dbgs() << "\n");
     // Walk from def to def
     CurrVersion = NextVersion;
   }
@@ -279,8 +267,8 @@ MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
 
   if (CCV != CachedClobberingVersion.end()) {
     ++NumClobberCacheHits;
-    DEBUG(dbgs() << "Cached Memory SSA version for " << *I << " is ");
-    DEBUG(dbgs() << getVersionNumberFromAccess(CCV->second));
+    DEBUG(dbgs() << "Cached Memory SSA version for " << (uintptr_t)I << " is ");
+    DEBUG(dbgs() << (uintptr_t)CCV->second);
     DEBUG(dbgs() << "\n");
     return CCV->second;
   }
@@ -291,11 +279,11 @@ MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
 
   CachedClobberingVersion.insert(
       std::make_pair(std::make_pair(StartingVersion, Loc), FinalVersion));
-  DEBUG(dbgs() << "Starting Memory SSA version for " << *I << " is ");
-  DEBUG(dbgs() << getVersionNumberFromAccess(StartingVersion));
+  DEBUG(dbgs() << "Starting Memory SSA clobber for " << (uintptr_t)I << " is ");
+  DEBUG(dbgs() << (uintptr_t)StartingVersion);
   DEBUG(dbgs() << "\n");
-  DEBUG(dbgs() << "Final Memory SSA Version for " << *I << " is ");
-  DEBUG(dbgs() << getVersionNumberFromAccess(FinalVersion));
+  DEBUG(dbgs() << "Final Memory SSA clobber for " << (uintptr_t)I << " is ");
+  DEBUG(dbgs() << (uintptr_t)FinalVersion);
   DEBUG(dbgs() << "\n");
 
   return FinalVersion;
@@ -462,8 +450,7 @@ void MemorySSA::determineInsertionPoint(
       Accesses = new std::list<MemoryAccess *>;
       BlockAccesses.insert(std::make_pair(BB, Accesses));
     }
-    MemoryPhi *Phi =
-        new (MemoryAccessAllocator) MemoryPhi(++NextHeapVersion, BB);
+    MemoryPhi *Phi = new (MemoryAccessAllocator) MemoryPhi(BB);
     InstructionToMemoryAccess.insert(std::make_pair(BB, Phi));
     // Phi goes first
     Accesses->push_front(Phi);
@@ -506,7 +493,13 @@ NextIteration:
 
       if (MemoryUse *MU = dyn_cast<MemoryUse>(*LI)) {
         MU->setUseOperand(IncomingVal);
-        addUseToMap(Uses, IncomingVal, MU);
+#if OPTIMIZE_USES
+        auto RealVal = getClobberingMemoryAccess(MU->getMemoryInst());
+#else
+        auto RealVal = IncomingVal;
+#endif
+        MU->setUseOperand(RealVal);
+        addUseToMap(Uses, RealVal, MU);
       } else if (MemoryDef *MD = dyn_cast<MemoryDef>(*LI)) {
         MD->setUseOperand(IncomingVal);
         addUseToMap(Uses, IncomingVal, MD);
@@ -580,8 +573,7 @@ void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
 
 char MemorySSA::ID = 0;
 
-MemorySSA::MemorySSA()
-    : FunctionPass(ID), LiveOnEntryDef(nullptr), NextHeapVersion(0) {
+MemorySSA::MemorySSA() : FunctionPass(ID), LiveOnEntryDef(nullptr) {
   initializeMemorySSAPass(*PassRegistry::getPassRegistry());
 }
 
@@ -591,7 +583,6 @@ void MemorySSA::releaseMemory() {
   CachedClobberingVersion.clear();
   InstructionToMemoryAccess.clear();
   MemoryAccessAllocator.Reset();
-  NextHeapVersion = 0;
 }
 
 void MemorySSA::getAnalysisUsage(AnalysisUsage &AU) const {
@@ -677,8 +668,8 @@ void MemorySSA::buildMemorySSA(Function &F) {
         Accesses->push_back(MU);
       }
       if (def) {
-        MemoryDef *MD = new (MemoryAccessAllocator)
-            MemoryDef(++NextHeapVersion, nullptr, &*BI, FI);
+        MemoryDef *MD =
+            new (MemoryAccessAllocator) MemoryDef(nullptr, &*BI, FI);
         InstructionToMemoryAccess.insert(std::make_pair(&*BI, MD));
         DefiningBlocks.insert(FI);
         if (!Accesses) {
@@ -696,8 +687,8 @@ void MemorySSA::buildMemorySSA(Function &F) {
   // arguments or users of globals. We do not actually insert it in to
   // the IR.
   BasicBlock &StartingPoint = F.getEntryBlock();
-  LiveOnEntryDef = new (MemoryAccessAllocator)
-      MemoryDef(0, nullptr, nullptr, &StartingPoint);
+  LiveOnEntryDef =
+      new (MemoryAccessAllocator) MemoryDef(nullptr, nullptr, &StartingPoint);
 
   // Now do regular SSA renaming
   SmallPtrSet<BasicBlock *, 16> Visited;
@@ -807,15 +798,15 @@ MemoryAccess *MemorySSA::getMemoryAccess(const Value *I) const {
   return InstructionToMemoryAccess.lookup(I);
 }
 
-void MemoryDef::print(raw_ostream &OS) {
+void MemoryDef::print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo) {
   MemoryAccess *UO = getUseOperand();
-  OS << getDefVersion() << " = "
+  OS << SlotInfo.insert(this) << " = "
      << "MemoryDef(";
-  OS << getVersionNumberFromAccess(UO) << ")";
+  OS << SlotInfo.insert(UO) << ")";
 }
 
-void MemoryPhi::print(raw_ostream &OS) {
-  OS << getDefVersion() << " = "
+void MemoryPhi::print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo) {
+  OS << SlotInfo.insert(this) << " = "
      << "MemoryPhi(";
   for (unsigned int i = 0, e = getNumIncomingValues(); i != e; ++i) {
     BasicBlock *BB = getIncomingBlock(i);
@@ -828,7 +819,7 @@ void MemoryPhi::print(raw_ostream &OS) {
     OS << ",";
     assert((isa<MemoryDef>(MA) || isa<MemoryPhi>(MA)) &&
            "Phi node should have referred to def or another phi");
-    OS << getVersionNumberFromAccess(MA);
+    OS << SlotInfo.insert(MA);
     OS << "}";
     if (i + 1 < e)
       OS << ",";
@@ -836,9 +827,9 @@ void MemoryPhi::print(raw_ostream &OS) {
   OS << ")";
 }
 
-void MemoryUse::print(raw_ostream &OS) {
+void MemoryUse::print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo) {
   MemoryAccess *UO = getUseOperand();
   OS << "MemoryUse(";
-  OS << getVersionNumberFromAccess(UO);
+  OS << SlotInfo.insert(UO);
   OS << ")";
 }
