@@ -164,7 +164,8 @@ class NewGVN : public FunctionPass {
   // We separate out the memory expressions to keep hashtable resizes from
   // occurring as often.
   ExpressionClassMap MemoryExpressionToClass;
-  DenseSet<Expression *, ComparingExpressionInfo> UniquedExpressions;
+  DenseSet<Expression *, ComparingExpressionInfo>
+      UniquedExpressions;
   DenseSet<Value *> ChangedValues;
   DenseSet<std::pair<BasicBlock *, BasicBlock *>> ReachableEdges;
   DenseSet<BasicBlock *> ReachableBlocks;
@@ -172,6 +173,7 @@ class NewGVN : public FunctionPass {
   DenseMap<Instruction *, uint32_t> ProcessedCount;
   CongruenceClass *InitialClass;
   std::vector<CongruenceClass *> CongruenceClasses;
+  std::vector<Expression*> ExpressionForId;
   DenseMap<BasicBlock *, std::pair<int, int>> DFSBBMap;
   DenseMap<Instruction *, unsigned int> InstrLocalDFS;
 
@@ -445,15 +447,14 @@ Expression *NewGVN::createExpression(Instruction *I) {
 }
 
 Expression *NewGVN::uniquifyExpression(Expression *E) {
+  // Make sure we never use ID 0
+  unsigned int ID = UniquedExpressions.size() + 1;
   auto P = UniquedExpressions.insert(E);
-  if (!P.second && *(P.first) != E) {
-    // // We rely on the expression either never being inserted into
-    // // expressionsToDelete, or properly removed by our caller.
-    // assert(!ExpressionToDelete.count(E) &&
-    // 	   "This expression should not be in expressionsToDelete");
-    // delete E;
+  if (!P.second) {
     return *(P.first);
   }
+  E->setID(ID);
+  ExpressionForId[ID] = E;
   return E;
 }
 
@@ -1152,9 +1153,8 @@ void NewGVN::cleanupTables() {
 
   ValueToClass.clear();
   for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
-    if (CongruenceClasses[i]->members.size() > 10)
-      DEBUG(dbgs() << "Congruence class " << i << " has "
-                   << CongruenceClasses[i]->members.size() << " members\n");
+    DEBUG(dbgs() << "Congruence class " << i << " has "
+                 << CongruenceClasses[i]->members.size() << " members\n");
     delete CongruenceClasses[i];
 
     CongruenceClasses[i] = NULL;
@@ -1170,6 +1170,7 @@ void NewGVN::cleanupTables() {
   ProcessedCount.clear();
   DFSBBMap.clear();
   InstrLocalDFS.clear();
+  ExpressionForId.clear();
 }
 
 /// runOnFunction - This is the main transformation entry point for a function.
@@ -1202,8 +1203,8 @@ bool NewGVN::runOnFunction(Function &F) {
   // that can be quite expensive. At most, we have one expression per
   // instruction.
   ExpressionToClass.resize(ICount * 2);
-  MemoryExpressionToClass.resize(ICount * 2);
-
+  MemoryExpressionToClass.resize(ICount+1);
+  ExpressionForId.resize(ICount+1);
   // Initialize the touched instructions to include the entry block
   for (auto BI = F.getEntryBlock().begin(), BE = F.getEntryBlock().end();
        BI != BE; ++BI)
@@ -1250,7 +1251,7 @@ bool NewGVN::runOnFunction(Function &F) {
 
           if (!I->isTerminator()) {
             Expression *Symbolized = performSymbolicEvaluation(I, *RI);
-            performCongruenceFinding(I, *RI, Symbolized);
+	    performCongruenceFinding(I, *RI, Symbolized);
           } else {
             processOutgoingEdges(dyn_cast<TerminatorInst>(I));
           }
@@ -1258,7 +1259,7 @@ bool NewGVN::runOnFunction(Function &F) {
       }
     }
   }
-  Changed |= eliminateInstructions(F);
+  //  Changed |= eliminateInstructions(F);
   cleanupTables();
   return Changed;
 }
@@ -1444,9 +1445,9 @@ bool NewGVN::eliminateInstructions(Function &F) {
     // If this is a leader that is always available, just replace
     // everything with it
     if (alwaysAvailable(CC->leader)) {
-      for (auto CI = CC->members.begin(), CE = CC->members.end(); CI != CE;) {
+      for (auto CI = CC->members.begin(), CE = CC->members.end(); CI != CE; ++CI) {
         Value *member = *CI;
-        ++CI;
+        
         // Skip the member that is also us :)
         if (member != CC->leader) {
           // Stores do not have a value we can use directly, it would
@@ -1479,12 +1480,11 @@ bool NewGVN::eliminateInstructions(Function &F) {
 
         for (std::vector<ValueDFS>::iterator CI = DFSOrderedSet.begin(),
                                              CE = DFSOrderedSet.end();
-             CI != CE;) {
+             CI != CE; ++CI) {
           int MemberDFSIn = CI->DFSIn;
           int MemberDFSOut = CI->DFSOut;
           Value *Member = CI->Val;
           bool EquivalenceOnly = CI->Equivalence;
-          ++CI;
           if (isa<StoreInst>(Member))
             continue;
 
