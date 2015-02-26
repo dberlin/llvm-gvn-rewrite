@@ -106,7 +106,7 @@ protected:
   // We automatically allocate the right amount of space
   void addUse(MemoryAccess *Use) { UseList[NumUses++] = Use; }
   MemoryAccess(AccessType AT, BasicBlock *BB)
-    : AccessType(AT), Block(BB), NumUses(0), UseList(nullptr) {}
+      : AccessType(AT), Block(BB), NumUses(0), UseList(nullptr) {}
 
 private:
   MemoryAccess(const MemoryAccess &);
@@ -120,7 +120,7 @@ private:
 class MemoryUse : public MemoryAccess {
 public:
   MemoryUse(MemoryAccess *DMA, Instruction *MI, BasicBlock *BB)
-    : MemoryUse(DMA, AccessUse, MI, BB) {}
+      : MemoryUse(DMA, AccessUse, MI, BB) {}
 
   MemoryAccess *getDefiningAccess() const { return DefiningAccess; }
   void setDefiningAccess(MemoryAccess *DMA) { DefiningAccess = DMA; }
@@ -147,7 +147,7 @@ private:
 class MemoryDef : public MemoryUse {
 public:
   MemoryDef(MemoryAccess *DMA, Instruction *MI, BasicBlock *BB)
-    : MemoryUse(DMA, AccessDef, MI, BB) {}
+      : MemoryUse(DMA, AccessDef, MI, BB) {}
 
   static inline bool classof(const MemoryDef *) { return true; }
   static inline bool classof(const MemoryUse *MA) {
