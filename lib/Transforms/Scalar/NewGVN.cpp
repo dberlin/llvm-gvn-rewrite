@@ -172,6 +172,8 @@ class NewGVN : public FunctionPass {
   DenseMap<Instruction *, uint32_t> ProcessedCount;
   CongruenceClass *InitialClass;
   std::vector<CongruenceClass *> CongruenceClasses;
+  DenseMap<BasicBlock *, std::pair<int, int>> DFSBBMap;
+  DenseMap<Instruction *, unsigned int> InstrLocalDFS;
 
 public:
   static char ID; // Pass identification, replacement for typeid
@@ -246,6 +248,16 @@ private:
   bool propagateEquality(Value *, Value *, BasicBlock *);
   // Instruction replacement
   unsigned replaceAllDominatedUsesWith(Value *, Value *, BasicBlock *);
+
+  // Elimination
+  struct ValueDFS;
+  void convertDenseToDFSOrdered(CongruenceClass::MemberSet &,
+                                std::set<ValueDFS> &);
+  void convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &,
+                                std::set<ValueDFS> &);
+
+  bool eliminateInstructions(Function &);
+  void replaceInstruction(Instruction *, Value *, CongruenceClass *);
 
   // New instruction creation
   void handleNewInstruction(Instruction *);
@@ -613,14 +625,14 @@ Expression *NewGVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
       E = performSymbolicLoadEvaluation(I, B);
       break;
     case Instruction::BitCast: {
-      // Pointer bitcasts are noops, we can just make them out of whole
-      // cloth if we need to.
-      if (I->getType()->isPointerTy()) {
-        if (Instruction *I0 = dyn_cast<Instruction>(I->getOperand(0)))
-          return performSymbolicEvaluation(I0, I0->getParent());
-        else
-          return performSymbolicEvaluation(I->getOperand(0), B);
-      }
+      // // Pointer bitcasts are noops, we can just make them out of whole
+      // // cloth if we need to.
+      // if (I->getType()->isPointerTy()) {
+      //   if (Instruction *I0 = dyn_cast<Instruction>(I->getOperand(0)))
+      //     return performSymbolicEvaluation(I0, I0->getParent());
+      //   else
+      //     return performSymbolicEvaluation(I->getOperand(0), B);
+      // }
       E = createExpression(I);
     } break;
 
@@ -1156,6 +1168,8 @@ void NewGVN::cleanupTables() {
   ReachableEdges.clear();
   TouchedInstructions.clear();
   ProcessedCount.clear();
+  DFSBBMap.clear();
+  InstrLocalDFS.clear();
 }
 
 /// runOnFunction - This is the main transformation entry point for a function.
@@ -1175,10 +1189,15 @@ bool NewGVN::runOnFunction(Function &F) {
 
   uint32_t ICount = 0;
 
-  // Count number of instructions for sizing of hash tables
-  for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI)
+  // Count number of instructions for sizing of hash tables, and come
+  // up with local dfs numbering for instructions
+  for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
     ICount += FI->size();
-
+    for (auto BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
+      InstrLocalDFS[BI] = ICount;
+      ++ICount;
+    }
+  }
   // Ensure we don't end up resizing the expressionToClass map, as
   // that can be quite expensive. At most, we have one expression per
   // instruction.
@@ -1239,6 +1258,286 @@ bool NewGVN::runOnFunction(Function &F) {
       }
     }
   }
+  Changed |= eliminateInstructions(F);
   cleanupTables();
   return Changed;
+}
+// Return true if V is a value that will always be available (IE can
+// be placed anywhere) in the function.  We don't do globals here
+// because they are often worse to put in place
+// TODO: Separate cost from availability
+
+static bool alwaysAvailable(Value *V) {
+  return isa<Constant>(V) || isa<Argument>(V);
+}
+static BasicBlock *getBlockForValue(Value *V) {
+  if (Instruction *I = dyn_cast<Instruction>(V))
+    return I->getParent();
+  return nullptr;
+}
+struct NewGVN::ValueDFS {
+  int DFSIn;
+  int DFSOut;
+  int LocalNum;
+  Value *Val;
+  bool Equivalence;
+  bool operator<(const ValueDFS &other) const {
+    if (DFSIn < other.DFSIn)
+      return true;
+    else if (DFSIn == other.DFSIn) {
+      if (DFSOut < other.DFSOut)
+        return true;
+      else if (DFSOut == other.DFSOut) {
+        if (LocalNum < other.LocalNum)
+          return true;
+        else if (LocalNum == other.LocalNum)
+          return !!Equivalence < !!other.Equivalence;
+      }
+    }
+    return false;
+  }
+};
+
+void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
+                                      std::set<ValueDFS> &DFSOrderedSet) {
+  for (auto DI = Dense.begin(), DE = Dense.end(); DI != DE; ++DI) {
+    BasicBlock *BB = getBlockForValue(*DI);
+    // Constants are handled prior to ever calling this function, so
+    // we should only be left with instructions as members
+    assert(BB || "Should have figured out a basic block for value");
+    ValueDFS VD;
+    VD.Equivalence = false;
+    std::pair<int, int> DFSPair = DFSBBMap[BB];
+    VD.DFSIn = DFSPair.first;
+    VD.DFSOut = DFSPair.second;
+
+    // If it's an instruction, use the real local dfs number,
+    if (Instruction *I = dyn_cast<Instruction>(*DI))
+      VD.LocalNum = InstrLocalDFS[I];
+    else
+      llvm_unreachable("Should have been an instruction");
+
+    VD.Val = *DI;
+    DFSOrderedSet.insert(VD);
+  }
+}
+
+void NewGVN::convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &Dense,
+                                      std::set<ValueDFS> &DFSOrderedSet) {
+  for (auto DI = Dense.begin(), DE = Dense.end(); DI != DE; ++DI) {
+    std::pair<int, int> &DFSPair = DFSBBMap[DI->second];
+    ValueDFS VD;
+    VD.DFSIn = DFSPair.first;
+    VD.DFSOut = DFSPair.second;
+    VD.Equivalence = true;
+
+    // If it's an instruction, use the real local dfs number.
+    // If it's a value, it *must* have come from equality propagation,
+    // and thus we know it is valid for the entire block.  By giving
+    // the local number as 0, it should sort before the instructions
+    // in that block.
+    if (Instruction *I = dyn_cast<Instruction>(DI->first))
+      VD.LocalNum = InstrLocalDFS[I];
+    else
+      VD.LocalNum = 0;
+
+    VD.Val = DI->first;
+    DFSOrderedSet.insert(VD);
+  }
+}
+static void patchReplacementInstruction(Instruction *I, Value *Repl) {
+  // Patch the replacement so that it is not more restrictive than the value
+  // being replaced.
+  BinaryOperator *Op = dyn_cast<BinaryOperator>(I);
+  BinaryOperator *ReplOp = dyn_cast<BinaryOperator>(Repl);
+  if (Op && ReplOp && isa<OverflowingBinaryOperator>(Op) &&
+      isa<OverflowingBinaryOperator>(ReplOp)) {
+    if (ReplOp->hasNoSignedWrap() && !Op->hasNoSignedWrap())
+      ReplOp->setHasNoSignedWrap(false);
+    if (ReplOp->hasNoUnsignedWrap() && !Op->hasNoUnsignedWrap())
+      ReplOp->setHasNoUnsignedWrap(false);
+  }
+  if (Instruction *ReplInst = dyn_cast<Instruction>(Repl)) {
+    // FIXME: If both the original and replacement value are part of the
+    // same control-flow region (meaning that the execution of one
+    // guarentees the executation of the other), then we can combine the
+    // noalias scopes here and do better than the general conservative
+    // answer used in combineMetadata().
+
+    // In general, GVN unifies expressions over different control-flow
+    // regions, and so we need a conservative combination of the noalias
+    // scopes.
+    unsigned KnownIDs[] = {
+        LLVMContext::MD_tbaa,    LLVMContext::MD_alias_scope,
+        LLVMContext::MD_noalias, LLVMContext::MD_range,
+        LLVMContext::MD_fpmath,  LLVMContext::MD_invariant_load,
+    };
+    combineMetadata(ReplInst, I, KnownIDs);
+  }
+}
+
+static void patchAndReplaceAllUsesWith(Instruction *I, Value *Repl) {
+  patchReplacementInstruction(I, Repl);
+  I->replaceAllUsesWith(Repl);
+}
+
+void NewGVN::replaceInstruction(Instruction *I, Value *V,
+                                CongruenceClass *ReplClass) {
+  assert(ReplClass->leader != I && "About to accidentally remove our leader");
+  DEBUG(dbgs() << "Replacing " << *I << " with " << *V << "\n");
+  patchAndReplaceAllUsesWith(I, V);
+  // Remove the old instruction from the class member list, if it is there, so
+  // the
+  // member size is correct for PRE.
+  ReplClass->members.erase(I);
+  // We save the actual erasing to avoid invalidating memory
+  // dependencies until we are done with everything.
+  // markInstructionForDeletion(I);
+}
+
+bool NewGVN::eliminateInstructions(Function &F) {
+  // This is a non-standard eliminator. The normal way to eliminate is
+  // to walk the dominator tree in order, keeping track of available
+  // values, and eliminating them.  However, this is mildly
+  // pointless. It requires doing lookups on every instruction,
+  // regardless of whether we will ever eliminate it.  For
+  // instructions part of a singleton congruence class, we know we
+  // will never eliminate it.   The dominator tree method is actually
+  // fairly expensive if you use a scoped hash table that performs
+  // deletion on scope exit (as LLVM's does),  as it's possible your scope
+  // exiting
+  // could cause removal of O(instructions) elements.
+
+  // Instead, this eliminator looks at the congruence classes directly, sorts
+  // them into a DFS ordering of the dominator tree, and then we just
+  // perform eliminate straight on the sets by walking the congruence
+  // class members in order, and eliminate the ones dominated by the
+  // last member.   This is technically O(N log N) where N = number of
+  // instructions.  However, we skip singleton sets, and we could make it O(N)
+  // When we find something not dominated, it becomes the new leader
+  // for elimination purposes
+
+  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
+    DomTreeNode *DTN = DT->getNode(FI);
+    if (!DTN)
+      continue;
+    DFSBBMap[FI] = std::make_pair(DTN->getDFSNumIn(), DTN->getDFSNumOut());
+  }
+
+  for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
+    CongruenceClass *CC = CongruenceClasses[i];
+    // FIXME: We should eventually be able to replace everything still
+    // in the initial class with undef, as they should be unreachable.
+    // Right now, initial still contains some things we skip value
+    // numbering of (UNREACHABLE's, for example)
+    if (CC == InitialClass || CC->dead)
+      continue;
+
+    // This is a stack because equality replacement/etc may place
+    // constants in the middle of the member list, and we want to use
+    // those constant values in preference to the current leader, over
+    // the scope of those constants.
+    SmallVector<Value *, 4> ValueStack;
+    SmallVector<std::pair<int, int>, 64> DFSStack;
+    assert(CC->leader && "We should have had a leader");
+
+    // If this is a leader that is always available, just replace
+    // everything with it
+    if (alwaysAvailable(CC->leader)) {
+      for (auto CI = CC->members.begin(), CE = CC->members.end(); CI != CE;) {
+        Value *member = *CI;
+        ++CI;
+        // Skip the member that is also us :)
+        if (member != CC->leader) {
+          // Stores do not have a value we can use directly, it would
+          // require insertion
+          if (isa<StoreInst>(member))
+            continue;
+          DEBUG(dbgs() << "Found replacement " << *(CC->leader) << " for "
+                       << *member << "\n");
+          // Due to equality propagation, these may not always be
+          // instructions, they may be real values.  We don't really
+          // care about trying to replace the non-instructions.
+          if (Instruction *I = dyn_cast<Instruction>(member))
+            replaceInstruction(I, CC->leader, CC);
+        }
+      }
+    } else {
+      DEBUG(dbgs() << "Eliminating in congruence class " << CC->id << "\n");
+      // If this is a singleton, we can skip it
+      if (CC->members.size() != 1) {
+        // Convert the members and equivalences to DFS ordered sets and
+        // then merge them.
+        std::set<ValueDFS> DFSOrderedMembers;
+        convertDenseToDFSOrdered(CC->members, DFSOrderedMembers);
+        std::set<ValueDFS> DFSOrderedEquivalences;
+        convertDenseToDFSOrdered(CC->equivalences, DFSOrderedEquivalences);
+        std::vector<ValueDFS> DFSOrderedSet;
+        set_union(DFSOrderedMembers.begin(), DFSOrderedMembers.end(),
+                  DFSOrderedEquivalences.begin(), DFSOrderedEquivalences.end(),
+                  std::inserter(DFSOrderedSet, DFSOrderedSet.begin()));
+
+        for (std::vector<ValueDFS>::iterator CI = DFSOrderedSet.begin(),
+                                             CE = DFSOrderedSet.end();
+             CI != CE;) {
+          int MemberDFSIn = CI->DFSIn;
+          int MemberDFSOut = CI->DFSOut;
+          Value *Member = CI->Val;
+          bool EquivalenceOnly = CI->Equivalence;
+          ++CI;
+          if (isa<StoreInst>(Member))
+            continue;
+
+          if (DFSStack.empty()) {
+            DEBUG(dbgs() << "DFS Stack is empty\n");
+          } else {
+            DEBUG(dbgs() << "Stack Top DFS numbers are ("
+                         << DFSStack.back().first << ","
+                         << DFSStack.back().second << ")\n");
+          }
+
+          DEBUG(dbgs() << "Current DFS numbers are (" << MemberDFSIn << ","
+                       << MemberDFSOut << ")\n");
+          // We should push whenever it's empty or there is a constant
+          // or a local equivalence we want to replace with
+          // We should pop until we are back within the right DFS scope
+          // Walk along, processing members who are dominated by each other.
+          if ((ValueStack.empty() || isa<Constant>(Member) ||
+               EquivalenceOnly) ||
+              !(MemberDFSIn >= DFSStack.back().first &&
+                MemberDFSOut <= DFSStack.back().second)) {
+            assert(ValueStack.size() == DFSStack.size() &&
+                   "Mismatch between ValueStack and DFSStack");
+            while (!DFSStack.empty() &&
+                   !(MemberDFSIn >= DFSStack.back().first &&
+                     MemberDFSOut <= DFSStack.back().second)) {
+              DFSStack.pop_back();
+              ValueStack.pop_back();
+            }
+
+            if (DFSStack.empty() || isa<Constant>(Member)) {
+              ValueStack.push_back(Member);
+              DFSStack.push_back(std::make_pair(MemberDFSIn, MemberDFSOut));
+            }
+          }
+          // Skip the case of trying to eliminate the leader, or trying
+          // to eliminate equivalence-only candidates
+          if (Member == CC->leader || EquivalenceOnly)
+            continue;
+
+          Value *Result = ValueStack.back();
+          if (Member == Result)
+            continue;
+          DEBUG(dbgs() << "Found replacement " << *Result << " for " << *Member
+                       << "\n");
+
+          // Perform actual replacement
+          Instruction *I;
+          if ((I = dyn_cast<Instruction>(Member)) && Member != CC->leader)
+            replaceInstruction(I, Result, CC);
+        }
+      }
+    }
+  }
+  return true;
 }
