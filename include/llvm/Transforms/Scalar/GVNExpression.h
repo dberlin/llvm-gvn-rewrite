@@ -39,20 +39,27 @@ private:
   Expression(const Expression &);     // Do not implement
 protected:
   ExpressionType EType;
-  uint32_t Opcode;
+  unsigned int Opcode;
+  unsigned int ID;
 
 public:
-  uint32_t getOpcode() const { return Opcode; }
+  void setID(unsigned int N) { ID = N; }
+  unsigned int getID() const {
+    assert(ID != 0 && "ID not set before trying to get it");
+    return ID;
+  }
 
-  void setOpcode(uint32_t opcode) { Opcode = opcode; }
+  unsigned int getOpcode() const { return Opcode; }
+
+  void setOpcode(unsigned int opcode) { Opcode = opcode; }
 
   ExpressionType getExpressionType() const { return EType; }
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const Expression *) { return true; }
 
-  Expression(uint32_t o = ~2U) : EType(ExpressionTypeBase), Opcode(o) {}
-  Expression(ExpressionType etype, uint32_t o = ~2U)
-      : EType(etype), Opcode(o) {}
+  Expression(unsigned int o = ~2U) : EType(ExpressionTypeBase), Opcode(o) {}
+  Expression(ExpressionType etype, unsigned int o = ~2U)
+      : EType(etype), Opcode(o), ID(0) {}
 
   virtual ~Expression() {}
 
@@ -268,7 +275,7 @@ public:
     return EB->getExpressionType() == ExpressionTypeInsertValue;
   }
 
-  SmallVector<uint32_t, 4> intargs;
+  SmallVector<unsigned int, 4> intargs;
 
   InsertValueExpression() { EType = ExpressionTypeInsertValue; }
 
