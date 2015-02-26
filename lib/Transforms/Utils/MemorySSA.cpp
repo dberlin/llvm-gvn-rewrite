@@ -201,17 +201,15 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
                                      SmallPtrSet<MemoryAccess *, 32> &Visited) {
   MemoryAccess *CurrVersion = MA;
   while (true) {
-    MemoryAccess *UseVersion = CurrVersion;
-
     // If we started with a heap use, walk to the def
-    if (MemoryUse *MU = dyn_cast<MemoryUse>(UseVersion))
-      UseVersion = MU->getDefiningAccess();
+    if (MemoryUse *MU = dyn_cast<MemoryUse>(CurrVersion))
+      CurrVersion = MU->getDefiningAccess();
 
     // Should be either a Memory Def or a Phi node at this point
-    if (MemoryPhi *P = dyn_cast<MemoryPhi>(UseVersion))
+    if (MemoryPhi *P = dyn_cast<MemoryPhi>(CurrVersion))
       return getClobberingMemoryAccess(P, Loc, Visited);
     else {
-      MemoryDef *MD = dyn_cast<MemoryDef>(UseVersion);
+      MemoryDef *MD = dyn_cast<MemoryDef>(CurrVersion);
       assert(MD && "Use linked to something that is not a def");
       // If we hit the top, stop
       if (isLiveOnEntryDef(MD))
@@ -223,7 +221,7 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
       // were to track every thing we saw along the way, since we don't
       // know where we will stop.
       ++NumClobberCacheLookups;
-      auto CCV = CachedClobberingVersion.find(std::make_pair(UseVersion, Loc));
+      auto CCV = CachedClobberingVersion.find(std::make_pair(CurrVersion, Loc));
       if (CCV != CachedClobberingVersion.end()) {
         ++NumClobberCacheHits;
         DEBUG(dbgs() << "Cached Memory SSA pointer for " << *DefMemoryInst
@@ -246,7 +244,7 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
     }
 
     MemoryAccess *NextVersion =
-        cast<MemoryDef>(UseVersion)->getDefiningAccess();
+        cast<MemoryDef>(CurrVersion)->getDefiningAccess();
     // Walk from def to def
     CurrVersion = NextVersion;
   }
