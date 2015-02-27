@@ -488,6 +488,7 @@ Expression *NewGVN::createCallExpression(CallInst *CI, MemoryAccess *HV,
 
 // Find an equivalence in congruence class CC that dominates block B,
 // if one exists
+// TODO: Compare this against the predicate handling system in the paper
 
 Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, BasicBlock *B) {
   // This check is much faster than doing 0 iterations of the loop below
@@ -1249,11 +1250,11 @@ bool NewGVN::runOnFunction(Function &F) {
     //  and walking both lists at the same time, processing whichever has the
     //  next number in order.
     ReversePostOrderTraversal<Function *> rpoT(&F);
-    for (auto RI = rpoT.begin(), RE = rpoT.end(); RI != RE; ++RI) {
+    for (auto R : rpoT) {
       // TODO(Predication)
-      bool blockReachable = ReachableBlocks.count(*RI);
+      bool blockReachable = ReachableBlocks.count(R);
       bool movedForward = false;
-      for (auto BI = (*RI)->begin(), BE = (*RI)->end(); BI != BE;
+      for (auto BI = R->begin(), BE = R->end(); BI != BE;
            !movedForward ? BI++ : BI) {
         movedForward = false;
         auto DI = TouchedInstructions.find(BI);
@@ -1262,7 +1263,7 @@ bool NewGVN::runOnFunction(Function &F) {
           TouchedInstructions.erase(DI);
           if (!blockReachable) {
             DEBUG(dbgs() << "Skipping instruction " << *BI << " because block "
-                         << getBlockName(*RI) << " is unreachable\n");
+                         << getBlockName(R) << " is unreachable\n");
             continue;
           }
           // This is done in case something eliminates the instruction
@@ -1279,8 +1280,8 @@ bool NewGVN::runOnFunction(Function &F) {
           }
 
           if (!I->isTerminator()) {
-            Expression *Symbolized = performSymbolicEvaluation(I, *RI);
-            performCongruenceFinding(I, *RI, Symbolized);
+            Expression *Symbolized = performSymbolicEvaluation(I, R);
+            performCongruenceFinding(I, R, Symbolized);
           } else {
             processOutgoingEdges(dyn_cast<TerminatorInst>(I));
           }
