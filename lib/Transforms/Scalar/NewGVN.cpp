@@ -490,6 +490,10 @@ Expression *NewGVN::createCallExpression(CallInst *CI, MemoryAccess *HV,
 // if one exists
 
 Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, BasicBlock *B) {
+  // This check is much faster than doing 0 iterations of the loop below
+  if (CC->equivalences.empty())
+    return nullptr;
+
   // TODO: This can be made faster by different set ordering, if
   // necessary, or caching whether we found one
   for (auto Member : CC->equivalences) {
