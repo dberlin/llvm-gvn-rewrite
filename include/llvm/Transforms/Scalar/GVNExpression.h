@@ -40,15 +40,8 @@ private:
 protected:
   ExpressionType EType;
   unsigned int Opcode;
-  unsigned int ID;
 
 public:
-  void setID(unsigned int N) { ID = N; }
-  unsigned int getID() const {
-    assert(ID != 0 && "ID not set before trying to get it");
-    return ID;
-  }
-
   unsigned int getOpcode() const { return Opcode; }
 
   void setOpcode(unsigned int opcode) { Opcode = opcode; }
@@ -59,7 +52,7 @@ public:
 
   Expression(unsigned int o = ~2U) : EType(ExpressionTypeBase), Opcode(o) {}
   Expression(ExpressionType etype, unsigned int o = ~2U)
-      : EType(etype), Opcode(o), ID(0) {}
+      : EType(etype), Opcode(o) {}
 
   virtual ~Expression() {}
 

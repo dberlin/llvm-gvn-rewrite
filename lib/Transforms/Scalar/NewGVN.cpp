@@ -132,6 +132,7 @@ class NewGVN : public FunctionPass {
 
   // Congruence class info
   DenseMap<Value *, CongruenceClass *> ValueToClass;
+  DenseMap<Value *, Expression *> ValueToExpression;
   struct ComparingExpressionInfo {
     static inline Expression *getEmptyKey() {
       intptr_t Val = -1;
@@ -164,8 +165,7 @@ class NewGVN : public FunctionPass {
   // We separate out the memory expressions to keep hashtable resizes from
   // occurring as often.
   ExpressionClassMap MemoryExpressionToClass;
-  DenseSet<Expression *, ComparingExpressionInfo>
-      UniquedExpressions;
+  DenseSet<Expression *, ComparingExpressionInfo> UniquedExpressions;
   DenseSet<Value *> ChangedValues;
   DenseSet<std::pair<BasicBlock *, BasicBlock *>> ReachableEdges;
   DenseSet<BasicBlock *> ReachableBlocks;
@@ -173,7 +173,6 @@ class NewGVN : public FunctionPass {
   DenseMap<Instruction *, uint32_t> ProcessedCount;
   CongruenceClass *InitialClass;
   std::vector<CongruenceClass *> CongruenceClasses;
-  std::vector<Expression*> ExpressionForId;
   DenseMap<BasicBlock *, std::pair<int, int>> DFSBBMap;
   DenseMap<Instruction *, unsigned int> InstrLocalDFS;
 
@@ -447,14 +446,10 @@ Expression *NewGVN::createExpression(Instruction *I) {
 }
 
 Expression *NewGVN::uniquifyExpression(Expression *E) {
-  // Make sure we never use ID 0
-  unsigned int ID = UniquedExpressions.size() + 1;
   auto P = UniquedExpressions.insert(E);
   if (!P.second) {
     return *(P.first);
   }
-  E->setID(ID);
-  ExpressionForId[ID] = E;
   return E;
 }
 
@@ -886,6 +881,8 @@ void NewGVN::markUsersTouched(Value *V) {
 /// performCongruenceFinding - Perform congruence finding on a given
 /// value numbering expression
 void NewGVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
+  ValueToExpression[V] = E;
+
   // This is guaranteed to return something, since it will at least find INITIAL
   CongruenceClass *VClass = ValueToClass[V];
   assert(VClass && "Should have found a vclass");
@@ -1170,7 +1167,7 @@ void NewGVN::cleanupTables() {
   ProcessedCount.clear();
   DFSBBMap.clear();
   InstrLocalDFS.clear();
-  ExpressionForId.clear();
+  ValueToExpression.clear();
 }
 
 /// runOnFunction - This is the main transformation entry point for a function.
@@ -1203,8 +1200,7 @@ bool NewGVN::runOnFunction(Function &F) {
   // that can be quite expensive. At most, we have one expression per
   // instruction.
   ExpressionToClass.resize(ICount * 2);
-  MemoryExpressionToClass.resize(ICount+1);
-  ExpressionForId.resize(ICount+1);
+  MemoryExpressionToClass.resize(ICount + 1);
   // Initialize the touched instructions to include the entry block
   for (auto BI = F.getEntryBlock().begin(), BE = F.getEntryBlock().end();
        BI != BE; ++BI)
@@ -1251,7 +1247,7 @@ bool NewGVN::runOnFunction(Function &F) {
 
           if (!I->isTerminator()) {
             Expression *Symbolized = performSymbolicEvaluation(I, *RI);
-	    performCongruenceFinding(I, *RI, Symbolized);
+            performCongruenceFinding(I, *RI, Symbolized);
           } else {
             processOutgoingEdges(dyn_cast<TerminatorInst>(I));
           }
@@ -1259,7 +1255,7 @@ bool NewGVN::runOnFunction(Function &F) {
       }
     }
   }
-  //  Changed |= eliminateInstructions(F);
+  Changed |= eliminateInstructions(F);
   cleanupTables();
   return Changed;
 }
@@ -1445,23 +1441,24 @@ bool NewGVN::eliminateInstructions(Function &F) {
     // If this is a leader that is always available, just replace
     // everything with it
     if (alwaysAvailable(CC->leader)) {
-      for (auto CI = CC->members.begin(), CE = CC->members.end(); CI != CE; ++CI) {
-        Value *member = *CI;
-        
-        // Skip the member that is also us :)
-        if (member != CC->leader) {
-          // Stores do not have a value we can use directly, it would
-          // require insertion
-          if (isa<StoreInst>(member))
-            continue;
-          DEBUG(dbgs() << "Found replacement " << *(CC->leader) << " for "
-                       << *member << "\n");
-          // Due to equality propagation, these may not always be
-          // instructions, they may be real values.  We don't really
-          // care about trying to replace the non-instructions.
-          if (Instruction *I = dyn_cast<Instruction>(member))
-            replaceInstruction(I, CC->leader, CC);
+      auto CI = CC->members.begin();
+      while (CC->members.size() != 1) {
+        Value *Member = *CI;
+        if (Member == CC->leader) {
+          ++CI;
+          continue;
         }
+
+        DEBUG(dbgs() << "Found replacement " << *(CC->leader) << " for "
+                     << *Member << "\n");
+        // Due to equality propagation, these may not always be
+        // instructions, they may be real values.  We don't really
+        // care about trying to replace the non-instructions.
+        if (Instruction *I = dyn_cast<Instruction>(Member)) {
+          replaceInstruction(I, CC->leader, CC);
+          continue;
+        }
+        ++CI;
       }
     } else {
       DEBUG(dbgs() << "Eliminating in congruence class " << CC->id << "\n");
@@ -1495,6 +1492,8 @@ bool NewGVN::eliminateInstructions(Function &F) {
                          << DFSStack.back().first << ","
                          << DFSStack.back().second << ")\n");
           }
+          if (isa<Constant>(Member))
+            assert(isa<Constant>(CC->leader) || EquivalenceOnly);
 
           DEBUG(dbgs() << "Current DFS numbers are (" << MemberDFSIn << ","
                        << MemberDFSOut << ")\n");
@@ -1520,6 +1519,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
               DFSStack.push_back(std::make_pair(MemberDFSIn, MemberDFSOut));
             }
           }
+
           // Skip the case of trying to eliminate the leader, or trying
           // to eliminate equivalence-only candidates
           if (Member == CC->leader || EquivalenceOnly)
