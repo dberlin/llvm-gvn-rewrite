@@ -239,10 +239,10 @@ private:
   typedef DenseMap<MemoryAccess *, std::list<MemoryAccess *> *> UseMap;
   std::pair<MemoryAccess *, bool>
   getClobberingMemoryAccess(MemoryPhi *Phi, const AliasAnalysis::Location &,
-                            SmallPtrSet<MemoryAccess *, 32> &);
+                            bool, SmallPtrSet<MemoryAccess *, 32> &);
   std::pair<MemoryAccess *, bool>
   getClobberingMemoryAccess(MemoryAccess *, const AliasAnalysis::Location &,
-                            SmallPtrSet<MemoryAccess *, 32> &);
+                            bool, SmallPtrSet<MemoryAccess *, 32> &);
 
   void computeLiveInBlocks(const AccessMap &BlockAccesses,
                            const SmallPtrSetImpl<BasicBlock *> &DefBlocks,
