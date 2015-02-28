@@ -169,7 +169,7 @@ class NewGVN : public FunctionPass {
   DenseSet<Value *> ChangedValues;
   DenseSet<std::pair<BasicBlock *, BasicBlock *>> ReachableEdges;
   DenseSet<BasicBlock *> ReachableBlocks;
-  DenseSet<Instruction *> TouchedInstructions;
+  SmallPtrSet<Instruction *, 8> TouchedInstructions;
   DenseMap<Instruction *, uint32_t> ProcessedCount;
   CongruenceClass *InitialClass;
   std::vector<CongruenceClass *> CongruenceClasses;
@@ -1237,7 +1237,6 @@ bool NewGVN::runOnFunction(Function &F) {
   // Count number of instructions for sizing of hash tables, and come
   // up with local dfs numbering for instructions
   for (auto &B : F) {
-    ICount += F.size();
     for (auto &I : B) {
       InstrLocalDFS[&I] = ICount;
       ++ICount;
@@ -1246,7 +1245,7 @@ bool NewGVN::runOnFunction(Function &F) {
   // Ensure we don't end up resizing the expressionToClass map, as
   // that can be quite expensive. At most, we have one expression per
   // instruction.
-  ExpressionToClass.resize(ICount * 2);
+  ExpressionToClass.resize(ICount + 1);
   MemoryExpressionToClass.resize(ICount + 1);
   // Initialize the touched instructions to include the entry block
   for (auto &I : F.getEntryBlock())
@@ -1269,10 +1268,9 @@ bool NewGVN::runOnFunction(Function &F) {
       for (auto BI = R->begin(), BE = R->end(); BI != BE;
            !movedForward ? BI++ : BI) {
         movedForward = false;
-        auto DI = TouchedInstructions.find(BI);
-        if (DI != TouchedInstructions.end()) {
+        bool WasThere = TouchedInstructions.erase(BI);
+        if (WasThere) {
           DEBUG(dbgs() << "Processing instruction " << *BI << "\n");
-          TouchedInstructions.erase(DI);
           if (!blockReachable) {
             DEBUG(dbgs() << "Skipping instruction " << *BI << " because block "
                          << getBlockName(R) << " is unreachable\n");
