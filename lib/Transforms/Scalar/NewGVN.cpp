@@ -206,7 +206,7 @@ private:
 
   // expression handling
   Expression *createExpression(Instruction *, BasicBlock *);
-  void setBasicExpressionInfo(Instruction *, BasicExpression *, BasicBlock *);
+  bool setBasicExpressionInfo(Instruction *, BasicExpression *, BasicBlock *);
   Expression *createPHIExpression(Instruction *, BasicBlock *);
   Expression *createVariableExpression(Value *);
   Expression *createConstantExpression(Constant *);
@@ -313,16 +313,23 @@ Expression *NewGVN::createPHIExpression(Instruction *I, BasicBlock *B) {
   return E;
 }
 
-void NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
+// Set basic expression info (Arguments, type, opcode) for Expression
+// E from Instruction I in block B
+
+bool NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
                                     BasicBlock *B) {
+  bool AllConstant = true;
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
   E->allocateArgs(ExpressionAllocator);
 
   for (auto &O : I->operands()) {
     Value *Operand = lookupOperandLeader(O, B);
+    if (!isa<Constant>(Operand))
+      AllConstant = false;
     E->args_push_back(Operand);
   }
+  return AllConstant;
 }
 // This is a special function only used by equality propagation, it
 // should not be called elsewhere
@@ -368,10 +375,11 @@ Expression *NewGVN::checkSimplificationResults(Expression *E, Instruction *I,
 }
 
 Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
+
   BasicExpression *E =
       new (ExpressionAllocator) BasicExpression(I->getNumOperands());
 
-  setBasicExpressionInfo(I, E, B);
+  bool AllConstant = setBasicExpressionInfo(I, E, B);
 
   if (I->isCommutative()) {
     // Ensure that commutative instructions that only differ by a permutation
@@ -410,7 +418,7 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
     if ((E->Args[0]->getType() == I->getOperand(0)->getType() &&
          E->Args[1]->getType() == I->getOperand(1)->getType())) {
       Value *V =
-          SimplifyCmpInst(Predicate, E->Args[0], E->Args[1], DL, TLI, DT);
+          SimplifyCmpInst(Predicate, E->Args[0], E->Args[1], DL, TLI, DT, AC);
       Expression *simplifiedE;
       if ((simplifiedE = checkSimplificationResults(E, I, V)))
         return simplifiedE;
@@ -420,8 +428,8 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
     if (isa<Constant>(E->Args[0]) ||
         (E->Args[1]->getType() == I->getOperand(1)->getType() &&
          E->Args[2]->getType() == I->getOperand(2)->getType())) {
-      Value *V =
-          SimplifySelectInst(E->Args[0], E->Args[1], E->Args[2], DL, TLI, DT);
+      Value *V = SimplifySelectInst(E->Args[0], E->Args[1], E->Args[2], DL, TLI,
+                                    DT, AC);
       Expression *simplifiedE;
       if ((simplifiedE = checkSimplificationResults(E, I, V)))
         return simplifiedE;
@@ -431,7 +439,7 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
     // simplifying, so that we don't end up simplifying based on a
     // wrong type assumption
     Value *V =
-        SimplifyBinOp(E->getOpcode(), E->Args[0], E->Args[1], DL, TLI, DT);
+        SimplifyBinOp(E->getOpcode(), E->Args[0], E->Args[1], DL, TLI, DT, AC);
     Expression *simplifiedE;
     if ((simplifiedE = checkSimplificationResults(E, I, V)))
       return simplifiedE;
@@ -447,13 +455,29 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
     // constants of the wrong type.
     if (GEP->getPointerOperandType() == E->Args[0]->getType()) {
       Value *V = SimplifyGEPInst(ArrayRef<Value *>(E->Args, E->args_size()), DL,
-                                 TLI, DT);
-      Expression *simplifiedE;
-      if ((simplifiedE = checkSimplificationResults(E, I, V)))
+                                 TLI, DT, AC);
+      if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
+        return simplifiedE;
+    }
+  } else if (AllConstant) {
+    // We don't bother trying to simplify unless all of the operands
+    // were constant
+    // TODO: There are a lot of Simplify*'s we could call here, if we
+    // wanted to.  The original motivating case for this code was a
+    // zext i1 false to i8, which we don't have an interface to
+    // simplify (IE there is no SimplifyZExt)
+
+    SmallVector<Constant *, 8> C;
+    for (unsigned i = 0, e = E->args_size(); i != e; ++i)
+      C.push_back(cast<Constant>(E->Args[i]));
+
+    Value *V =
+        ConstantFoldInstOperands(E->getOpcode(), E->getType(), C, DL, TLI);
+    if (V) {
+      if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
         return simplifiedE;
     }
   }
-
   return E;
 }
 
@@ -1540,6 +1564,8 @@ bool NewGVN::eliminateInstructions(Function &F) {
   // When we find something not dominated, it becomes the new leader
   // for elimination purposes
 
+  // TODO: Replace phi argument's unreachable blocks with undef
+
   for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
     DomTreeNode *DTN = DT->getNode(FI);
     if (!DTN)
@@ -1603,7 +1629,8 @@ bool NewGVN::eliminateInstructions(Function &F) {
         std::set<ValueDFS> DFSOrderedMembers;
         convertDenseToDFSOrdered(CC->members, DFSOrderedMembers);
         std::set<ValueDFS> DFSOrderedEquivalences;
-        convertDenseToDFSOrdered(CC->equivalences, DFSOrderedEquivalences);
+        //        convertDenseToDFSOrdered(CC->equivalences,
+        //        DFSOrderedEquivalences);
         std::vector<ValueDFS> DFSOrderedSet;
         set_union(DFSOrderedMembers.begin(), DFSOrderedMembers.end(),
                   DFSOrderedEquivalences.begin(), DFSOrderedEquivalences.end(),
