@@ -1508,7 +1508,7 @@ public:
   }
 
 private:
-  SmallVector<Value *, 4> ValueStack;
+  SmallVector<Value *, 8> ValueStack;
   SmallVector<std::pair<int, int>, 8> DFSStack;
 };
 }
