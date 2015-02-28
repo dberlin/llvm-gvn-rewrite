@@ -352,6 +352,13 @@ public:
     return (MRB & ModRef) && (MRB & ArgumentPointees);
   }
 
+  // getModRefInfo - Return information about whether or not an
+  // instruction may read or write memory (without regard to a
+  // specific location)
+  ModRefResult getModRefInfo(const Instruction *I) {
+    return getModRefInfo(I, Location());
+  }
+
   /// getModRefInfo - Return information about whether or not an instruction may
   /// read or write the specified memory location.  An instruction
   /// that doesn't read or write memory may be trivially LICM'd for example.
