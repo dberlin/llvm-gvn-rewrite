@@ -85,10 +85,9 @@ bool MemorySSA::isLiveOnEntryDef(const MemoryAccess *MA) const {
 }
 
 // Get the clobbering memory access for a phi node and alias location
-std::pair<MemoryAccess *, bool>
-MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
-                                     const AliasAnalysis::Location &Loc,
-                                     SmallPtrSet<MemoryAccess *, 32> &Visited) {
+std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
+    MemoryPhi *P, const AliasAnalysis::Location &Loc, bool AskingAboutCall,
+    SmallPtrSet<MemoryAccess *, 32> &Visited) {
 
   bool HitVisited = false;
 
@@ -126,8 +125,8 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
 
   // Look through 1 argument phi nodes
   if (P->getNumIncomingValues() == 1) {
-    auto SingleResult =
-        getClobberingMemoryAccess(P->getIncomingValue(0), Loc, Visited);
+    auto SingleResult = getClobberingMemoryAccess(P->getIncomingValue(0), Loc,
+                                                  AskingAboutCall, Visited);
     HitVisited = SingleResult.second;
     Result = SingleResult.first;
   } else {
@@ -137,7 +136,8 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
     bool AllVisited = true;
     for (unsigned i = 0; i < P->getNumIncomingValues(); ++i) {
       MemoryAccess *Arg = P->getIncomingValue(i);
-      auto ArgResult = getClobberingMemoryAccess(Arg, Loc, Visited);
+      auto ArgResult =
+          getClobberingMemoryAccess(Arg, Loc, AskingAboutCall, Visited);
       if (!ArgResult.second) {
         AllVisited = false;
         // Fill in target result we are looking for if we haven't so far
@@ -169,10 +169,9 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
 // For a given MemoryAccess, walk backwards using Memory SSA and find
 // the MemoryAccess that actually clobbers Loc.  The second part of
 // the pair we return is whether we hit a cyclic phi node.
-std::pair<MemoryAccess *, bool>
-MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
-                                     const AliasAnalysis::Location &Loc,
-                                     SmallPtrSet<MemoryAccess *, 32> &Visited) {
+std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
+    MemoryAccess *MA, const AliasAnalysis::Location &Loc, bool AskingAboutCall,
+    SmallPtrSet<MemoryAccess *, 32> &Visited) {
   MemoryAccess *CurrAccess = MA;
   while (true) {
     // If we started with a heap use, walk to the def
@@ -181,7 +180,7 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
 
     // Should be either a Memory Def or a Phi node at this point
     if (MemoryPhi *P = dyn_cast<MemoryPhi>(CurrAccess))
-      return getClobberingMemoryAccess(P, Loc, Visited);
+      return getClobberingMemoryAccess(P, Loc, AskingAboutCall, Visited);
     else {
       MemoryDef *MD = dyn_cast<MemoryDef>(CurrAccess);
       assert(MD && "Use linked to something that is not a def");
@@ -204,9 +203,26 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
         DEBUG(dbgs() << "\n");
         return std::make_pair(CCV->second, false);
       }
-
-      if (AA->getModRefInfo(DefMemoryInst, Loc) & AliasAnalysis::Mod)
-        break;
+      if (!AskingAboutCall) {
+        // Check whether our memory location is modified by this instruction
+        if (AA->getModRefInfo(DefMemoryInst, Loc) & AliasAnalysis::Mod)
+          break;
+      } else {
+        if (isa<CallInst>(DefMemoryInst) || isa<InvokeInst>(DefMemoryInst)) {
+          // Check if the two calls touch the same memory
+          if (AA->getModRefInfo(Loc.Ptr, DefMemoryInst) & AliasAnalysis::Mod)
+            break;
+        } else {
+          // Otherwise, check if the call modifies or references this
+          // location (The best we can say is that if the call
+          // references what this instruction defines, it
+          // must be clobbered by this location,.
+          const AliasAnalysis::Location DefLoc = AA->getLocation(DefMemoryInst);
+          if (AA->getModRefInfo(cast<Instruction>(Loc.Ptr), DefLoc) &
+              AliasAnalysis::Mod)
+            break;
+        }
+      }
     }
 
     MemoryAccess *NextAccess = cast<MemoryDef>(CurrAccess)->getDefiningAccess();
@@ -224,11 +240,17 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
 MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
 
   MemoryAccess *StartingAccess = getMemoryAccess(I);
-  assert(isa<MemoryUse>(StartingAccess) &&
-         "Can only ask for clobbering accesses for a use");
+  bool AskingAboutCall = false;
 
   // First extract our location, then start walking until it is clobbered
-  const AliasAnalysis::Location Loc = AA->getLocation(I);
+  AliasAnalysis::Location Loc;
+
+  if (!isa<CallInst>(I) && !isa<InvokeInst>(I)) {
+    Loc = AA->getLocation(I);
+  } else {
+    AskingAboutCall = true;
+    Loc.Ptr = I;
+  }
 
   ++NumClobberCacheLookups;
   auto CCV = CachedClobberingAccess.find(std::make_pair(StartingAccess, Loc));
@@ -243,7 +265,8 @@ MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
 
   SmallPtrSet<MemoryAccess *, 32> Visited;
   MemoryAccess *FinalAccess =
-      getClobberingMemoryAccess(StartingAccess, Loc, Visited).first;
+      getClobberingMemoryAccess(StartingAccess, Loc, AskingAboutCall, Visited)
+          .first;
 
   CachedClobberingAccess.insert(
       std::make_pair(std::make_pair(StartingAccess, Loc), FinalAccess));
