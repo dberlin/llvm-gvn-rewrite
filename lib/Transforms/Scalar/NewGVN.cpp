@@ -290,10 +290,12 @@ INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_END(NewGVN, "newgvn", "Global Value Numbering", false, false)
 Expression *NewGVN::createPHIExpression(Instruction *I, BasicBlock *B) {
   PHINode *PN = cast<PHINode>(I);
-  PHIExpression *E = new (ExpressionAllocator) PHIExpression(I->getParent());
+  PHIExpression *E = new (ExpressionAllocator)
+      PHIExpression(PN->getNumOperands(), I->getParent());
+
+  E->allocateArgs(ExpressionAllocator);
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
-
   for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i) {
     BasicBlock *B = PN->getIncomingBlock(i);
     if (!ReachableBlocks.count(B)) {
@@ -303,9 +305,9 @@ Expression *NewGVN::createPHIExpression(Instruction *I, BasicBlock *B) {
     }
     if (I->getOperand(i) != I) {
       Value *Operand = lookupOperandLeader(I->getOperand(i), B);
-      E->VarArgs.push_back(Operand);
+      E->args_push_back(Operand);
     } else {
-      E->VarArgs.push_back(I->getOperand(i));
+      E->args_push_back(I->getOperand(i));
     }
   }
   return E;
@@ -315,10 +317,11 @@ void NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
                                     BasicBlock *B) {
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
+  E->allocateArgs(ExpressionAllocator);
 
   for (auto &O : I->operands()) {
     Value *Operand = lookupOperandLeader(O, B);
-    E->VarArgs.push_back(Operand);
+    E->args_push_back(Operand);
   }
 }
 // This is a special function only used by equality propagation, it
@@ -326,13 +329,14 @@ void NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
 Expression *NewGVN::createCmpExpression(unsigned Opcode, Type *Type,
                                         CmpInst::Predicate Predicate,
                                         Value *LHS, Value *RHS, BasicBlock *B) {
-  BasicExpression *E = new (ExpressionAllocator) BasicExpression();
+  BasicExpression *E = new (ExpressionAllocator) BasicExpression(2);
+  E->allocateArgs(ExpressionAllocator);
   E->setType(Type);
   E->setOpcode((Opcode << 8) | Predicate);
   LHS = lookupOperandLeader(LHS, B);
-  E->VarArgs.push_back(LHS);
+  E->args_push_back(LHS);
   RHS = lookupOperandLeader(RHS, B);
-  E->VarArgs.push_back(RHS);
+  E->args_push_back(RHS);
   return E;
 }
 
@@ -364,7 +368,9 @@ Expression *NewGVN::checkSimplificationResults(Expression *E, Instruction *I,
 }
 
 Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
-  BasicExpression *E = new (ExpressionAllocator) BasicExpression();
+  BasicExpression *E =
+      new (ExpressionAllocator) BasicExpression(I->getNumOperands());
+
   setBasicExpressionInfo(I, E, B);
 
   if (I->isCommutative()) {
@@ -373,8 +379,8 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
     // numbers.  Since all commutative instructions have two operands it is more
     // efficient to sort by hand rather than using, say, std::sort.
     assert(I->getNumOperands() == 2 && "Unsupported commutative instruction!");
-    if (E->VarArgs[0] > E->VarArgs[1])
-      std::swap(E->VarArgs[0], E->VarArgs[1]);
+    if (E->Args[0] > E->Args[1])
+      std::swap(E->Args[0], E->Args[1]);
   }
 
   // Perform simplificaiton
@@ -388,8 +394,8 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
   if (CmpInst *CI = dyn_cast<CmpInst>(I)) {
     // Sort the operand value numbers so x<y and y>x get the same value number.
     CmpInst::Predicate Predicate = CI->getPredicate();
-    if (E->VarArgs[0] > E->VarArgs[1]) {
-      std::swap(E->VarArgs[0], E->VarArgs[1]);
+    if (E->Args[0] > E->Args[1]) {
+      std::swap(E->Args[0], E->Args[1]);
       Predicate = CmpInst::getSwappedPredicate(Predicate);
     }
     E->setOpcode((CI->getOpcode() << 8) | Predicate);
@@ -401,21 +407,21 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
 
     assert(I->getOperand(0)->getType() == I->getOperand(1)->getType() &&
            "Wrong types on cmp instruction");
-    if ((E->VarArgs[0]->getType() == I->getOperand(0)->getType() &&
-         E->VarArgs[1]->getType() == I->getOperand(1)->getType())) {
+    if ((E->Args[0]->getType() == I->getOperand(0)->getType() &&
+         E->Args[1]->getType() == I->getOperand(1)->getType())) {
       Value *V =
-          SimplifyCmpInst(Predicate, E->VarArgs[0], E->VarArgs[1], DL, TLI, DT);
+          SimplifyCmpInst(Predicate, E->Args[0], E->Args[1], DL, TLI, DT);
       Expression *simplifiedE;
       if ((simplifiedE = checkSimplificationResults(E, I, V)))
         return simplifiedE;
     }
 
   } else if (isa<SelectInst>(I)) {
-    if (isa<Constant>(E->VarArgs[0]) ||
-        (E->VarArgs[1]->getType() == I->getOperand(1)->getType() &&
-         E->VarArgs[2]->getType() == I->getOperand(2)->getType())) {
-      Value *V = SimplifySelectInst(E->VarArgs[0], E->VarArgs[1], E->VarArgs[2],
-                                    DL, TLI, DT);
+    if (isa<Constant>(E->Args[0]) ||
+        (E->Args[1]->getType() == I->getOperand(1)->getType() &&
+         E->Args[2]->getType() == I->getOperand(2)->getType())) {
+      Value *V =
+          SimplifySelectInst(E->Args[0], E->Args[1], E->Args[2], DL, TLI, DT);
       Expression *simplifiedE;
       if ((simplifiedE = checkSimplificationResults(E, I, V)))
         return simplifiedE;
@@ -424,8 +430,8 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
     // TODO: Since we noop bitcasts, we may need to check types before
     // simplifying, so that we don't end up simplifying based on a
     // wrong type assumption
-    Value *V = SimplifyBinOp(E->getOpcode(), E->VarArgs[0], E->VarArgs[1], DL,
-                             TLI, DT);
+    Value *V =
+        SimplifyBinOp(E->getOpcode(), E->Args[0], E->Args[1], DL, TLI, DT);
     Expression *simplifiedE;
     if ((simplifiedE = checkSimplificationResults(E, I, V)))
       return simplifiedE;
@@ -439,8 +445,9 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
     // simplifying, so that we don't end up simplifying based on a
     // wrong type assumption. We should clean this up so we can use
     // constants of the wrong type.
-    if (GEP->getPointerOperandType() == E->VarArgs[0]->getType()) {
-      Value *V = SimplifyGEPInst(E->VarArgs, DL, TLI, DT);
+    if (GEP->getPointerOperandType() == E->Args[0]->getType()) {
+      Value *V = SimplifyGEPInst(ArrayRef<Value *>(E->Args, E->args_size()), DL,
+                                 TLI, DT);
       Expression *simplifiedE;
       if ((simplifiedE = checkSimplificationResults(E, I, V)))
         return simplifiedE;
@@ -460,10 +467,11 @@ Expression *NewGVN::uniquifyExpression(Expression *E) {
 
 Expression *NewGVN::createInsertValueExpression(InsertValueInst *I,
                                                 BasicBlock *B) {
-  InsertValueExpression *E = new (ExpressionAllocator) InsertValueExpression();
+  InsertValueExpression *E = new (ExpressionAllocator)
+      InsertValueExpression(I->getNumOperands(), I->getNumIndices());
   setBasicExpressionInfo(I, E, B);
   for (auto II = I->idx_begin(), IE = I->idx_end(); II != IE; ++II)
-    E->intargs.push_back(*II);
+    E->int_args_push_back(*II);
   return E;
 }
 
@@ -481,7 +489,8 @@ Expression *NewGVN::createConstantExpression(Constant *C) {
 
 Expression *NewGVN::createCallExpression(CallInst *CI, MemoryAccess *HV,
                                          BasicBlock *B) {
-  CallExpression *E = new (ExpressionAllocator) CallExpression(CI, HV);
+  CallExpression *E =
+      new (ExpressionAllocator) CallExpression(CI->getNumOperands(), CI, HV);
   setBasicExpressionInfo(CI, E, B);
   return E;
 }
@@ -527,12 +536,14 @@ Value *NewGVN::lookupOperandLeader(Value *V, BasicBlock *B) {
 
 Expression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *HV,
                                          BasicBlock *B) {
-  LoadExpression *E = new (ExpressionAllocator) LoadExpression(LI, HV);
+  LoadExpression *E =
+      new (ExpressionAllocator) LoadExpression(LI->getNumOperands(), LI, HV);
+  E->allocateArgs(ExpressionAllocator);
   E->setType(LI->getType());
   // Need opcodes to match on loads and store
   E->setOpcode(0);
   Value *Operand = lookupOperandLeader(LI->getPointerOperand(), B);
-  E->VarArgs.push_back(Operand);
+  E->args_push_back(Operand);
   // TODO: Value number heap versions. We may be able to discover
   // things alias analysis can't on it's own (IE that a store and a
   // load have the same value, and thus, it isn't clobbering the load)
@@ -541,12 +552,14 @@ Expression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *HV,
 
 Expression *NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *HV,
                                           BasicBlock *B) {
-  StoreExpression *E = new (ExpressionAllocator) StoreExpression(SI, HV);
+  StoreExpression *E =
+      new (ExpressionAllocator) StoreExpression(SI->getNumOperands(), SI, HV);
+  E->allocateArgs(ExpressionAllocator);
   E->setType(SI->getType());
   // Need opcodes to match on loads and store
   E->setOpcode(0);
   Value *Operand = lookupOperandLeader(SI->getPointerOperand(), B);
-  E->VarArgs.push_back(Operand);
+  E->args_push_back(Operand);
   // TODO: Value number heap versions. We may be able to discover
   // things alias analysis can't on it's own (IE that a store and a
   // load have the same value, and thus, it isn't clobbering the load)
@@ -588,17 +601,17 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
                                                  BasicBlock *B) {
   PHIExpression *E = cast<PHIExpression>(createPHIExpression(I, B));
   E->setOpcode(I->getOpcode());
-  if (E->VarArgs.empty()) {
+  if (E->args_empty()) {
     DEBUG(dbgs() << "Simplified PHI node " << I << " to undef"
                  << "\n");
     //    delete E;
     return createVariableExpression(UndefValue::get(I->getType()));
   }
 
-  Value *AllSameValue = E->VarArgs[0];
+  Value *AllSameValue = E->Args[0];
 
-  for (unsigned i = 1, e = E->VarArgs.size(); i != e; ++i) {
-    if (E->VarArgs[i] != AllSameValue) {
+  for (unsigned i = 1, e = E->args_size(); i != e; ++i) {
+    if (E->Args[i] != AllSameValue) {
       AllSameValue = NULL;
       break;
     }

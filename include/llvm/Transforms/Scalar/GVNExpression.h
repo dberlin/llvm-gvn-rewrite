@@ -14,6 +14,9 @@
 //===----------------------------------------------------------------------===//
 #ifndef LLVM_TRANSFORMS_SCALAR_GVNEXPRESSION_H
 #define LLVM_TRANSFORMS_SCALAR_GVNEXPRESSION_H
+#include <algorithm>
+#include "llvm/Support/Allocator.h"
+
 namespace llvm {
 class MemoryAccess;
 
@@ -35,8 +38,9 @@ enum ExpressionType {
 class Expression {
 
 private:
-  void operator=(const Expression &); // Do not implement
-  Expression(const Expression &);     // Do not implement
+  void operator=(const Expression &) = delete;
+  Expression(const Expression &) = delete;
+
 protected:
   ExpressionType EType;
   unsigned int Opcode;
@@ -80,12 +84,32 @@ inline raw_ostream &operator<<(raw_ostream &OS, Expression &E) {
 
 class BasicExpression : public Expression {
 private:
-  void operator=(const BasicExpression &);  // Do not implement
-  BasicExpression(const BasicExpression &); // Do not implement
+  void operator=(const BasicExpression &) = delete;
+  BasicExpression(const BasicExpression &) = delete;
+  BasicExpression() = delete;
+
 protected:
+  unsigned int MaxArgs;
+  unsigned int NumArgs;
   Type *ValueType;
 
 public:
+  Value **Args;
+  typedef Value **arg_iterator;
+  typedef Value *const *const_arg_iterator;
+
+  inline arg_iterator args_begin() { return Args; }
+  inline arg_iterator args_end() { return Args + NumArgs; }
+  inline const_arg_iterator args_begin() const { return Args; }
+  inline const_arg_iterator args_end() const { return Args + NumArgs; }
+  inline unsigned int args_size() const { return NumArgs; }
+  inline void args_push_back(Value *Arg) {
+    assert(NumArgs < MaxArgs && "Tried to add too many args");
+    assert(Args && "Args not allocated before pushing");
+    Args[NumArgs++] = Arg;
+  }
+  inline bool args_empty() const { return args_size() == 0; }
+
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const BasicExpression *) { return true; }
   static inline bool classof(const Expression *EB) {
@@ -93,13 +117,20 @@ public:
     return et > ExpressionTypeBasicStart && et < ExpressionTypeBasicEnd;
   }
 
+  virtual void allocateArgs(BumpPtrAllocator &Allocator) {
+    assert(!Args && "Args already allocated");
+    Args = Allocator.Allocate<Value *>(MaxArgs);
+  }
+
   void setType(Type *T) { ValueType = T; }
 
   Type *getType() const { return ValueType; }
 
-  SmallVector<Value *, 4> VarArgs;
-
-  BasicExpression() : ValueType(NULL) { EType = ExpressionTypeBasic; }
+  BasicExpression(unsigned int NumArgs)
+      : BasicExpression(NumArgs, ExpressionTypeBasic) {}
+  BasicExpression(unsigned int NumArgs, ExpressionType ET)
+      : Expression(ET), MaxArgs(NumArgs), NumArgs(0), ValueType(nullptr),
+        Args(nullptr) {}
 
   virtual ~BasicExpression() {}
 
@@ -107,30 +138,33 @@ public:
     const BasicExpression &OE = cast<BasicExpression>(other);
     if (ValueType != OE.ValueType)
       return false;
-    if (VarArgs != OE.VarArgs)
+    if (NumArgs != OE.NumArgs)
       return false;
-
+    if (!std::equal(args_begin(), args_end(), OE.args_begin()))
+      return false;
     return true;
   }
   virtual void print(raw_ostream &OS) {
     OS << "{etype = " << EType << ", opcode = " << Opcode << ", VarArgs = {";
-    for (unsigned i = 0, e = VarArgs.size(); i != e; ++i) {
-      OS << "[" << i << "] = " << VarArgs[i] << "  ";
+    for (unsigned i = 0, e = args_size(); i != e; ++i) {
+      OS << "[" << i << "] = " << Args[i] << "  ";
     }
     OS << "}  }";
   }
 
   virtual hash_code getHashValue() const {
     return hash_combine(EType, Opcode, ValueType,
-                        hash_combine_range(VarArgs.begin(), VarArgs.end()));
+                        hash_combine_range(args_begin(), args_end()));
   }
 };
 class CallExpression : public BasicExpression {
 private:
-  void operator=(const CallExpression &); // Do not implement
-  CallExpression(const CallExpression &); // Do not implement
+  void operator=(const CallExpression &) = delete;
+  CallExpression(const CallExpression &) = delete;
+  CallExpression() = delete;
+
 protected:
-  CallInst *CI;
+  CallInst *Call;
   MemoryAccess *DefiningAccess;
 
 public:
@@ -139,12 +173,9 @@ public:
   static inline bool classof(const Expression *EB) {
     return EB->getExpressionType() == ExpressionTypeCall;
   }
-  CallExpression(CallInst *C, MemoryAccess *DA) {
-
-    EType = ExpressionTypeCall;
-    CI = C;
-    DefiningAccess = DA;
-  }
+  CallExpression(unsigned int NumArgs, CallInst *C, MemoryAccess *DA)
+      : BasicExpression(NumArgs, ExpressionTypeCall), Call(C),
+        DefiningAccess(DA) {}
 
   virtual ~CallExpression() {}
 
@@ -154,7 +185,9 @@ public:
     if (ValueType != OE.ValueType)
       return false;
     // Calls are unequal unless they have the same arguments
-    if (VarArgs != OE.VarArgs)
+    if (NumArgs != OE.NumArgs)
+      return false;
+    if (!std::equal(args_begin(), args_end(), OE.args_begin()))
       return false;
     if (DefiningAccess != OE.DefiningAccess)
       return false;
@@ -163,28 +196,30 @@ public:
 
   virtual hash_code getHashValue() const {
     return hash_combine(EType, Opcode, ValueType,
-                        hash_combine_range(VarArgs.begin(), VarArgs.end()));
+                        hash_combine_range(args_begin(), args_end()));
   }
 
   virtual void print(raw_ostream &OS) {
-    OS << "{etype = " << EType << ", opcode = " << Opcode << ", VarArgs = {";
-    for (unsigned i = 0, e = VarArgs.size(); i != e; ++i) {
-      OS << "[" << i << "] = " << VarArgs[i] << "  ";
+    OS << "{etype = " << EType << ", opcode = " << Opcode << ", Args = {";
+    for (unsigned i = 0, e = args_size(); i != e; ++i) {
+      OS << "[" << i << "] = " << Args[i] << "  ";
     }
     OS << "}";
-    OS << " represents call at " << CI << "}";
+    OS << " represents call at " << Call << "}";
   }
 };
 class LoadExpression : public BasicExpression {
 private:
-  void operator=(const LoadExpression &); // Do not implement
-  LoadExpression(const LoadExpression &); // Do not implement
+  void operator=(const LoadExpression &) = delete;
+  LoadExpression(const LoadExpression &) = delete;
+  LoadExpression() = delete;
+
 protected:
-  LoadInst *LI;
+  LoadInst *Load;
   MemoryAccess *DefiningAccess;
 
 public:
-  LoadInst *getLoadInst() const { return LI; }
+  LoadInst *getLoadInst() const { return Load; }
 
   MemoryAccess *getDefiningAccess() const { return DefiningAccess; }
 
@@ -194,18 +229,19 @@ public:
     return EB->getExpressionType() == ExpressionTypeLoad;
   }
 
-  LoadExpression(LoadInst *L, MemoryAccess *DA) {
-    EType = ExpressionTypeLoad;
-    LI = L;
-    DefiningAccess = DA;
-  }
+  LoadExpression(unsigned int NumArgs, LoadInst *L, MemoryAccess *DA)
+      : BasicExpression(NumArgs, ExpressionTypeLoad), Load(L),
+        DefiningAccess(DA) {}
 
   virtual ~LoadExpression() {}
 
   virtual bool equals(const Expression &other) const {
     const LoadExpression &OE = cast<LoadExpression>(other);
-    if (VarArgs != OE.VarArgs)
+    if (NumArgs != OE.NumArgs)
       return false;
+    if (!std::equal(args_begin(), args_end(), OE.args_begin()))
+      return false;
+
     if (DefiningAccess != OE.DefiningAccess)
       return false;
     return true;
@@ -213,20 +249,22 @@ public:
 
   virtual hash_code getHashValue() const {
     return hash_combine(EType, Opcode, DefiningAccess,
-                        hash_combine_range(VarArgs.begin(), VarArgs.end()));
+                        hash_combine_range(args_begin(), args_end()));
   }
 };
 
 class StoreExpression : public BasicExpression {
 private:
-  void operator=(const StoreExpression &);  // Do not implement
-  StoreExpression(const StoreExpression &); // Do not implement
+  void operator=(const StoreExpression &) = delete;
+  StoreExpression(const StoreExpression &) = delete;
+  StoreExpression() = delete;
+
 protected:
-  StoreInst *SI;
+  StoreInst *Store;
   MemoryAccess *DefiningAccess;
 
 public:
-  StoreInst *getStoreInst() const { return SI; }
+  StoreInst *getStoreInst() const { return Store; }
   MemoryAccess *getDefiningAccess() const { return DefiningAccess; }
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -234,17 +272,17 @@ public:
   static inline bool classof(const Expression *EB) {
     return EB->getExpressionType() == ExpressionTypeStore;
   }
-  StoreExpression(StoreInst *S, MemoryAccess *DA) {
-    EType = ExpressionTypeStore;
-    SI = S;
-    DefiningAccess = DA;
-  }
+  StoreExpression(unsigned int NumArgs, StoreInst *S, MemoryAccess *DA)
+      : BasicExpression(NumArgs, ExpressionTypeStore), Store(S),
+        DefiningAccess(DA) {}
 
   virtual ~StoreExpression() {}
 
   virtual bool equals(const Expression &other) const {
     const StoreExpression &OE = cast<StoreExpression>(other);
-    if (VarArgs != OE.VarArgs)
+    if (NumArgs != OE.NumArgs)
+      return false;
+    if (!std::equal(args_begin(), args_end(), OE.args_begin()))
       return false;
     if (DefiningAccess != OE.DefiningAccess)
       return false;
@@ -253,34 +291,65 @@ public:
 
   virtual hash_code getHashValue() const {
     return hash_combine(EType, Opcode, DefiningAccess,
-                        hash_combine_range(VarArgs.begin(), VarArgs.end()));
+                        hash_combine_range(args_begin(), args_end()));
   }
 };
 
 class InsertValueExpression : public BasicExpression {
 private:
-  void operator=(const InsertValueExpression &);        // Do not implement
-  InsertValueExpression(const InsertValueExpression &); // Do not implement
+  void operator=(const InsertValueExpression &) = delete;
+  InsertValueExpression(const InsertValueExpression &) = delete;
+  InsertValueExpression() = delete;
+
+  unsigned int MaxIntArgs;
+  unsigned int NumIntArgs;
+  unsigned int *IntArgs;
+
 public:
+  typedef unsigned int *int_arg_iterator;
+  typedef const unsigned int *const_int_arg_iterator;
+
+  inline int_arg_iterator int_args_begin() { return IntArgs; }
+  inline int_arg_iterator int_args_end() { return IntArgs + NumIntArgs; }
+  inline const_int_arg_iterator int_args_begin() const { return IntArgs; }
+  inline const_int_arg_iterator int_args_end() const {
+    return IntArgs + NumIntArgs;
+  }
+  inline unsigned int int_args_size() const { return NumIntArgs; }
+  inline bool int_args_empty() const { return NumIntArgs == 0; }
+  inline void int_args_push_back(unsigned int IntArg) {
+    assert(NumIntArgs < MaxIntArgs && "Tried to add too many int args");
+    assert(IntArgs && "Args not allocated before pushing");
+    IntArgs[NumIntArgs++] = IntArg;
+  }
+
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const InsertValueExpression *) { return true; }
   static inline bool classof(const Expression *EB) {
     return EB->getExpressionType() == ExpressionTypeInsertValue;
   }
 
-  SmallVector<unsigned int, 4> intargs;
-
-  InsertValueExpression() { EType = ExpressionTypeInsertValue; }
+  InsertValueExpression(unsigned int NumArgs, unsigned int NumIntArgs)
+      : BasicExpression(NumArgs, ExpressionTypeInsertValue),
+        MaxIntArgs(NumIntArgs), NumIntArgs(0), IntArgs(nullptr) {}
 
   virtual ~InsertValueExpression() {}
+  virtual void allocateArgs(BumpPtrAllocator &Allocator) {
+    assert(!IntArgs && "Args already allocated");
+    IntArgs = Allocator.Allocate<unsigned int>(MaxIntArgs);
+  }
 
   virtual bool equals(const Expression &other) const {
     const InsertValueExpression &OE = cast<InsertValueExpression>(other);
     if (ValueType != OE.ValueType)
       return false;
-    if (VarArgs != OE.VarArgs)
+    if (NumArgs != OE.NumArgs)
       return false;
-    if (intargs != OE.intargs)
+    if (NumIntArgs != OE.NumIntArgs)
+      return false;
+    if (!std::equal(args_begin(), args_end(), OE.args_begin()))
+      return false;
+    if (!std::equal(int_args_begin(), int_args_end(), OE.int_args_begin()))
       return false;
 
     return true;
@@ -288,17 +357,17 @@ public:
 
   virtual hash_code getHashValue() const {
     return hash_combine(EType, Opcode, ValueType,
-                        hash_combine_range(VarArgs.begin(), VarArgs.end()),
-                        hash_combine_range(intargs.begin(), intargs.end()));
+                        hash_combine_range(args_begin(), args_end()),
+                        hash_combine_range(int_args_begin(), int_args_end()));
   }
   virtual void print(raw_ostream &OS) {
-    OS << "{etype = " << EType << ", opcode = " << Opcode << ", VarArgs = {";
-    for (unsigned i = 0, e = VarArgs.size(); i != e; ++i) {
-      OS << "[" << i << "] = " << VarArgs[i] << "  ";
+    OS << "{etype = " << EType << ", opcode = " << Opcode << ", Args = {";
+    for (unsigned i = 0, e = args_size(); i != e; ++i) {
+      OS << "[" << i << "] = " << Args[i] << "  ";
     }
     OS << "}, intargs = {";
-    for (unsigned i = 0, e = intargs.size(); i != e; ++i) {
-      OS << "[" << i << "] = " << intargs[i] << "  ";
+    for (unsigned i = 0, e = int_args_size(); i != e; ++i) {
+      OS << "[" << i << "] = " << IntArgs[i] << "  ";
     }
     OS << "}  }";
   }
@@ -321,31 +390,34 @@ public:
       return false;
     if (ValueType != OE.ValueType)
       return false;
-    if (VarArgs != OE.VarArgs)
+    if (NumArgs != OE.NumArgs)
+      return false;
+    if (!std::equal(args_begin(), args_end(), OE.args_begin()))
       return false;
     return true;
   }
 
-  PHIExpression() : BB(NULL) { EType = ExpressionTypePhi; }
+  PHIExpression(unsigned int NumArgs, BasicBlock *B)
+      : BasicExpression(NumArgs, ExpressionTypePhi), BB(B) {}
 
-  PHIExpression(BasicBlock *bb) : BB(bb) { EType = ExpressionTypePhi; }
   virtual ~PHIExpression() {}
 
   virtual hash_code getHashValue() const {
     return hash_combine(EType, BB, Opcode, ValueType,
-                        hash_combine_range(VarArgs.begin(), VarArgs.end()));
+                        hash_combine_range(args_begin(), args_end()));
   }
   virtual void print(raw_ostream &OS) {
-    OS << "{etype = " << EType << ", opcode = " << Opcode << ", VarArgs = {";
-    for (unsigned i = 0, e = VarArgs.size(); i != e; ++i) {
-      OS << "[" << i << "] = " << VarArgs[i] << "  ";
+    OS << "{etype = " << EType << ", opcode = " << Opcode << ", Args = {";
+    for (unsigned i = 0, e = args_size(); i != e; ++i) {
+      OS << "[" << i << "] = " << Args[i] << "  ";
     }
     OS << "}, bb = " << BB << "  }";
   }
 
 private:
-  void operator=(const PHIExpression &); // Do not implement
-  PHIExpression(const PHIExpression &);  // Do not implement
+  void operator=(const PHIExpression &) = delete;
+  PHIExpression(const PHIExpression &) = delete;
+  PHIExpression() = delete;
   BasicBlock *BB;
 };
 class VariableExpression : public Expression {
@@ -365,11 +437,8 @@ public:
     return true;
   }
 
-  VariableExpression()
-      : Expression(ExpressionTypeVariable), VariableValue(NULL) {}
-
-  VariableExpression(Value *variableValue)
-      : Expression(ExpressionTypeVariable), VariableValue(variableValue) {}
+  VariableExpression(Value *V)
+      : Expression(ExpressionTypeVariable), VariableValue(V) {}
   virtual hash_code getHashValue() const {
     return hash_combine(EType, VariableValue->getType(), VariableValue);
   }
@@ -380,8 +449,9 @@ public:
   }
 
 private:
-  void operator=(const VariableExpression &);     // Do not implement
-  VariableExpression(const VariableExpression &); // Do not implement
+  void operator=(const VariableExpression &) = delete;
+  VariableExpression(const VariableExpression &) = delete;
+  VariableExpression() = delete;
 
   Value *VariableValue;
 };
@@ -412,8 +482,8 @@ public:
   }
 
 private:
-  void operator=(const ConstantExpression &);     // Do not implement
-  ConstantExpression(const ConstantExpression &); // Do not implement
+  void operator=(const ConstantExpression &) = delete;
+  ConstantExpression(const ConstantExpression &) = delete;
 
   Constant *ConstantValue;
 };
