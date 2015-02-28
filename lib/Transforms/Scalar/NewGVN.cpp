@@ -166,7 +166,7 @@ class NewGVN : public FunctionPass {
   // occurring as often.
   ExpressionClassMap MemoryExpressionToClass;
   DenseSet<Expression *, ComparingExpressionInfo> UniquedExpressions;
-  DenseSet<Value *> ChangedValues;
+  SmallPtrSet<Value *, 8> ChangedValues;
   DenseSet<std::pair<BasicBlock *, BasicBlock *>> ReachableEdges;
   DenseSet<BasicBlock *> ReachableBlocks;
   SmallPtrSet<Instruction *, 8> TouchedInstructions;
@@ -399,7 +399,7 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
       Predicate = CmpInst::getSwappedPredicate(Predicate);
     }
     E->setOpcode((CI->getOpcode() << 8) | Predicate);
-    // TODO: 10% of our time is spent in SimplifyCmpInst with pointer operands
+    // TODO: 25% of our time is spent in SimplifyCmpInst with pointer operands
     // TODO: Since we noop bitcasts, we may need to check types before
     // simplifying, so that we don't end up simplifying based on a wrong
     // type assumption. We should clean this up so we can use constants of the
@@ -990,14 +990,11 @@ void NewGVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
       assert(!EClass->dead && "We accidentally looked up a dead class");
     }
   }
-  auto DI = ChangedValues.find(V);
-  bool WasInChanged = DI != ChangedValues.end();
+  bool WasInChanged = ChangedValues.erase(V);
   if (VClass != EClass || WasInChanged) {
     DEBUG(dbgs() << "Found class " << EClass->id << " for expression " << E
                  << "\n");
 
-    if (WasInChanged)
-      ChangedValues.erase(DI);
     if (VClass != EClass) {
       DEBUG(dbgs() << "New congruence class for " << V << " is " << EClass->id
                    << "\n");
