@@ -323,8 +323,8 @@ void MemorySSA::computeBBNumbers(Function &F,
                                  DenseMap<BasicBlock *, unsigned> &BBNumbers) {
   // Assign unique ids to basic blocks
   unsigned ID = 0;
-  for (auto I = F.begin(), E = F.end(); I != E; ++I)
-    BBNumbers[I] = ID++;
+  for (auto &I : F)
+    BBNumbers[&I] = ID++;
 }
 
 // This is the same algorithm as PromoteMemoryToRegister's phi
@@ -401,7 +401,7 @@ void MemorySSA::determineInsertionPoint(
           PQ.push(std::make_pair(SuccNode, SuccLevel));
       }
 
-      for (auto C : *Node)
+      for (auto &C : *Node)
         if (!Visited.count(C))
           Worklist.push_back(C);
     }
@@ -455,7 +455,7 @@ NextIteration:
   // Skip if the list is empty, but we still have to pass thru the
   // incoming value info/etc to successors
   if (Accesses)
-    for (auto L : *Accesses) {
+    for (auto &L : *Accesses) {
       if (isa<MemoryPhi>(L))
         continue;
 
@@ -575,12 +575,12 @@ void MemorySSA::addUseToMap(UseMap &Uses, MemoryAccess *User,
 
 // Build the actual use lists out of the use map
 void MemorySSA::addUses(UseMap &Uses) {
-  for (auto D : Uses) {
+  for (auto &D : Uses) {
     std::list<MemoryAccess *> *UseList = D.second;
     MemoryAccess *User = D.first;
     User->UseList =
         MemoryAccessAllocator.Allocate<MemoryAccess *>(UseList->size());
-    for (auto U : *UseList)
+    for (auto &U : *UseList)
       User->addUse(U);
   }
 }
@@ -602,19 +602,19 @@ void MemorySSA::buildMemorySSA(Function &F) {
   SmallPtrSet<BasicBlock *, 32> DefiningBlocks;
   SmallVector<BasicBlock *, 32> UsingBlocks;
 
-  for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
+  for (auto &B : F) {
     std::list<MemoryAccess *> *Accesses = nullptr;
-    for (auto BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
+    for (auto &I : B) {
       bool use = false;
       bool def = false;
-      if (isa<LoadInst>(BI)) {
+      if (isa<LoadInst>(&I)) {
         use = true;
         def = false;
-      } else if (isa<StoreInst>(BI)) {
+      } else if (isa<StoreInst>(&I)) {
         use = false;
         def = true;
       } else {
-        AliasAnalysis::ModRefResult ModRef = AA->getModRefInfo(BI);
+        AliasAnalysis::ModRefResult ModRef = AA->getModRefInfo(&I);
         if (ModRef & AliasAnalysis::Mod)
           def = true;
         if (ModRef & AliasAnalysis::Ref)
@@ -623,24 +623,22 @@ void MemorySSA::buildMemorySSA(Function &F) {
 
       // Defs are already uses, so use && def == def
       if (use && !def) {
-        MemoryUse *MU =
-            new (MemoryAccessAllocator) MemoryUse(nullptr, &*BI, FI);
-        InstructionToMemoryAccess.insert(std::make_pair(&*BI, MU));
-        UsingBlocks.push_back(FI);
+        MemoryUse *MU = new (MemoryAccessAllocator) MemoryUse(nullptr, &I, &B);
+        InstructionToMemoryAccess.insert(std::make_pair(&I, MU));
+        UsingBlocks.push_back(&B);
         if (!Accesses) {
           Accesses = new std::list<MemoryAccess *>;
-          PerBlockAccesses.insert(std::make_pair(FI, Accesses));
+          PerBlockAccesses.insert(std::make_pair(&B, Accesses));
         }
         Accesses->push_back(MU);
       }
       if (def) {
-        MemoryDef *MD =
-            new (MemoryAccessAllocator) MemoryDef(nullptr, &*BI, FI);
-        InstructionToMemoryAccess.insert(std::make_pair(&*BI, MD));
-        DefiningBlocks.insert(FI);
+        MemoryDef *MD = new (MemoryAccessAllocator) MemoryDef(nullptr, &I, &B);
+        InstructionToMemoryAccess.insert(std::make_pair(&I, MD));
+        DefiningBlocks.insert(&B);
         if (!Accesses) {
           Accesses = new std::list<MemoryAccess *>;
-          PerBlockAccesses.insert(std::make_pair(FI, Accesses));
+          PerBlockAccesses.insert(std::make_pair(&B, Accesses));
         }
         Accesses->push_back(MD);
       }
@@ -679,11 +677,9 @@ void MemorySSA::buildMemorySSA(Function &F) {
   // At this point, we may have unreachable blocks with unreachable accesses
   // Given any uses in unreachable blocks the live on entry definition
   if (Visited.size() != F.size()) {
-    for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
-      if (!Visited.count(FI)) {
-        markUnreachableAsLiveOnEntry(PerBlockAccesses, FI, Uses);
-      }
-    }
+    for (auto &B : F)
+      if (!Visited.count(&B))
+        markUnreachableAsLiveOnEntry(PerBlockAccesses, &B, Uses);
   }
 
   // Now convert our use lists into real uses
@@ -692,13 +688,13 @@ void MemorySSA::buildMemorySSA(Function &F) {
   DEBUG(verifyDefUses(F));
 
   // Delete our access lists
-  for (auto D : PerBlockAccesses)
+  for (auto &D : PerBlockAccesses)
     delete D.second;
 
   // Densemap does not like when you delete or change the value during
   // iteration.
   std::vector<std::list<MemoryAccess *> *> UseListsToDelete;
-  for (auto D : Uses)
+  for (auto &D : Uses)
     UseListsToDelete.push_back(D.second);
 
   Uses.clear();
@@ -731,9 +727,9 @@ void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
 // appropriate def's use list
 
 void MemorySSA::verifyDefUses(Function &F) {
-  for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
+  for (auto &B : F) {
     // Phi nodes are attached to basic blocks
-    MemoryAccess *MA = getMemoryAccess(FI);
+    MemoryAccess *MA = getMemoryAccess(&B);
     if (MA) {
       assert(isa<MemoryPhi>(MA) &&
              "Something other than phi node on basic block");
@@ -741,8 +737,8 @@ void MemorySSA::verifyDefUses(Function &F) {
       for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i)
         verifyUseInDefs(MP->getIncomingValue(i), MP);
     }
-    for (auto BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
-      MA = getMemoryAccess(BI);
+    for (auto &I : B) {
+      MA = getMemoryAccess(&I);
       if (MA) {
         if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
           verifyUseInDefs(MU->getDefiningAccess(), MU);
