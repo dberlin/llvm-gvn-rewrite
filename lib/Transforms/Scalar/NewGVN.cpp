@@ -568,7 +568,8 @@ Expression *NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *HV,
 Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
                                                    BasicBlock *B) {
   StoreInst *SI = cast<StoreInst>(I);
-  Expression *E = createStoreExpression(SI, MSSA->getMemoryAccess(SI), B);
+  Expression *E =
+      createStoreExpression(SI, MSSA->getClobberingMemoryAccess(SI), B);
   return E;
 }
 
@@ -590,7 +591,7 @@ Expression *NewGVN::performSymbolicCallEvaluation(Instruction *I,
   if (AA->doesNotAccessMemory(CI))
     return createCallExpression(CI, nullptr, B);
   else if (AA->onlyReadsMemory(CI))
-    return createCallExpression(CI, MSSA->getMemoryAccess(CI), B);
+    return createCallExpression(CI, MSSA->getClobberingMemoryAccess(CI), B);
   else
     return nullptr;
 }
