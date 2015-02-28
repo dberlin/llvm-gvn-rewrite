@@ -335,6 +335,7 @@ public:
 
   virtual ~InsertValueExpression() {}
   virtual void allocateArgs(BumpPtrAllocator &Allocator) {
+    BasicExpression::allocateArgs(Allocator);
     assert(!IntArgs && "Args already allocated");
     IntArgs = Allocator.Allocate<unsigned int>(MaxIntArgs);
   }
