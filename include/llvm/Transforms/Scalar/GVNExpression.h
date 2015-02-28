@@ -131,7 +131,7 @@ private:
   CallExpression(const CallExpression &); // Do not implement
 protected:
   CallInst *CI;
-  MemoryAccess *HeapVersion;
+  MemoryAccess *DefiningAccess;
 
 public:
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -139,11 +139,11 @@ public:
   static inline bool classof(const Expression *EB) {
     return EB->getExpressionType() == ExpressionTypeCall;
   }
-  CallExpression(CallInst *C, MemoryAccess *HV) {
+  CallExpression(CallInst *C, MemoryAccess *DA) {
 
     EType = ExpressionTypeCall;
     CI = C;
-    HeapVersion = HV;
+    DefiningAccess = DA;
   }
 
   virtual ~CallExpression() {}
@@ -156,7 +156,7 @@ public:
     // Calls are unequal unless they have the same arguments
     if (VarArgs != OE.VarArgs)
       return false;
-    if (HeapVersion != OE.HeapVersion)
+    if (DefiningAccess != OE.DefiningAccess)
       return false;
     return true;
   }
@@ -181,12 +181,12 @@ private:
   LoadExpression(const LoadExpression &); // Do not implement
 protected:
   LoadInst *LI;
-  MemoryAccess *HeapVersion;
+  MemoryAccess *DefiningAccess;
 
 public:
   LoadInst *getLoadInst() const { return LI; }
 
-  MemoryAccess *getHeapVersion() const { return HeapVersion; }
+  MemoryAccess *getDefiningAccess() const { return DefiningAccess; }
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const LoadExpression *) { return true; }
@@ -194,10 +194,10 @@ public:
     return EB->getExpressionType() == ExpressionTypeLoad;
   }
 
-  LoadExpression(LoadInst *L, MemoryAccess *HV) {
+  LoadExpression(LoadInst *L, MemoryAccess *DA) {
     EType = ExpressionTypeLoad;
     LI = L;
-    HeapVersion = HV;
+    DefiningAccess = DA;
   }
 
   virtual ~LoadExpression() {}
@@ -206,13 +206,13 @@ public:
     const LoadExpression &OE = cast<LoadExpression>(other);
     if (VarArgs != OE.VarArgs)
       return false;
-    if (HeapVersion != OE.HeapVersion)
+    if (DefiningAccess != OE.DefiningAccess)
       return false;
     return true;
   }
 
   virtual hash_code getHashValue() const {
-    return hash_combine(EType, Opcode, HeapVersion,
+    return hash_combine(EType, Opcode, DefiningAccess,
                         hash_combine_range(VarArgs.begin(), VarArgs.end()));
   }
 };
@@ -223,21 +223,21 @@ private:
   StoreExpression(const StoreExpression &); // Do not implement
 protected:
   StoreInst *SI;
-  MemoryAccess *HeapVersion;
+  MemoryAccess *DefiningAccess;
 
 public:
   StoreInst *getStoreInst() const { return SI; }
-  MemoryAccess *getHeapVersion() const { return HeapVersion; }
+  MemoryAccess *getDefiningAccess() const { return DefiningAccess; }
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const StoreExpression *) { return true; }
   static inline bool classof(const Expression *EB) {
     return EB->getExpressionType() == ExpressionTypeStore;
   }
-  StoreExpression(StoreInst *S, MemoryAccess *HV) {
+  StoreExpression(StoreInst *S, MemoryAccess *DA) {
     EType = ExpressionTypeStore;
     SI = S;
-    HeapVersion = HV;
+    DefiningAccess = DA;
   }
 
   virtual ~StoreExpression() {}
@@ -246,13 +246,13 @@ public:
     const StoreExpression &OE = cast<StoreExpression>(other);
     if (VarArgs != OE.VarArgs)
       return false;
-    if (HeapVersion != OE.HeapVersion)
+    if (DefiningAccess != OE.DefiningAccess)
       return false;
     return true;
   }
 
   virtual hash_code getHashValue() const {
-    return hash_combine(EType, Opcode, HeapVersion,
+    return hash_combine(EType, Opcode, DefiningAccess,
                         hash_combine_range(VarArgs.begin(), VarArgs.end()));
   }
 };

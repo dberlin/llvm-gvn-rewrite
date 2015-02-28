@@ -564,8 +564,8 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
   LoadInst *LI = cast<LoadInst>(I);
   if (!LI->isSimple())
     return NULL;
-  MemoryAccess *HeapVersion = MSSA->getClobberingMemoryAccess(I);
-  Expression *E = createLoadExpression(LI, HeapVersion, B);
+  MemoryAccess *DefiningAccess = MSSA->getClobberingMemoryAccess(I);
+  Expression *E = createLoadExpression(LI, DefiningAccess, B);
   return E;
 }
 
@@ -577,7 +577,7 @@ Expression *NewGVN::performSymbolicCallEvaluation(Instruction *I,
   if (AA->doesNotAccessMemory(CI))
     return createCallExpression(CI, nullptr, B);
   else if (AA->onlyReadsMemory(CI))
-    return createCallExpression(CI, MSSA->getClobberingMemoryAccess(CI), B);
+    return createCallExpression(CI, MSSA->getMemoryAccess(CI), B);
   else
     return nullptr;
 }
