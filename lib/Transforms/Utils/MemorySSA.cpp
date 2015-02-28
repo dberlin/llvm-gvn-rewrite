@@ -80,31 +80,6 @@ public:
   }
 };
 
-namespace {
-
-// This is mostly ripped from MemoryDependenceAnalysis, updated to
-// handle call instructions properly
-
-AliasAnalysis::Location getLocationForAA(AliasAnalysis *AA, Instruction *Inst) {
-  if (auto *I = dyn_cast<LoadInst>(Inst))
-    return AA->getLocation(I);
-  else if (auto *I = dyn_cast<StoreInst>(Inst))
-    return AA->getLocation(I);
-  else if (auto *I = dyn_cast<VAArgInst>(Inst))
-    return AA->getLocation(I);
-  else if (auto *I = dyn_cast<AtomicCmpXchgInst>(Inst))
-    return AA->getLocation(I);
-  else if (auto *I = dyn_cast<AtomicRMWInst>(Inst))
-    return AA->getLocation(I);
-  else if (auto *I = dyn_cast<CallInst>(Inst))
-    return AliasAnalysis::Location(I);
-  else if (auto *I = dyn_cast<InvokeInst>(Inst))
-    return AliasAnalysis::Location(I);
-  else
-    llvm_unreachable("unsupported memory instruction");
-}
-}
-
 bool MemorySSA::isLiveOnEntryDef(const MemoryAccess *MA) const {
   return MA == LiveOnEntryDef;
 }
@@ -118,8 +93,8 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
   bool HitVisited = false;
 
   ++NumClobberCacheLookups;
-  auto CCV = CachedClobberingVersion.find(std::make_pair(P, Loc));
-  if (CCV != CachedClobberingVersion.end()) {
+  auto CCV = CachedClobberingAccess.find(std::make_pair(P, Loc));
+  if (CCV != CachedClobberingAccess.end()) {
     ++NumClobberCacheHits;
     DEBUG(dbgs() << "Cached Memory SSA pointer for " << (uintptr_t)P << " is ");
     DEBUG(dbgs() << (uintptr_t)CCV->second);
@@ -129,7 +104,7 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
 
   // The algorithm here is fairly simple. The goal is to prove that
   // the phi node doesn't matter for this alias location, and to get
-  // to whatever version occurs before the *split* point that caused
+  // to whatever Access occurs before the *split* point that caused
   // the phi node.
   // There are only two cases we can walk through:
   // 1. One argument dominates the other, and the other's argument
@@ -186,8 +161,7 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
     }
   }
   // Cache our result
-  CachedClobberingVersion.insert(
-      std::make_pair(std::make_pair(P, Loc), Result));
+  CachedClobberingAccess.insert(std::make_pair(std::make_pair(P, Loc), Result));
 
   return std::make_pair(Result, HitVisited);
 }
@@ -199,21 +173,21 @@ std::pair<MemoryAccess *, bool>
 MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
                                      const AliasAnalysis::Location &Loc,
                                      SmallPtrSet<MemoryAccess *, 32> &Visited) {
-  MemoryAccess *CurrVersion = MA;
+  MemoryAccess *CurrAccess = MA;
   while (true) {
     // If we started with a heap use, walk to the def
-    if (MemoryUse *MU = dyn_cast<MemoryUse>(CurrVersion))
-      CurrVersion = MU->getDefiningAccess();
+    if (MemoryUse *MU = dyn_cast<MemoryUse>(CurrAccess))
+      CurrAccess = MU->getDefiningAccess();
 
     // Should be either a Memory Def or a Phi node at this point
-    if (MemoryPhi *P = dyn_cast<MemoryPhi>(CurrVersion))
+    if (MemoryPhi *P = dyn_cast<MemoryPhi>(CurrAccess))
       return getClobberingMemoryAccess(P, Loc, Visited);
     else {
-      MemoryDef *MD = dyn_cast<MemoryDef>(CurrVersion);
+      MemoryDef *MD = dyn_cast<MemoryDef>(CurrAccess);
       assert(MD && "Use linked to something that is not a def");
       // If we hit the top, stop
       if (isLiveOnEntryDef(MD))
-        return std::make_pair(CurrVersion, false);
+        return std::make_pair(CurrAccess, false);
       Instruction *DefMemoryInst = MD->getMemoryInst();
       assert(DefMemoryInst &&
              "Defining instruction not actually an instruction");
@@ -221,8 +195,8 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
       // were to track every thing we saw along the way, since we don't
       // know where we will stop.
       ++NumClobberCacheLookups;
-      auto CCV = CachedClobberingVersion.find(std::make_pair(CurrVersion, Loc));
-      if (CCV != CachedClobberingVersion.end()) {
+      auto CCV = CachedClobberingAccess.find(std::make_pair(CurrAccess, Loc));
+      if (CCV != CachedClobberingAccess.end()) {
         ++NumClobberCacheHits;
         DEBUG(dbgs() << "Cached Memory SSA pointer for " << *DefMemoryInst
                      << " is ");
@@ -232,18 +206,16 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
       }
 
       if (AA->getModRefInfo(DefMemoryInst, Loc) & AliasAnalysis::Mod)
-	break;
-
+        break;
     }
 
-    MemoryAccess *NextVersion =
-        cast<MemoryDef>(CurrVersion)->getDefiningAccess();
+    MemoryAccess *NextAccess = cast<MemoryDef>(CurrAccess)->getDefiningAccess();
     // Walk from def to def
-    CurrVersion = NextVersion;
+    CurrAccess = NextAccess;
   }
-  CachedClobberingVersion.insert(
-      std::make_pair(std::make_pair(MA, Loc), CurrVersion));
-  return std::make_pair(CurrVersion, false);
+  CachedClobberingAccess.insert(
+      std::make_pair(std::make_pair(MA, Loc), CurrAccess));
+  return std::make_pair(CurrAccess, false);
 }
 
 // For a given instruction, walk backwards using Memory SSA and find
@@ -251,37 +223,41 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
 // ones along the way
 MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
 
-  // First extract our location, then start walking until it is clobbered
-  const AliasAnalysis::Location Loc = getLocationForAA(AA, I);
-  MemoryAccess *StartingVersion = getMemoryAccess(I);
-  ++NumClobberCacheLookups;
-  auto CCV = CachedClobberingVersion.find(std::make_pair(StartingVersion, Loc));
+  MemoryAccess *StartingAccess = getMemoryAccess(I);
+  assert(isa<MemoryUse>(StartingAccess) &&
+         "Can only ask for clobbering accesses for a use");
 
-  if (CCV != CachedClobberingVersion.end()) {
+  // First extract our location, then start walking until it is clobbered
+  const AliasAnalysis::Location Loc = AA->getLocation(I);
+
+  ++NumClobberCacheLookups;
+  auto CCV = CachedClobberingAccess.find(std::make_pair(StartingAccess, Loc));
+
+  if (CCV != CachedClobberingAccess.end()) {
     ++NumClobberCacheHits;
-    DEBUG(dbgs() << "Cached Memory SSA version for " << (uintptr_t)I << " is ");
+    DEBUG(dbgs() << "Cached Memory SSA Access for " << (uintptr_t)I << " is ");
     DEBUG(dbgs() << (uintptr_t)CCV->second);
     DEBUG(dbgs() << "\n");
     return CCV->second;
   }
 
   SmallPtrSet<MemoryAccess *, 32> Visited;
-  MemoryAccess *FinalVersion =
-      getClobberingMemoryAccess(StartingVersion, Loc, Visited).first;
+  MemoryAccess *FinalAccess =
+      getClobberingMemoryAccess(StartingAccess, Loc, Visited).first;
 
-  CachedClobberingVersion.insert(
-      std::make_pair(std::make_pair(StartingVersion, Loc), FinalVersion));
+  CachedClobberingAccess.insert(
+      std::make_pair(std::make_pair(StartingAccess, Loc), FinalAccess));
   DEBUG(dbgs() << "Starting Memory SSA clobber for " << (uintptr_t)I << " is ");
-  DEBUG(dbgs() << (uintptr_t)StartingVersion);
+  DEBUG(dbgs() << (uintptr_t)StartingAccess);
   DEBUG(dbgs() << "\n");
   DEBUG(dbgs() << "Final Memory SSA clobber for " << (uintptr_t)I << " is ");
-  DEBUG(dbgs() << (uintptr_t)FinalVersion);
+  DEBUG(dbgs() << (uintptr_t)FinalAccess);
   DEBUG(dbgs() << "\n");
 
-  return FinalVersion;
+  return FinalAccess;
 }
 
-// This is the same as PromoteMemoryToRegister's version.  The goal is
+// This is the same as PromoteMemoryToRegister's Access.  The goal is
 // to compute blocks in which a memory-access is Live-In.
 
 void MemorySSA::computeLiveInBlocks(
@@ -479,7 +455,7 @@ NextIteration:
   // Skip if the list is empty, but we still have to pass thru the
   // incoming value info/etc to successors
   if (Accesses)
-    for (auto L: *Accesses) {
+    for (auto L : *Accesses) {
       if (isa<MemoryPhi>(L))
         continue;
 
@@ -541,7 +517,7 @@ void MemorySSA::computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels) {
 void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
                                              BasicBlock *BB, UseMap &Uses) {
   assert(!DT->isReachableFromEntry(BB) &&
-	 "Reachable block found while handling unreachable blocks");
+         "Reachable block found while handling unreachable blocks");
 
   auto Accesses = BlockAccesses.lookup(BB);
   if (!Accesses)
@@ -574,7 +550,7 @@ MemorySSA::MemorySSA() : FunctionPass(ID), LiveOnEntryDef(nullptr) {
 MemorySSA::~MemorySSA() {}
 
 void MemorySSA::releaseMemory() {
-  CachedClobberingVersion.clear();
+  CachedClobberingAccess.clear();
   InstructionToMemoryAccess.clear();
   MemoryAccessAllocator.Reset();
 }
@@ -604,7 +580,7 @@ void MemorySSA::addUses(UseMap &Uses) {
     MemoryAccess *User = D.first;
     User->UseList =
         MemoryAccessAllocator.Allocate<MemoryAccess *>(UseList->size());
-    for (auto U: *UseList)
+    for (auto U : *UseList)
       User->addUse(U);
   }
 }
@@ -722,7 +698,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
   // Densemap does not like when you delete or change the value during
   // iteration.
   std::vector<std::list<MemoryAccess *> *> UseListsToDelete;
-  for (auto D: Uses)
+  for (auto D : Uses)
     UseListsToDelete.push_back(D.second);
 
   Uses.clear();

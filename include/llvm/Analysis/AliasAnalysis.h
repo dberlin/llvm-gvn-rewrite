@@ -136,6 +136,21 @@ public:
     }
   };
 
+  Location getLocation(Instruction *Inst) {
+    if (auto *I = dyn_cast<LoadInst>(Inst))
+      return getLocation(I);
+    else if (auto *I = dyn_cast<StoreInst>(Inst))
+      return getLocation(I);
+    else if (auto *I = dyn_cast<VAArgInst>(Inst))
+      return getLocation(I);
+    else if (auto *I = dyn_cast<AtomicCmpXchgInst>(Inst))
+      return getLocation(I);
+    else if (auto *I = dyn_cast<AtomicRMWInst>(Inst))
+      return getLocation(I);
+    else
+      llvm_unreachable("unsupported memory instruction");
+  }
+
   /// getLocation - Fill in Loc with information about the memory reference by
   /// the given instruction.
   Location getLocation(const LoadInst *LI);
