@@ -1564,13 +1564,24 @@ bool NewGVN::eliminateInstructions(Function &F) {
   // When we find something not dominated, it becomes the new leader
   // for elimination purposes
 
-  // TODO: Replace phi argument's unreachable blocks with undef
+  for (auto &B : F) {
+    if (!ReachableBlocks.count(&B)) {
+      for (auto S : successors(&B)) {
+        for (auto II = S->begin(); isa<PHINode>(II); ++II) {
+          PHINode &Phi = cast<PHINode>(*II);
+          DEBUG(dbgs() << "Replacing incoming value of " << *II << " for block "
+                       << getBlockName(&B)
+                       << " with undef due to it being unreachable\n");
+          Phi.setIncomingValue(Phi.getBasicBlockIndex(&B),
+                               UndefValue::get(Phi.getType()));
+        }
+      }
+    }
 
-  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
-    DomTreeNode *DTN = DT->getNode(FI);
+    DomTreeNode *DTN = DT->getNode(&B);
     if (!DTN)
       continue;
-    DFSBBMap[FI] = std::make_pair(DTN->getDFSNumIn(), DTN->getDFSNumOut());
+    DFSBBMap[&B] = std::make_pair(DTN->getDFSNumIn(), DTN->getDFSNumOut());
   }
 
   for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
