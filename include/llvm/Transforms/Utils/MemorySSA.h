@@ -203,7 +203,7 @@ private:
   // Memory SSA mappings
   DenseMap<const Value *, MemoryAccess *> InstructionToMemoryAccess;
   DenseMap<std::pair<MemoryAccess *, AliasAnalysis::Location>, MemoryAccess *>
-      CachedClobberingVersion;
+      CachedClobberingAccess;
 
   // Memory SSA building info
   MemoryAccess *LiveOnEntryDef;
