@@ -132,10 +132,10 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P,
   // to whatever version occurs before the *split* point that caused
   // the phi node.
   // There are only two cases we can walk through:
-  // 1. One argument dominates the other, and the other's version is a
-  // "false" one.
-  // 2. All of the arguments are false version numbers that eventually
-  // lead back to some common version number
+  // 1. One argument dominates the other, and the other's argument
+  // defining memory access is non-aliasing with our location.
+  // 2. All of the arguments are non-aliasing with our location, and
+  // eventually lead back to the same defining memory access
   MemoryAccess *Result = nullptr;
 
   // If we already got here once, and didn't get to an answer (if we
@@ -231,16 +231,9 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA,
         return std::make_pair(CCV->second, false);
       }
 
-      // If it's a call, get mod ref info, and if we have a mod,
-      // we are done. Otherwise grab alias location, see if they
-      // alias, and if they do, we are done.
-      // Otherwise, continue
-      if (isa<CallInst>(DefMemoryInst) || isa<InvokeInst>(DefMemoryInst)) {
-        if (AA->getModRefInfo(DefMemoryInst, Loc) & AliasAnalysis::Mod)
-          break;
-      } else if (AA->alias(getLocationForAA(AA, DefMemoryInst), Loc) !=
-                 AliasAnalysis::NoAlias)
-        break;
+      if (AA->getModRefInfo(DefMemoryInst, Loc) & AliasAnalysis::Mod)
+	break;
+
     }
 
     MemoryAccess *NextVersion =
@@ -408,8 +401,8 @@ void MemorySSA::determineInsertionPoint(
       DomTreeNode *Node = Worklist.pop_back_val();
       BasicBlock *BB = Node->getBlock();
 
-      for (auto SI = succ_begin(BB), SE = succ_end(BB); SI != SE; ++SI) {
-        DomTreeNode *SuccNode = DT->getNode(*SI);
+      for (auto S : successors(BB)) {
+        DomTreeNode *SuccNode = DT->getNode(S);
 
         // Quickly skip all CFG edges that are also dominator tree edges instead
         // of catching them below.
@@ -432,10 +425,9 @@ void MemorySSA::determineInsertionPoint(
           PQ.push(std::make_pair(SuccNode, SuccLevel));
       }
 
-      for (auto CI = Node->begin(), CE = Node->end(); CI != CE; ++CI) {
-        if (!Visited.count(*CI))
-          Worklist.push_back(*CI);
-      }
+      for (auto C : *Node)
+        if (!Visited.count(C))
+          Worklist.push_back(C);
     }
   }
 
@@ -487,11 +479,11 @@ NextIteration:
   // Skip if the list is empty, but we still have to pass thru the
   // incoming value info/etc to successors
   if (Accesses)
-    for (auto LI = Accesses->begin(), LE = Accesses->end(); LI != LE; ++LI) {
-      if (isa<MemoryPhi>(*LI))
+    for (auto L: *Accesses) {
+      if (isa<MemoryPhi>(L))
         continue;
 
-      if (MemoryUse *MU = dyn_cast<MemoryUse>(*LI)) {
+      if (MemoryUse *MU = dyn_cast<MemoryUse>(L)) {
         MU->setDefiningAccess(IncomingVal);
 #if OPTIMIZE_USES
         auto RealVal = getClobberingMemoryAccess(MU->getMemoryInst());
@@ -500,7 +492,7 @@ NextIteration:
 #endif
         MU->setDefiningAccess(RealVal);
         addUseToMap(Uses, RealVal, MU);
-      } else if (MemoryDef *MD = dyn_cast<MemoryDef>(*LI)) {
+      } else if (MemoryDef *MD = dyn_cast<MemoryDef>(L)) {
         MD->setDefiningAccess(IncomingVal);
         addUseToMap(Uses, IncomingVal, MD);
         IncomingVal = MD;
@@ -548,6 +540,8 @@ void MemorySSA::computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels) {
 // memoryaccesses as being uses of the live on entry definition
 void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
                                              BasicBlock *BB, UseMap &Uses) {
+  assert(!DT->isReachableFromEntry(BB) &&
+	 "Reachable block found while handling unreachable blocks");
 
   auto Accesses = BlockAccesses.lookup(BB);
   if (!Accesses)
@@ -605,13 +599,13 @@ void MemorySSA::addUseToMap(UseMap &Uses, MemoryAccess *User,
 
 // Build the actual use lists out of the use map
 void MemorySSA::addUses(UseMap &Uses) {
-  for (auto DI = Uses.begin(), DE = Uses.end(); DI != DE; ++DI) {
-    std::list<MemoryAccess *> *UseList = DI->second;
-    MemoryAccess *User = DI->first;
+  for (auto D : Uses) {
+    std::list<MemoryAccess *> *UseList = D.second;
+    MemoryAccess *User = D.first;
     User->UseList =
         MemoryAccessAllocator.Allocate<MemoryAccess *>(UseList->size());
-    for (auto UI = UseList->begin(), UE = UseList->end(); UI != UE; ++UI)
-      User->addUse(*UI);
+    for (auto U: *UseList)
+      User->addUse(U);
   }
 }
 
@@ -644,11 +638,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
         use = false;
         def = true;
       } else {
-        AliasAnalysis::Location Loc;
-        // FIXME: BasicAA crashes on calls if Loc.Ptr is null
-        if (isa<CallInst>(BI) || isa<InvokeInst>(BI))
-          Loc.Ptr = BI;
-        AliasAnalysis::ModRefResult ModRef = AA->getModRefInfo(BI, Loc);
+        AliasAnalysis::ModRefResult ModRef = AA->getModRefInfo(BI);
         if (ModRef & AliasAnalysis::Mod)
           def = true;
         if (ModRef & AliasAnalysis::Ref)
@@ -726,17 +716,15 @@ void MemorySSA::buildMemorySSA(Function &F) {
   DEBUG(verifyDefUses(F));
 
   // Delete our access lists
-  for (auto DI = PerBlockAccesses.begin(), DE = PerBlockAccesses.end();
-       DI != DE; ++DI) {
-    delete DI->second;
-  }
+  for (auto D : PerBlockAccesses)
+    delete D.second;
 
   // Densemap does not like when you delete or change the value during
   // iteration.
   std::vector<std::list<MemoryAccess *> *> UseListsToDelete;
-  for (auto DI = Uses.begin(), DE = Uses.end(); DI != DE; ++DI) {
-    UseListsToDelete.push_back(DI->second);
-  }
+  for (auto D: Uses)
+    UseListsToDelete.push_back(D.second);
+
   Uses.clear();
   for (unsigned i = 0, e = UseListsToDelete.size(); i != e; ++i) {
     delete UseListsToDelete[i];
