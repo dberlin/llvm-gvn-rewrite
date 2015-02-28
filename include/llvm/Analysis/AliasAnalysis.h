@@ -371,6 +371,17 @@ public:
   // instruction may read or write memory (without regard to a
   // specific location)
   ModRefResult getModRefInfo(const Instruction *I) {
+    if (isa<InvokeInst>(I) || isa<CallInst>(I)) {
+      auto MRB = getModRefBehavior(I);
+      if (MRB & ModRef)
+        return ModRef;
+      else if (MRB & Ref)
+        return Ref;
+      else if (MRB & Mod)
+        return Mod;
+      return NoModRef;
+    }
+
     return getModRefInfo(I, Location());
   }
 
