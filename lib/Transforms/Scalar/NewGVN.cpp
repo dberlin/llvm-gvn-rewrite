@@ -316,8 +316,8 @@ void NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
 
-  for (auto OI = I->op_begin(), OE = I->op_end(); OI != OE; ++OI) {
-    Value *Operand = lookupOperandLeader(*OI, B);
+  for (auto &O : I->operands()) {
+    Value *Operand = lookupOperandLeader(O, B);
     E->VarArgs.push_back(Operand);
   }
 }
@@ -497,7 +497,7 @@ Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, BasicBlock *B) {
 
   // TODO: This can be made faster by different set ordering, if
   // necessary, or caching whether we found one
-  for (auto Member : CC->equivalences) {
+  for (auto &Member : CC->equivalences) {
     if (DT->dominates(Member.second, B))
       return Member.first;
   }
@@ -906,8 +906,8 @@ static bool isOnlyReachableViaThisEdge(BasicBlock *Src, BasicBlock *Dst,
 
 void NewGVN::markUsersTouched(Value *V) {
   // Now mark the users as touched
-  for (auto UI = V->use_begin(), UE = V->use_end(); UI != UE; ++UI) {
-    Instruction *User = dyn_cast<Instruction>(UI->getUser());
+  for (auto &U : V->uses()) {
+    Instruction *User = dyn_cast<Instruction>(U.getUser());
     assert(User && "Use of value not within an instruction?");
     TouchedInstructions.insert(User);
   }
@@ -1030,8 +1030,8 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
     // If this block wasn't reachable before, all instructions are touched
     if (ReachableBlocks.insert(To).second) {
       DEBUG(dbgs() << "Block " << getBlockName(To) << " marked reachable\n");
-      for (auto BI = To->begin(), BE = To->end(); BI != BE; ++BI)
-        TouchedInstructions.insert(BI);
+      for (auto &I : *To)
+        TouchedInstructions.insert(&I);
     } else {
       DEBUG(dbgs() << "Block " << getBlockName(To)
                    << " was reachable, but new edge to it found\n");
@@ -1146,13 +1146,13 @@ void NewGVN::propagateChangeInEdge(BasicBlock *Dest) {
   // the users will be marked as touched anyway.  If we moved to using
   // value inferencing, there are cases we may need to touch more than
   // phi nodes.
-  for (auto DI = df_begin(DTN), DE = df_end(DTN); DI != DE; ++DI) {
-    BasicBlock *B = DI->getBlock();
+  for (auto D : depth_first(DTN)) {
+    BasicBlock *B = D->getBlock();
     if (!B->getUniquePredecessor()) {
-      for (auto BI = B->begin(), BE = B->end(); BI != BE; ++BI) {
-        if (!isa<PHINode>(BI))
+      for (auto &I : *B) {
+        if (!isa<PHINode>(&I))
           break;
-        TouchedInstructions.insert(BI);
+        TouchedInstructions.insert(&I);
       }
     }
   }
@@ -1162,9 +1162,9 @@ void NewGVN::initializeCongruenceClasses(Function &F) {
   CongruenceClass::nextCongruenceNum = 2;
   // Initialize all other instructions to be in INITIAL class
   CongruenceClass::MemberSet InitialValues;
-  for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
-    for (auto BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
-      InitialValues.insert(BI);
+  for (auto &B : F) {
+    for (auto &I : B) {
+      InitialValues.insert(&I);
     }
   }
 
@@ -1175,8 +1175,8 @@ void NewGVN::initializeCongruenceClasses(Function &F) {
 
   // Initialize arguments to be in their own unique congruence classes
   // In an IPA-GVN, this would not be done
-  for (auto FAI = F.arg_begin(), FAE = F.arg_end(); FAI != FAE; ++FAI)
-    createSingletonCongruenceClass(FAI, &F.getEntryBlock());
+  for (auto &FA : F.args())
+    createSingletonCongruenceClass(&FA, &F.getEntryBlock());
 }
 
 void NewGVN::cleanupTables() {
@@ -1223,10 +1223,10 @@ bool NewGVN::runOnFunction(Function &F) {
 
   // Count number of instructions for sizing of hash tables, and come
   // up with local dfs numbering for instructions
-  for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
-    ICount += FI->size();
-    for (auto BI = FI->begin(), BE = FI->end(); BI != BE; ++BI) {
-      InstrLocalDFS[BI] = ICount;
+  for (auto &B : F) {
+    ICount += F.size();
+    for (auto &I : B) {
+      InstrLocalDFS[&I] = ICount;
       ++ICount;
     }
   }
@@ -1236,9 +1236,8 @@ bool NewGVN::runOnFunction(Function &F) {
   ExpressionToClass.resize(ICount * 2);
   MemoryExpressionToClass.resize(ICount + 1);
   // Initialize the touched instructions to include the entry block
-  for (auto BI = F.getEntryBlock().begin(), BE = F.getEntryBlock().end();
-       BI != BE; ++BI)
-    TouchedInstructions.insert(BI);
+  for (auto &I : F.getEntryBlock())
+    TouchedInstructions.insert(&I);
   ReachableBlocks.insert(&F.getEntryBlock());
 
   initializeCongruenceClasses(F);
@@ -1250,7 +1249,7 @@ bool NewGVN::runOnFunction(Function &F) {
     //  and walking both lists at the same time, processing whichever has the
     //  next number in order.
     ReversePostOrderTraversal<Function *> rpoT(&F);
-    for (auto R : rpoT) {
+    for (auto &R : rpoT) {
       // TODO(Predication)
       bool blockReachable = ReachableBlocks.count(R);
       bool movedForward = false;
@@ -1301,8 +1300,8 @@ bool NewGVN::runOnFunction(Function &F) {
   }
 
   // Delete all unreachable blocks
-  for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
-    BasicBlock *BB = FI;
+  for (auto &B : F) {
+    BasicBlock *BB = &B;
     if (!ReachableBlocks.count(BB)) {
       DEBUG(dbgs() << "We believe block " << getBlockName(BB)
                    << " is unreachable\n");
@@ -1601,12 +1600,11 @@ bool NewGVN::eliminateInstructions(Function &F) {
                   DFSOrderedEquivalences.begin(), DFSOrderedEquivalences.end(),
                   std::inserter(DFSOrderedSet, DFSOrderedSet.begin()));
 
-        for (auto CI = DFSOrderedSet.begin(), CE = DFSOrderedSet.end();
-             CI != CE; ++CI) {
-          int MemberDFSIn = CI->DFSIn;
-          int MemberDFSOut = CI->DFSOut;
-          Value *Member = CI->Val;
-          bool EquivalenceOnly = CI->Equivalence;
+        for (auto &C : DFSOrderedSet) {
+          int MemberDFSIn = C.DFSIn;
+          int MemberDFSOut = C.DFSOut;
+          Value *Member = C.Val;
+          bool EquivalenceOnly = C.Equivalence;
 
           // We ignore stores because we can't replace them, since,
           // they have no uses
