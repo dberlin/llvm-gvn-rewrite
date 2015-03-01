@@ -366,9 +366,9 @@ public:
     return (MRB & ModRef) && (MRB & ArgumentPointees);
   }
 
-  // getModRefInfo - Return information about whether or not an
-  // instruction may read or write memory (without regard to a
-  // specific location)
+  /// getModRefInfo - Return information about whether or not an
+  /// instruction may read or write memory (without regard to a
+  /// specific location)
   ModRefResult getModRefInfo(const Instruction *I) {
     if (isa<InvokeInst>(I) || isa<CallInst>(I)) {
       auto MRB = getModRefBehavior(I);
