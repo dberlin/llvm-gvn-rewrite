@@ -234,7 +234,7 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
           // Otherwise, check if the call modifies or references the
           // location this memory access defines.  The best we can say
           // is that if the call references what this instruction
-          // defines, it must be clobbered by this location. 
+          // defines, it must be clobbered by this location.
           const AliasAnalysis::Location DefLoc = AA->getLocation(DefMemoryInst);
           if (AA->getModRefInfo(cast<Instruction>(Loc.Ptr), DefLoc) !=
               AliasAnalysis::NoModRef)
