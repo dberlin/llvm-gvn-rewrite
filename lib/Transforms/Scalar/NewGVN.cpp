@@ -99,8 +99,8 @@ namespace {
 
 struct CongruenceClass {
   typedef SmallPtrSet<Value *, 4> MemberSet;
-  static uint32_t nextCongruenceNum;
-  uint32_t id;
+  static unsigned int nextCongruenceNum;
+  unsigned int id;
   Value *leader;
   // TODO: Do we actually need this? It's not clear what purpose it
   // really serves
@@ -119,7 +119,7 @@ struct CongruenceClass {
   CongruenceClass(Value *Leader, Expression *E)
       : id(nextCongruenceNum++), leader(Leader), expression(E), dead(false) {}
 };
-uint32_t CongruenceClass::nextCongruenceNum = 0;
+unsigned int CongruenceClass::nextCongruenceNum = 0;
 
 class NewGVN : public FunctionPass {
   MemoryDependenceAnalysis *MD;
@@ -175,12 +175,13 @@ class NewGVN : public FunctionPass {
   DenseMap<const BasicBlock *, std::pair<unsigned int, unsigned int>>
       BlockInstRange;
   DenseSet<const BasicBlock *> UniquePredecessorBlocks;
-  DenseMap<const Instruction *, uint32_t> ProcessedCount;
+  DenseMap<const Instruction *, unsigned int> ProcessedCount;
+  DenseMap<const BasicBlock *, unsigned int> ProcessedBlockCount;
   CongruenceClass *InitialClass;
   std::vector<CongruenceClass *> CongruenceClasses;
   DenseMap<BasicBlock *, std::pair<int, int>> DFSBBMap;
-  DenseMap<const Instruction *, unsigned int> InstrLocalDFS;
-  std::vector<Instruction *> LocalDFSToInstr;
+  DenseMap<const Instruction *, unsigned int> InstrDFS;
+  std::vector<Instruction *> DFSToInstr;
   std::vector<Instruction *> InstructionsToErase;
 
 public:
@@ -279,6 +280,9 @@ private:
   void markUsersTouched(Value *);
   // Utilities
   void cleanupTables();
+  std::pair<unsigned, unsigned> assignDFSNumbers(BasicBlock *, unsigned);
+  
+
 };
 
 char NewGVN::ID = 0;
@@ -804,7 +808,7 @@ unsigned NewGVN::replaceAllDominatedUsesWith(Value *From, Value *To,
     if (DT->dominates(Root, UsingBlock)) {
       // Mark the users as touched
       if (Instruction *I = dyn_cast<Instruction>(U.getUser()))
-        TouchedInstructions.set(InstrLocalDFS[I]);
+        TouchedInstructions.set(InstrDFS[I]);
       DEBUG(dbgs() << "Equality propagation replacing " << *From << " with "
                    << *To << " in " << *(U.getUser()) << "\n");
       U.set(To);
@@ -979,7 +983,7 @@ void NewGVN::markUsersTouched(Value *V) {
   for (auto &U : V->uses()) {
     Instruction *User = dyn_cast<Instruction>(U.getUser());
     assert(User && "Use of value not within an instruction?");
-    TouchedInstructions.set(InstrLocalDFS[User]);
+    TouchedInstructions.set(InstrDFS[User]);
   }
 }
 
@@ -1078,7 +1082,7 @@ void NewGVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
         VClass->leader = *(VClass->members.begin());
         for (auto L : VClass->members) {
           if (Instruction *I = dyn_cast<Instruction>(L))
-            TouchedInstructions.set(InstrLocalDFS[I]);
+            TouchedInstructions.set(InstrDFS[I]);
           ChangedValues.insert(L);
         }
       }
@@ -1108,7 +1112,7 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
       // values will get propagated to if necessary
       auto BI = To->begin();
       while (isa<PHINode>(BI)) {
-        TouchedInstructions.set(InstrLocalDFS[BI]);
+        TouchedInstructions.set(InstrDFS[BI]);
         ++BI;
       }
       // Propagate the change downstream.
@@ -1218,7 +1222,7 @@ void NewGVN::propagateChangeInEdge(BasicBlock *Dest) {
       for (auto &I : *B) {
         if (!isa<PHINode>(&I))
           break;
-        TouchedInstructions.set(InstrLocalDFS[&I]);
+        TouchedInstructions.set(InstrDFS[&I]);
       }
     }
   }
@@ -1265,14 +1269,27 @@ void NewGVN::cleanupTables() {
   ReachableBlocks.clear();
   ReachableEdges.clear();
   ProcessedCount.clear();
+  ProcessedBlockCount.clear();
   DFSBBMap.clear();
-  InstrLocalDFS.clear();
+  InstrDFS.clear();
   ValueToExpression.clear();
   InstructionsToErase.clear();
   UniquePredecessorBlocks.clear();
-  LocalDFSToInstr.clear();
+  DFSToInstr.clear();
   BlockInstRange.clear();
-  
+}
+
+std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B, unsigned Start) {
+  unsigned int Count = Start;
+  for (auto &I : *B) {
+    InstrDFS[&I] = Count++;
+    DFSToInstr.push_back(&I);
+  }
+  // All of the range functions taken half-open ranges (open on the
+  // end side), we adjust endcount by 1 here so that we can use
+  // standard looking loops to deal with the range, but note that
+  // the end here is *1 past the real end*
+  return std::make_pair(Start, Count);
 }
 
 /// runOnFunction - This is the main transformation entry point for a function.
@@ -1290,39 +1307,42 @@ bool NewGVN::runOnFunction(Function &F) {
   AA = &getAnalysis<AliasAnalysis>();
   MSSA = &getAnalysis<MemorySSA>();
 
-  uint32_t ICount = 0;
-
+  unsigned int ICount = 0;
   // Count number of instructions for sizing of hash tables, and come
-  // up with local dfs numbering for instructions
-  for (auto &B : F) {
-    if (B.getUniquePredecessor())
-      UniquePredecessorBlocks.insert(&B);
-    unsigned StartCount = ICount;
-    for (auto &I : B) {
-      InstrLocalDFS[&I] = ICount;
-      ++ICount;
-      
-      LocalDFSToInstr.push_back(&I);
-    }
-    unsigned EndCount = ICount-1;
-    BlockInstRange.insert(
-        std::make_pair(&B, std::make_pair(StartCount, EndCount)));
+  // up with a global dfs numbering for instructions
+  ReversePostOrderTraversal<Function *> rpoT(&F);
+  for (auto &B : rpoT) {
+    const auto &BlockRange = assignDFSNumbers(B, ICount);
+    BlockInstRange.insert(std::make_pair(B, BlockRange));
+    assert((BlockRange.second - BlockRange.first) == B->size() && "Instruction count mismatch");
+    ICount += BlockRange.second - BlockRange.first;
   }
+  // Handle forward unreachable blocks and figure out which blocks
+  // have single preds
+  for (auto &B : F) {
+    // Assign numbers to unreachable blocks
+    if (&B != &F.getEntryBlock() && pred_empty(&B)) {
+      const auto &BlockRange = assignDFSNumbers(&B, ICount);
+      BlockInstRange.insert(std::make_pair(&B, BlockRange));
+      assert((BlockRange.second - BlockRange.first) == B.size() && "Instruction count mismatch");
+      ICount += BlockRange.second - BlockRange.first;
+    } else if (B.getUniquePredecessor())
+      UniquePredecessorBlocks.insert(&B);
+  }
+
   TouchedInstructions.resize(ICount + 1);
-  for (auto &R: BlockInstRange) 
-    {
-      for (unsigned i = R.second.first, e = R.second.second; i <= e; ++i) {
-	assert (LocalDFSToInstr[i]->getParent() == R.first && "Block range mapping broken");
-      }
-      for (auto &I: *R.first)
-	{
-	  assert (InstrLocalDFS[&I] >= R.second.first && InstrLocalDFS[&I] <= R.second.second && "Instruction range mapping is broken");
-	  assert (LocalDFSToInstr[InstrLocalDFS[&I]] == &I && "Local DFS mapping is broken");
-	}
-      
+  for (auto &R : BlockInstRange) {
+    for (unsigned i = R.second.first, e = R.second.second; i != e; ++i) {
+      assert(DFSToInstr.at(i)->getParent() == R.first &&
+             "Block range mapping broken");
     }
-  
-	
+    for (auto &I : *R.first) {
+      assert(InstrDFS[&I] >= R.second.first && InstrDFS[&I] < R.second.second &&
+             "Instruction range mapping is broken");
+      assert(DFSToInstr[InstrDFS[&I]] == &I && "Local DFS mapping is broken");
+    }
+  }
+
   // Ensure we don't end up resizing the expressionToClass map, as
   // that can be quite expensive. At most, we have one expression per
   // instruction.
@@ -1330,61 +1350,65 @@ bool NewGVN::runOnFunction(Function &F) {
   MemoryExpressionToClass.resize(ICount + 1);
   // Initialize the touched instructions to include the entry block
   const auto &InstRange = BlockInstRange.lookup(&F.getEntryBlock());
-  TouchedInstructions.set(InstRange.first, InstRange.second+1);
+  TouchedInstructions.set(InstRange.first, InstRange.second);
   ReachableBlocks.insert(&F.getEntryBlock());
 
   initializeCongruenceClasses(F);
 
+  // We start out in the entry block
+  BasicBlock *LastInstrBlock = &F.getEntryBlock();
   while (TouchedInstructions.any()) {
-    // TODO: Use two worklist method to keep ordering straight
-    // TODO: or Investigate RPO numbering both blocks and instructions in the
-    // same pass,
-    //  and walking both lists at the same time, processing whichever has the
-    //  next number in order.
-    ReversePostOrderTraversal<Function *> rpoT(&F);
-    for (auto &R : rpoT) {
-      // TODO(Predication)
-      bool BlockReachable = ReachableBlocks.count(R);
-      const auto &InstRange = BlockInstRange.lookup(R);
-      // If it's not reachable, erase any touched instructions and
-      // move on
-      if (!BlockReachable) {
-	BitVector temp(TouchedInstructions);
-	TouchedInstructions.reset(InstRange.first, InstRange.second+1);
-	temp ^= TouchedInstructions;
-	for (int i = temp.find_first(); i != -1; i = temp.find_next(i))
-	  assert (LocalDFSToInstr[i]->getParent() == R && "This loop is broken");
-	DEBUG(dbgs() << "Skipping instructions in block " << getBlockName(R)
-	      << " because it is unreachable\n");
-	continue;
+    // Walk through all the instructions in all the blocks in RPO
+    for (int InstrNum = TouchedInstructions.find_first(); InstrNum != -1;
+         InstrNum = TouchedInstructions.find_next(InstrNum)) {
+      Instruction *I = DFSToInstr[InstrNum];
+      BasicBlock *InstrBlock = I->getParent();
+
+      // If we hit a new block, do reachability processing
+      if (InstrBlock != LastInstrBlock) {
+        LastInstrBlock = InstrBlock;
+        bool BlockReachable = ReachableBlocks.count(InstrBlock);
+        const auto &InstRange = BlockInstRange.lookup(InstrBlock);
+        if (ProcessedBlockCount.count(InstrBlock) == 0) {
+          ProcessedBlockCount.insert(std::make_pair(InstrBlock, 1));
+        } else {
+          ProcessedBlockCount[InstrBlock] += 1;
+          assert(ProcessedBlockCount[InstrBlock] < 100 &&
+                 "Seem to have processed the same block a lot");
+        }
+        // If it's not reachable, erase any touched instructions and
+        // move on
+        if (!BlockReachable) {
+          TouchedInstructions.reset(InstRange.first, InstRange.second);
+          for (auto &I : *InstrBlock)
+            assert(!TouchedInstructions.test(InstrDFS[&I]) &&
+                   "This range is broken");
+
+          DEBUG(dbgs() << "Skipping instructions in block "
+                       << getBlockName(InstrBlock)
+                       << " because it is unreachable\n");
+          continue;
+        }
+      }
+      TouchedInstructions.reset(InstrNum);
+
+      DEBUG(dbgs() << "Processing instruction " << *I << "\n");
+      // This is done in case something eliminates the instruction
+      // along the way.
+
+      if (ProcessedCount.count(I) == 0) {
+        ProcessedCount.insert(std::make_pair(I, 1));
+      } else {
+        ProcessedCount[I] += 1;
+        assert(ProcessedCount[I] < 100 &&
+               "Seem to have processed the same instruction a lot");
       }
 
-      int NextInstr = TouchedInstructions.find_next(InstRange.first - 1);
-      while ((NextInstr >= 0) && (((unsigned)NextInstr) <= InstRange.second)) {
-        Instruction *I = LocalDFSToInstr[NextInstr];
-	assert (I->getParent() == R);
-	
-	TouchedInstructions.reset(NextInstr);
-	
-        DEBUG(dbgs() << "Processing instruction " << *I << "\n");
-        // This is done in case something eliminates the instruction
-        // along the way.
-
-        if (ProcessedCount.count(I) == 0) {
-          ProcessedCount.insert(std::make_pair(I, 1));
-        } else {
-          ProcessedCount[I] += 1;
-          assert(ProcessedCount[I] < 100 &&
-                 "Seem to have processed the same instruction a lot");
-        }
-
-        if (!I->isTerminator()) {
-          Expression *Symbolized = performSymbolicEvaluation(I, R);
-          performCongruenceFinding(I, R, Symbolized);
-        } else {
-          processOutgoingEdges(dyn_cast<TerminatorInst>(I));
-        }
-        NextInstr = TouchedInstructions.find_next(NextInstr);
+      if (!I->isTerminator()) {
+        Expression *Symbolized = performSymbolicEvaluation(I, InstrBlock);
+        performCongruenceFinding(I, InstrBlock, Symbolized);
+      } else {
+        processOutgoingEdges(dyn_cast<TerminatorInst>(I));
       }
     }
   }
@@ -1468,7 +1492,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
 
     // If it's an instruction, use the real local dfs number,
     if (Instruction *I = dyn_cast<Instruction>(D))
-      VD.LocalNum = InstrLocalDFS[I];
+      VD.LocalNum = InstrDFS[I];
     else
       llvm_unreachable("Should have been an instruction");
 
@@ -1492,7 +1516,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &Dense,
     // the local number as 0, it should sort before the instructions
     // in that block.
     if (Instruction *I = dyn_cast<Instruction>(D.first))
-      VD.LocalNum = InstrLocalDFS[I];
+      VD.LocalNum = InstrDFS[I];
     else
       VD.LocalNum = 0;
 
