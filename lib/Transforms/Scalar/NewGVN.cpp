@@ -129,6 +129,7 @@ class NewGVN : public FunctionPass {
   AliasAnalysis *AA;
   MemorySSA *MSSA;
   BumpPtrAllocator ExpressionAllocator;
+  ArrayRecycler<Value *> ArgRecycler;
 
   // Congruence class info
   DenseMap<Value *, CongruenceClass *> ValueToClass;
@@ -166,10 +167,12 @@ class NewGVN : public FunctionPass {
   // occurring as often.
   ExpressionClassMap MemoryExpressionToClass;
   DenseSet<Expression *, ComparingExpressionInfo> UniquedExpressions;
-  SmallPtrSet<Value *, 8> ChangedValues;
+  DenseSet<Value *> ChangedValues;
   DenseSet<std::pair<BasicBlock *, BasicBlock *>> ReachableEdges;
-  DenseSet<BasicBlock *> ReachableBlocks;
-  SmallPtrSet<Instruction *, 8> TouchedInstructions;
+  DenseSet<const BasicBlock *> ReachableBlocks;
+  DenseSet<const BasicBlock *> TouchedAllInBlock;
+  DenseSet<const Instruction *> TouchedInstructions;
+  DenseSet<const BasicBlock *> UniquePredecessorBlocks;
   DenseMap<Instruction *, uint32_t> ProcessedCount;
   CongruenceClass *InitialClass;
   std::vector<CongruenceClass *> CongruenceClasses;
@@ -207,16 +210,20 @@ private:
   // expression handling
   Expression *createExpression(Instruction *, BasicBlock *);
   bool setBasicExpressionInfo(Instruction *, BasicExpression *, BasicBlock *);
-  Expression *createPHIExpression(Instruction *, BasicBlock *);
-  Expression *createVariableExpression(Value *);
-  Expression *createConstantExpression(Constant *);
-  Expression *createStoreExpression(StoreInst *, MemoryAccess *, BasicBlock *);
-  Expression *createLoadExpression(LoadInst *, MemoryAccess *, BasicBlock *);
-  Expression *createCallExpression(CallInst *, MemoryAccess *, BasicBlock *);
-  Expression *createInsertValueExpression(InsertValueInst *, BasicBlock *l);
+  PHIExpression *createPHIExpression(Instruction *, BasicBlock *);
+  VariableExpression *createVariableExpression(Value *);
+  ConstantExpression *createConstantExpression(Constant *);
+  StoreExpression *createStoreExpression(StoreInst *, MemoryAccess *,
+                                         BasicBlock *);
+  LoadExpression *createLoadExpression(LoadInst *, MemoryAccess *,
+                                       BasicBlock *);
+  CallExpression *createCallExpression(CallInst *, MemoryAccess *,
+                                       BasicBlock *);
+  InsertValueExpression *createInsertValueExpression(InsertValueInst *,
+                                                     BasicBlock *l);
   Expression *uniquifyExpression(Expression *);
-  Expression *createCmpExpression(unsigned, Type *, CmpInst::Predicate, Value *,
-                                  Value *, BasicBlock *);
+  BasicExpression *createCmpExpression(unsigned, Type *, CmpInst::Predicate,
+                                       Value *, Value *, BasicBlock *);
   // Congruence class handling
   CongruenceClass *createCongruenceClass(Value *Leader, Expression *E) {
     CongruenceClass *result = new CongruenceClass(Leader, E);
@@ -288,12 +295,12 @@ INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_END(NewGVN, "newgvn", "Global Value Numbering", false, false)
-Expression *NewGVN::createPHIExpression(Instruction *I, BasicBlock *B) {
+PHIExpression *NewGVN::createPHIExpression(Instruction *I, BasicBlock *B) {
   PHINode *PN = cast<PHINode>(I);
   PHIExpression *E = new (ExpressionAllocator)
       PHIExpression(PN->getNumOperands(), I->getParent());
 
-  E->allocateArgs(ExpressionAllocator);
+  E->allocateArgs(ArgRecycler, ExpressionAllocator);
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
   for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i) {
@@ -321,7 +328,7 @@ bool NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
   bool AllConstant = true;
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
-  E->allocateArgs(ExpressionAllocator);
+  E->allocateArgs(ArgRecycler, ExpressionAllocator);
 
   for (auto &O : I->operands()) {
     Value *Operand = lookupOperandLeader(O, B);
@@ -333,11 +340,12 @@ bool NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
 }
 // This is a special function only used by equality propagation, it
 // should not be called elsewhere
-Expression *NewGVN::createCmpExpression(unsigned Opcode, Type *Type,
-                                        CmpInst::Predicate Predicate,
-                                        Value *LHS, Value *RHS, BasicBlock *B) {
+BasicExpression *NewGVN::createCmpExpression(unsigned Opcode, Type *Type,
+                                             CmpInst::Predicate Predicate,
+                                             Value *LHS, Value *RHS,
+                                             BasicBlock *B) {
   BasicExpression *E = new (ExpressionAllocator) BasicExpression(2);
-  E->allocateArgs(ExpressionAllocator);
+  E->allocateArgs(ArgRecycler, ExpressionAllocator);
   E->setType(Type);
   E->setOpcode((Opcode << 8) | Predicate);
   LHS = lookupOperandLeader(LHS, B);
@@ -360,6 +368,10 @@ Expression *NewGVN::checkSimplificationResults(Expression *E, Instruction *I,
     DEBUG(dbgs() << "Simplified " << *I << " to "
                  << " constant " << *C << "\n");
     NumGVNOpsSimplified++;
+    assert(isa<BasicExpression>(E) &&
+           "We should always have had a basic expression here");
+
+    cast<BasicExpression>(E)->deallocateArgs(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
     return createConstantExpression(C);
   }
@@ -368,6 +380,9 @@ Expression *NewGVN::checkSimplificationResults(Expression *E, Instruction *I,
     DEBUG(dbgs() << "Simplified " << *I << " to "
                  << " expression " << *V << "\n");
     NumGVNOpsSimplified++;
+    assert(isa<BasicExpression>(E) &&
+           "We should always have had a basic expression here");
+    cast<BasicExpression>(E)->deallocateArgs(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
     return CC->expression;
   }
@@ -498,30 +513,31 @@ Expression *NewGVN::uniquifyExpression(Expression *E) {
   return E;
 }
 
-Expression *NewGVN::createInsertValueExpression(InsertValueInst *I,
-                                                BasicBlock *B) {
+InsertValueExpression *NewGVN::createInsertValueExpression(InsertValueInst *I,
+                                                           BasicBlock *B) {
   InsertValueExpression *E = new (ExpressionAllocator)
       InsertValueExpression(I->getNumOperands(), I->getNumIndices());
   setBasicExpressionInfo(I, E, B);
+  E->allocateIntArgs(ExpressionAllocator);
   for (auto II = I->idx_begin(), IE = I->idx_end(); II != IE; ++II)
     E->int_args_push_back(*II);
   return E;
 }
 
-Expression *NewGVN::createVariableExpression(Value *V) {
+VariableExpression *NewGVN::createVariableExpression(Value *V) {
   VariableExpression *E = new (ExpressionAllocator) VariableExpression(V);
   E->setOpcode(V->getValueID());
   return E;
 }
 
-Expression *NewGVN::createConstantExpression(Constant *C) {
+ConstantExpression *NewGVN::createConstantExpression(Constant *C) {
   ConstantExpression *E = new (ExpressionAllocator) ConstantExpression(C);
   E->setOpcode(C->getValueID());
   return E;
 }
 
-Expression *NewGVN::createCallExpression(CallInst *CI, MemoryAccess *HV,
-                                         BasicBlock *B) {
+CallExpression *NewGVN::createCallExpression(CallInst *CI, MemoryAccess *HV,
+                                             BasicBlock *B) {
   CallExpression *E =
       new (ExpressionAllocator) CallExpression(CI->getNumOperands(), CI, HV);
   setBasicExpressionInfo(CI, E, B);
@@ -567,11 +583,11 @@ Value *NewGVN::lookupOperandLeader(Value *V, BasicBlock *B) {
   return V;
 }
 
-Expression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *HV,
-                                         BasicBlock *B) {
+LoadExpression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *HV,
+                                             BasicBlock *B) {
   LoadExpression *E =
       new (ExpressionAllocator) LoadExpression(LI->getNumOperands(), LI, HV);
-  E->allocateArgs(ExpressionAllocator);
+  E->allocateArgs(ArgRecycler, ExpressionAllocator);
   E->setType(LI->getType());
   // Need opcodes to match on loads and store
   E->setOpcode(0);
@@ -583,11 +599,11 @@ Expression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *HV,
   return E;
 }
 
-Expression *NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *HV,
-                                          BasicBlock *B) {
+StoreExpression *NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *HV,
+                                               BasicBlock *B) {
   StoreExpression *E =
       new (ExpressionAllocator) StoreExpression(SI->getNumOperands(), SI, HV);
-  E->allocateArgs(ExpressionAllocator);
+  E->allocateArgs(ArgRecycler, ExpressionAllocator);
   E->setType(SI->getType());
   // Need opcodes to match on loads and store
   E->setOpcode(0);
@@ -638,6 +654,7 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
   if (E->args_empty()) {
     DEBUG(dbgs() << "Simplified PHI node " << I << " to undef"
                  << "\n");
+    E->deallocateArgs(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
     return createVariableExpression(UndefValue::get(I->getType()));
   }
@@ -667,7 +684,7 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
     NumGVNPhisAllSame++;
     DEBUG(dbgs() << "Simplified PHI node " << I << " to " << *AllSameValue
                  << "\n");
-
+    E->deallocateArgs(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
     return performSymbolicEvaluation(AllSameValue, B);
   }
@@ -897,8 +914,9 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       // that to find an appropriate instruction (if any).
       CmpInst::Predicate NotPred = Cmp->getInversePredicate();
       Constant *NotVal = ConstantInt::get(Cmp->getType(), isKnownFalse);
-      Expression *E = createCmpExpression(Cmp->getOpcode(), Cmp->getType(),
-                                          NotPred, Op0, Op1, Cmp->getParent());
+      BasicExpression *E =
+          createCmpExpression(Cmp->getOpcode(), Cmp->getType(), NotPred, Op0,
+                              Op1, Cmp->getParent());
 
       // We cannot directly propagate into the congruence class members
       // unless it is a singleton class.
@@ -906,6 +924,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       // split out of the class.
 
       CongruenceClass *CC = ExpressionToClass.lookup(E);
+      E->deallocateArgs(ArgRecycler);
       ExpressionAllocator.Deallocate(E);
 
       // If we didn't find a congruence class, there is no equivalent
@@ -954,8 +973,8 @@ static bool isOnlyReachableViaThisEdge(BasicBlock *Src, BasicBlock *Dst,
 
 void NewGVN::markUsersTouched(Value *V) {
   // Now mark the users as touched
-  for (auto &U : V->uses()) {
-    Instruction *User = dyn_cast<Instruction>(U.getUser());
+  for (auto U : V->users()) {
+    Instruction *User = dyn_cast<Instruction>(U);
     assert(User && "Use of value not within an instruction?");
     TouchedInstructions.insert(User);
   }
@@ -1054,7 +1073,6 @@ void NewGVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
       } else if (VClass->leader == V) {
         // TODO: Check what happens if expression represented the leader
         VClass->leader = *(VClass->members.begin());
-
         for (auto L : VClass->members) {
           if (Instruction *I = dyn_cast<Instruction>(L))
             TouchedInstructions.insert(I);
@@ -1075,8 +1093,7 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
     // If this block wasn't reachable before, all instructions are touched
     if (ReachableBlocks.insert(To).second) {
       DEBUG(dbgs() << "Block " << getBlockName(To) << " marked reachable\n");
-      for (auto &I : *To)
-        TouchedInstructions.insert(&I);
+      TouchedAllInBlock.insert(To);
     } else {
       DEBUG(dbgs() << "Block " << getBlockName(To)
                    << " was reachable, but new edge to it found\n");
@@ -1099,7 +1116,7 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
       // instructions were inferred based on them (though that could
       // be tracked)
 
-      // propagateChangeInEdge(To);
+      propagateChangeInEdge(To);
     }
   }
 }
@@ -1193,7 +1210,7 @@ void NewGVN::propagateChangeInEdge(BasicBlock *Dest) {
   // phi nodes.
   for (auto D : depth_first(DTN)) {
     BasicBlock *B = D->getBlock();
-    if (!B->getUniquePredecessor()) {
+    if (!UniquePredecessorBlocks.count(B)) {
       for (auto &I : *B) {
         if (!isa<PHINode>(&I))
           break;
@@ -1235,6 +1252,7 @@ void NewGVN::cleanupTables() {
     CongruenceClasses[i] = NULL;
   }
 
+  ArgRecycler.clear(ExpressionAllocator);
   ExpressionAllocator.Reset();
   CongruenceClasses.clear();
   ExpressionToClass.clear();
@@ -1243,11 +1261,13 @@ void NewGVN::cleanupTables() {
   ReachableBlocks.clear();
   ReachableEdges.clear();
   TouchedInstructions.clear();
+  TouchedAllInBlock.clear();
   ProcessedCount.clear();
   DFSBBMap.clear();
   InstrLocalDFS.clear();
   ValueToExpression.clear();
   InstructionsToErase.clear();
+  UniquePredecessorBlocks.clear();
 }
 
 /// runOnFunction - This is the main transformation entry point for a function.
@@ -1270,6 +1290,8 @@ bool NewGVN::runOnFunction(Function &F) {
   // Count number of instructions for sizing of hash tables, and come
   // up with local dfs numbering for instructions
   for (auto &B : F) {
+    if (B.getUniquePredecessor())
+      UniquePredecessorBlocks.insert(&B);
     for (auto &I : B) {
       InstrLocalDFS[&I] = ICount;
       ++ICount;
@@ -1281,13 +1303,12 @@ bool NewGVN::runOnFunction(Function &F) {
   ExpressionToClass.resize(ICount + 1);
   MemoryExpressionToClass.resize(ICount + 1);
   // Initialize the touched instructions to include the entry block
-  for (auto &I : F.getEntryBlock())
-    TouchedInstructions.insert(&I);
+  TouchedAllInBlock.insert(&F.getEntryBlock());
   ReachableBlocks.insert(&F.getEntryBlock());
 
   initializeCongruenceClasses(F);
 
-  while (!TouchedInstructions.empty()) {
+  while (!TouchedInstructions.empty() || !TouchedAllInBlock.empty()) {
     // TODO: Use two worklist method to keep ordering straight
     // TODO: or Investigate RPO numbering both blocks and instructions in the
     // same pass,
@@ -1296,15 +1317,16 @@ bool NewGVN::runOnFunction(Function &F) {
     ReversePostOrderTraversal<Function *> rpoT(&F);
     for (auto &R : rpoT) {
       // TODO(Predication)
-      bool blockReachable = ReachableBlocks.count(R);
-      bool movedForward = false;
+      bool BlockReachable = ReachableBlocks.count(R);
+      bool MovedForward = false;
+      bool WholeBlockTouched = TouchedAllInBlock.erase(R);
       for (auto BI = R->begin(), BE = R->end(); BI != BE;
-           !movedForward ? BI++ : BI) {
-        movedForward = false;
+           !MovedForward ? BI++ : BI) {
+        MovedForward = false;
         bool WasThere = TouchedInstructions.erase(BI);
-        if (WasThere) {
+        if (WasThere || WholeBlockTouched) {
           DEBUG(dbgs() << "Processing instruction " << *BI << "\n");
-          if (!blockReachable) {
+          if (!BlockReachable) {
             DEBUG(dbgs() << "Skipping instruction " << *BI << " because block "
                          << getBlockName(R) << " is unreachable\n");
             continue;
@@ -1312,7 +1334,7 @@ bool NewGVN::runOnFunction(Function &F) {
           // This is done in case something eliminates the instruction
           // along the way.
           Instruction *I = BI++;
-          movedForward = true;
+          MovedForward = true;
 
           if (ProcessedCount.count(I) == 0) {
             ProcessedCount.insert(std::make_pair(I, 1));
@@ -1332,7 +1354,9 @@ bool NewGVN::runOnFunction(Function &F) {
       }
     }
   }
+
   Changed |= eliminateInstructions(F);
+
   // Delete all instructions marked for deletion.
   for (unsigned i = 0, e = InstructionsToErase.size(); i != e; ++i) {
     Instruction *toErase = InstructionsToErase[i];
