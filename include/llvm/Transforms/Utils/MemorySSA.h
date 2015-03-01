@@ -79,7 +79,6 @@ class DominatorTree;
 class Function;
 
 class MemoryAccess {
-
 public:
   enum AccessType { AccessUse, AccessDef, AccessPhi };
 
@@ -91,7 +90,8 @@ public:
   virtual ~MemoryAccess() {}
   BasicBlock *getBlock() const { return Block; }
 
-  virtual void print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo) {}
+  typedef UniqueVector<const MemoryAccess *> SlotInfoType;
+  virtual void print(raw_ostream &OS, SlotInfoType &SlotInfo) {}
   typedef MemoryAccess **iterator;
   typedef MemoryAccess **const const_iterator;
 
@@ -131,7 +131,7 @@ public:
   static inline bool classof(const MemoryAccess *MA) {
     return MA->getAccessType() == AccessUse;
   }
-  virtual void print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo);
+  virtual void print(raw_ostream &OS, SlotInfoType &SlotInfo);
 
 protected:
   MemoryUse(MemoryAccess *DMA, enum AccessType AT, Instruction *MI,
@@ -157,7 +157,7 @@ public:
   static inline bool classof(const MemoryAccess *MA) {
     return MA->getAccessType() == AccessDef;
   }
-  virtual void print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo);
+  virtual void print(raw_ostream &OS, SlotInfoType &SlotInfo);
   typedef MemoryAccess **iterator;
   typedef const MemoryAccess **const_iterator;
 };
@@ -186,7 +186,7 @@ public:
     return MA->getAccessType() == AccessPhi;
   }
 
-  virtual void print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo);
+  virtual void print(raw_ostream &OS, SlotInfoType &SlotInfo);
 
 private:
   SmallVector<std::pair<BasicBlock *, MemoryAccess *>, 8> Args;
@@ -204,11 +204,11 @@ private:
   DenseMap<const Value *, MemoryAccess *> InstructionToMemoryAccess;
   DenseMap<std::pair<MemoryAccess *, AliasAnalysis::Location>, MemoryAccess *>
       CachedClobberingAccess;
+  DenseMap<MemoryAccess *, MemoryAccess *> CachedClobberingCall;
 
   // Memory SSA building info
-  MemoryAccess *LiveOnEntryDef;
-
   typedef DenseMap<BasicBlock *, std::list<MemoryAccess *> *> AccessMap;
+  MemoryAccess *LiveOnEntryDef;
 
 public:
   MemorySSA();
@@ -232,11 +232,21 @@ public:
   MemoryAccess *getMemoryAccess(const Value *I) const;
   void dump(Function &F);
   void print(raw_ostream &OS, const Module *M) const override;
+  inline bool isLiveOnEntryDef(const MemoryAccess *MA) const {
+    return MA == LiveOnEntryDef;
+  }
+  inline const MemoryAccess *getLiveOnEntryDef() const {
+    assert(LiveOnEntryDef && "Live on entry def not initialized yet");
+    return LiveOnEntryDef;
+  }
 
 private:
-  bool isLiveOnEntryDef(const MemoryAccess *MA) const;
   void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use);
   typedef DenseMap<MemoryAccess *, std::list<MemoryAccess *> *> UseMap;
+  MemoryAccess *doCacheLookup(MemoryAccess *, const AliasAnalysis::Location &,
+                              bool);
+  void doCacheInsert(MemoryAccess *, const AliasAnalysis::Location &,
+                     MemoryAccess *, bool);
   std::pair<MemoryAccess *, bool>
   getClobberingMemoryAccess(MemoryPhi *Phi, const AliasAnalysis::Location &,
                             bool, SmallPtrSet<MemoryAccess *, 32> &);
