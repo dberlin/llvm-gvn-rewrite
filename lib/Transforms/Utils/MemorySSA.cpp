@@ -231,13 +231,13 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
           if (AA->getModRefInfo(Loc.Ptr, DefMemoryInst) & AliasAnalysis::Mod)
             break;
         } else {
-          // Otherwise, check if the call modifies or references this
-          // location (The best we can say is that if the call
-          // references what this instruction defines, it
-          // must be clobbered by this location,.
+          // Otherwise, check if the call modifies or references the
+          // location this memory access defines.  The best we can say
+          // is that if the call references what this instruction
+          // defines, it must be clobbered by this location. 
           const AliasAnalysis::Location DefLoc = AA->getLocation(DefMemoryInst);
-          if (AA->getModRefInfo(cast<Instruction>(Loc.Ptr), DefLoc) &
-              AliasAnalysis::Mod)
+          if (AA->getModRefInfo(cast<Instruction>(Loc.Ptr), DefLoc) !=
+              AliasAnalysis::NoModRef)
             break;
         }
       }
@@ -260,7 +260,8 @@ MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
 
   // First extract our location, then start walking until it is
   // clobbered
-
+  // For calls, we store the call instruction we started with in
+  // Loc.Ptr
   AliasAnalysis::Location Loc(I);
 
   // We can't sanely do anything with a FenceInst, they conservatively
