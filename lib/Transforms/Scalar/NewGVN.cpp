@@ -47,6 +47,7 @@
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Recycler.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Transforms/Scalar/GVNExpression.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
@@ -129,6 +130,8 @@ class NewGVN : public FunctionPass {
   AliasAnalysis *AA;
   MemorySSA *MSSA;
   BumpPtrAllocator ExpressionAllocator;
+  BumpPtrAllocator PHIExpressionAllocator;
+  Recycler<PHIExpression> PHIExpressionRecycler;
 
   // Congruence class info
   DenseMap<Value *, CongruenceClass *> ValueToClass;
@@ -291,9 +294,10 @@ INITIALIZE_PASS_END(NewGVN, "newgvn", "Global Value Numbering", false, false)
 Expression *NewGVN::createPHIExpression(Instruction *I, BasicBlock *B) {
   PHINode *PN = cast<PHINode>(I);
   PHIExpression *E = new (ExpressionAllocator)
+      //      PHIExpressionRecycler.Allocate<PHIExpression>(PHIExpressionAllocator))
       PHIExpression(PN->getNumOperands(), I->getParent());
 
-  E->allocateArgs(ExpressionAllocator);
+  E->allocateArgs(PHIExpressionAllocator);
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
   for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i) {
@@ -360,7 +364,7 @@ Expression *NewGVN::checkSimplificationResults(Expression *E, Instruction *I,
     DEBUG(dbgs() << "Simplified " << *I << " to "
                  << " constant " << *C << "\n");
     NumGVNOpsSimplified++;
-    //    delete E;
+    ExpressionAllocator.Deallocate(E);
     return createConstantExpression(C);
   }
   CongruenceClass *CC = ValueToClass.lookup(V);
@@ -368,10 +372,17 @@ Expression *NewGVN::checkSimplificationResults(Expression *E, Instruction *I,
     DEBUG(dbgs() << "Simplified " << *I << " to "
                  << " expression " << *V << "\n");
     NumGVNOpsSimplified++;
-    //    delete E;
+    ExpressionAllocator.Deallocate(E);
     return CC->expression;
   }
   return NULL;
+}
+
+static bool atLeastOneArgConstant(BasicExpression *E) {
+  for (unsigned i = 0, e = E->args_size(); i != e; ++i)
+    if (isa<Constant>(E->Args[i]))
+      return true;
+  return false;
 }
 
 Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
@@ -400,30 +411,32 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
   //  and x, x -> x
   // We should handle this by simply rewriting the expression.
   if (CmpInst *CI = dyn_cast<CmpInst>(I)) {
-    // Sort the operand value numbers so x<y and y>x get the same value number.
-    CmpInst::Predicate Predicate = CI->getPredicate();
-    if (E->Args[0] > E->Args[1]) {
-      std::swap(E->Args[0], E->Args[1]);
-      Predicate = CmpInst::getSwappedPredicate(Predicate);
-    }
-    E->setOpcode((CI->getOpcode() << 8) | Predicate);
-    // TODO: 25% of our time is spent in SimplifyCmpInst with pointer operands
-    // TODO: Since we noop bitcasts, we may need to check types before
-    // simplifying, so that we don't end up simplifying based on a wrong
-    // type assumption. We should clean this up so we can use constants of the
-    // wrong type
+    if (atLeastOneArgConstant(E)) {
+      // Sort the operand value numbers so x<y and y>x get the same value
+      // number.
+      CmpInst::Predicate Predicate = CI->getPredicate();
+      if (E->Args[0] > E->Args[1]) {
+        std::swap(E->Args[0], E->Args[1]);
+        Predicate = CmpInst::getSwappedPredicate(Predicate);
+      }
+      E->setOpcode((CI->getOpcode() << 8) | Predicate);
+      // TODO: 25% of our time is spent in SimplifyCmpInst with pointer operands
+      // TODO: Since we noop bitcasts, we may need to check types before
+      // simplifying, so that we don't end up simplifying based on a wrong
+      // type assumption. We should clean this up so we can use constants of the
+      // wrong type
 
-    assert(I->getOperand(0)->getType() == I->getOperand(1)->getType() &&
-           "Wrong types on cmp instruction");
-    if ((E->Args[0]->getType() == I->getOperand(0)->getType() &&
-         E->Args[1]->getType() == I->getOperand(1)->getType())) {
-      Value *V =
-          SimplifyCmpInst(Predicate, E->Args[0], E->Args[1], DL, TLI, DT, AC);
-      Expression *simplifiedE;
-      if ((simplifiedE = checkSimplificationResults(E, I, V)))
-        return simplifiedE;
+      assert(I->getOperand(0)->getType() == I->getOperand(1)->getType() &&
+             "Wrong types on cmp instruction");
+      if ((E->Args[0]->getType() == I->getOperand(0)->getType() &&
+           E->Args[1]->getType() == I->getOperand(1)->getType())) {
+        Value *V =
+            SimplifyCmpInst(Predicate, E->Args[0], E->Args[1], DL, TLI, DT, AC);
+        Expression *simplifiedE;
+        if ((simplifiedE = checkSimplificationResults(E, I, V)))
+          return simplifiedE;
+      }
     }
-
   } else if (isa<SelectInst>(I)) {
     if (isa<Constant>(E->Args[0]) ||
         (E->Args[1]->getType() == I->getOperand(1)->getType() &&
@@ -629,7 +642,7 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
   if (E->args_empty()) {
     DEBUG(dbgs() << "Simplified PHI node " << I << " to undef"
                  << "\n");
-    //    delete E;
+    PHIExpressionAllocator.Deallocate(E);
     return createVariableExpression(UndefValue::get(I->getType()));
   }
 
@@ -659,7 +672,7 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
     DEBUG(dbgs() << "Simplified PHI node " << I << " to " << *AllSameValue
                  << "\n");
 
-    //    delete E;
+    ExpressionAllocator.Deallocate(E);
     return performSymbolicEvaluation(AllSameValue, B);
   }
   return E;
@@ -897,7 +910,8 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       // split out of the class.
 
       CongruenceClass *CC = ExpressionToClass.lookup(E);
-      //      delete E;
+      ExpressionAllocator.Deallocate(E);
+
       // If we didn't find a congruence class, there is no equivalent
       // instruction already
       if (CC) {
@@ -1224,6 +1238,8 @@ void NewGVN::cleanupTables() {
 
     CongruenceClasses[i] = NULL;
   }
+  PHIExpressionRecycler.clear(PHIExpressionAllocator);
+  PHIExpressionAllocator.Reset();
   ExpressionAllocator.Reset();
   CongruenceClasses.clear();
   ExpressionToClass.clear();
