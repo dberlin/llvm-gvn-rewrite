@@ -47,7 +47,6 @@
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/Recycler.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Transforms/Scalar/GVNExpression.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
@@ -130,8 +129,6 @@ class NewGVN : public FunctionPass {
   AliasAnalysis *AA;
   MemorySSA *MSSA;
   BumpPtrAllocator ExpressionAllocator;
-  BumpPtrAllocator PHIExpressionAllocator;
-  Recycler<PHIExpression> PHIExpressionRecycler;
 
   // Congruence class info
   DenseMap<Value *, CongruenceClass *> ValueToClass;
@@ -294,10 +291,9 @@ INITIALIZE_PASS_END(NewGVN, "newgvn", "Global Value Numbering", false, false)
 Expression *NewGVN::createPHIExpression(Instruction *I, BasicBlock *B) {
   PHINode *PN = cast<PHINode>(I);
   PHIExpression *E = new (ExpressionAllocator)
-      //      PHIExpressionRecycler.Allocate<PHIExpression>(PHIExpressionAllocator))
       PHIExpression(PN->getNumOperands(), I->getParent());
 
-  E->allocateArgs(PHIExpressionAllocator);
+  E->allocateArgs(ExpressionAllocator);
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
   for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i) {
@@ -642,7 +638,7 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
   if (E->args_empty()) {
     DEBUG(dbgs() << "Simplified PHI node " << I << " to undef"
                  << "\n");
-    PHIExpressionAllocator.Deallocate(E);
+    ExpressionAllocator.Deallocate(E);
     return createVariableExpression(UndefValue::get(I->getType()));
   }
 
@@ -1238,8 +1234,7 @@ void NewGVN::cleanupTables() {
 
     CongruenceClasses[i] = NULL;
   }
-  PHIExpressionRecycler.clear(PHIExpressionAllocator);
-  PHIExpressionAllocator.Reset();
+
   ExpressionAllocator.Reset();
   CongruenceClasses.clear();
   ExpressionToClass.clear();
