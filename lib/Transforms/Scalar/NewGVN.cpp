@@ -171,6 +171,15 @@ class NewGVN : public FunctionPass {
   DenseSet<Value *> ChangedValues;
   DenseSet<std::pair<BasicBlock *, BasicBlock *>> ReachableEdges;
   DenseSet<const BasicBlock *> ReachableBlocks;
+  // This is a bitvector because, on larger functions, we may have
+  // thousands of touched instructions at once (entire blocks,
+  // instructions with hundreds of uses, etc).  Even with optimization
+  // for when we mark whole blocks as touched, when this was a
+  // SmallPtrSet or DenseSet, for some functions, we spent >20% of all
+  // the time in GVN just managing this list.  The bitvector, on the
+  // other hand, efficiently supports test/set/clear of both
+  // individual and ranges, as well as "find next element" This
+  // enables us to use it as a worklist with essentially 0 cost.
   BitVector TouchedInstructions;
   DenseMap<const BasicBlock *, std::pair<unsigned int, unsigned int>>
       BlockInstRange;
@@ -281,8 +290,6 @@ private:
   // Utilities
   void cleanupTables();
   std::pair<unsigned, unsigned> assignDFSNumbers(BasicBlock *, unsigned);
-  
-
 };
 
 char NewGVN::ID = 0;
@@ -1279,7 +1286,8 @@ void NewGVN::cleanupTables() {
   BlockInstRange.clear();
 }
 
-std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B, unsigned Start) {
+std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
+                                                       unsigned Start) {
   unsigned int Count = Start;
   for (auto &I : *B) {
     InstrDFS[&I] = Count++;
@@ -1314,7 +1322,6 @@ bool NewGVN::runOnFunction(Function &F) {
   for (auto &B : rpoT) {
     const auto &BlockRange = assignDFSNumbers(B, ICount);
     BlockInstRange.insert(std::make_pair(B, BlockRange));
-    assert((BlockRange.second - BlockRange.first) == B->size() && "Instruction count mismatch");
     ICount += BlockRange.second - BlockRange.first;
   }
   // Handle forward unreachable blocks and figure out which blocks
@@ -1324,24 +1331,12 @@ bool NewGVN::runOnFunction(Function &F) {
     if (&B != &F.getEntryBlock() && pred_empty(&B)) {
       const auto &BlockRange = assignDFSNumbers(&B, ICount);
       BlockInstRange.insert(std::make_pair(&B, BlockRange));
-      assert((BlockRange.second - BlockRange.first) == B.size() && "Instruction count mismatch");
       ICount += BlockRange.second - BlockRange.first;
     } else if (B.getUniquePredecessor())
       UniquePredecessorBlocks.insert(&B);
   }
 
   TouchedInstructions.resize(ICount + 1);
-  for (auto &R : BlockInstRange) {
-    for (unsigned i = R.second.first, e = R.second.second; i != e; ++i) {
-      assert(DFSToInstr.at(i)->getParent() == R.first &&
-             "Block range mapping broken");
-    }
-    for (auto &I : *R.first) {
-      assert(InstrDFS[&I] >= R.second.first && InstrDFS[&I] < R.second.second &&
-             "Instruction range mapping is broken");
-      assert(DFSToInstr[InstrDFS[&I]] == &I && "Local DFS mapping is broken");
-    }
-  }
 
   // Ensure we don't end up resizing the expressionToClass map, as
   // that can be quite expensive. At most, we have one expression per
@@ -1356,46 +1351,45 @@ bool NewGVN::runOnFunction(Function &F) {
   initializeCongruenceClasses(F);
 
   // We start out in the entry block
-  BasicBlock *LastInstrBlock = &F.getEntryBlock();
+  BasicBlock *LastBlock = &F.getEntryBlock();
   while (TouchedInstructions.any()) {
     // Walk through all the instructions in all the blocks in RPO
     for (int InstrNum = TouchedInstructions.find_first(); InstrNum != -1;
          InstrNum = TouchedInstructions.find_next(InstrNum)) {
       Instruction *I = DFSToInstr[InstrNum];
-      BasicBlock *InstrBlock = I->getParent();
+      BasicBlock *CurrBlock = I->getParent();
 
       // If we hit a new block, do reachability processing
-      if (InstrBlock != LastInstrBlock) {
-        LastInstrBlock = InstrBlock;
-        bool BlockReachable = ReachableBlocks.count(InstrBlock);
-        const auto &InstRange = BlockInstRange.lookup(InstrBlock);
-        if (ProcessedBlockCount.count(InstrBlock) == 0) {
-          ProcessedBlockCount.insert(std::make_pair(InstrBlock, 1));
-        } else {
-          ProcessedBlockCount[InstrBlock] += 1;
-          assert(ProcessedBlockCount[InstrBlock] < 100 &&
-                 "Seem to have processed the same block a lot");
-        }
+      if (CurrBlock != LastBlock) {
+        LastBlock = CurrBlock;
+        bool BlockReachable = ReachableBlocks.count(CurrBlock);
+        const auto &InstRange = BlockInstRange.lookup(CurrBlock);
         // If it's not reachable, erase any touched instructions and
         // move on
         if (!BlockReachable) {
           TouchedInstructions.reset(InstRange.first, InstRange.second);
-          for (auto &I : *InstrBlock)
-            assert(!TouchedInstructions.test(InstrDFS[&I]) &&
-                   "This range is broken");
-
           DEBUG(dbgs() << "Skipping instructions in block "
-                       << getBlockName(InstrBlock)
+                       << getBlockName(CurrBlock)
                        << " because it is unreachable\n");
           continue;
         }
+#ifndef NDEBUG
+        if (ProcessedBlockCount.count(CurrBlock) == 0) {
+          ProcessedBlockCount.insert(std::make_pair(CurrBlock, 1));
+        } else {
+          ProcessedBlockCount[CurrBlock] += 1;
+          assert(ProcessedBlockCount[CurrBlock] < 100 &&
+                 "Seem to have processed the same block a lot\n");
+        }
+#endif
       }
       TouchedInstructions.reset(InstrNum);
 
       DEBUG(dbgs() << "Processing instruction " << *I << "\n");
-      // This is done in case something eliminates the instruction
-      // along the way.
+// This is done in case something eliminates the instruction
+// along the way.
 
+#ifndef NDEBUG
       if (ProcessedCount.count(I) == 0) {
         ProcessedCount.insert(std::make_pair(I, 1));
       } else {
@@ -1403,10 +1397,10 @@ bool NewGVN::runOnFunction(Function &F) {
         assert(ProcessedCount[I] < 100 &&
                "Seem to have processed the same instruction a lot");
       }
-
+#endif
       if (!I->isTerminator()) {
-        Expression *Symbolized = performSymbolicEvaluation(I, InstrBlock);
-        performCongruenceFinding(I, InstrBlock, Symbolized);
+        Expression *Symbolized = performSymbolicEvaluation(I, CurrBlock);
+        performCongruenceFinding(I, CurrBlock, Symbolized);
       } else {
         processOutgoingEdges(dyn_cast<TerminatorInst>(I));
       }
