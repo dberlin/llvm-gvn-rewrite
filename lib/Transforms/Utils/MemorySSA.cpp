@@ -490,8 +490,8 @@ NextIteration:
         continue;
 
       if (MemoryUse *MU = dyn_cast<MemoryUse>(L)) {
-        MU->setDefiningAccess(IncomingVal);
 #if OPTIMIZE_USES
+        MU->setDefiningAccess(IncomingVal);
         auto RealVal = getClobberingMemoryAccess(MU->getMemoryInst());
 #else
         auto RealVal = IncomingVal;
@@ -500,13 +500,7 @@ NextIteration:
         addUseToMap(Uses, RealVal, MU);
       } else if (MemoryDef *MD = dyn_cast<MemoryDef>(L)) {
         MD->setDefiningAccess(IncomingVal);
-#if OPTIMIZE_USES
-        auto RealVal = getClobberingMemoryAccess(MD->getMemoryInst());
-#else
-        auto RealVal = IncomingVal;
-#endif
-        MD->setDefiningAccess(RealVal);
-        addUseToMap(Uses, RealVal, MD);
+        addUseToMap(Uses, IncomingVal, MD);
         IncomingVal = MD;
       }
     }
