@@ -136,6 +136,15 @@ public:
     }
   };
 
+  /// getLocation - Fill in Loc with information about the memory reference by
+  /// the given instruction.
+  Location getLocation(const LoadInst *LI);
+  Location getLocation(const StoreInst *SI);
+  Location getLocation(const VAArgInst *VI);
+  Location getLocation(const AtomicCmpXchgInst *CXI);
+  Location getLocation(const AtomicRMWInst *RMWI);
+  static Location getLocationForSource(const MemTransferInst *MTI);
+  static Location getLocationForDest(const MemIntrinsic *MI);
   Location getLocation(Instruction *Inst) {
     if (auto *I = dyn_cast<LoadInst>(Inst))
       return getLocation(I);
@@ -150,16 +159,6 @@ public:
     else
       llvm_unreachable("unsupported memory instruction");
   }
-
-  /// getLocation - Fill in Loc with information about the memory reference by
-  /// the given instruction.
-  Location getLocation(const LoadInst *LI);
-  Location getLocation(const StoreInst *SI);
-  Location getLocation(const VAArgInst *VI);
-  Location getLocation(const AtomicCmpXchgInst *CXI);
-  Location getLocation(const AtomicRMWInst *RMWI);
-  static Location getLocationForSource(const MemTransferInst *MTI);
-  static Location getLocationForDest(const MemIntrinsic *MI);
 
   /// Alias analysis result - Either we know for sure that it does not alias, we
   /// know for sure it must alias, or we don't know anything: The two pointers
