@@ -255,7 +255,6 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
 // the memory access that actually clobbers this one, skipping non-aliasing
 // ones along the way
 MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
-
   MemoryAccess *StartingAccess = getMemoryAccess(I);
   bool AskingAboutCall = false;
 
@@ -264,7 +263,11 @@ MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
 
   AliasAnalysis::Location Loc(I);
 
-  if (!isa<CallInst>(I) && !isa<InvokeInst>(I)) {
+  // We can't sanely do anything with a FenceInst, they conservatively
+  // clobber all memory
+  if (isa<FenceInst>(I)) {
+    return StartingAccess;
+  } else if (!isa<CallInst>(I) && !isa<InvokeInst>(I)) {
     Loc = AA->getLocation(I);
   } else {
     AskingAboutCall = true;
@@ -499,8 +502,16 @@ NextIteration:
         MU->setDefiningAccess(RealVal);
         addUseToMap(Uses, RealVal, MU);
       } else if (MemoryDef *MD = dyn_cast<MemoryDef>(L)) {
+#if OPTIMIZE_USES
         MD->setDefiningAccess(IncomingVal);
-        addUseToMap(Uses, IncomingVal, MD);
+        auto RealVal = getClobberingMemoryAccess(MD->getMemoryInst());
+        if (RealVal == MD)
+          RealVal = IncomingVal;
+#else
+        auto RealVal = IncomingVal;
+#endif
+        MD->setDefiningAccess(RealVal);
+        addUseToMap(Uses, RealVal, MD);
         IncomingVal = MD;
       }
     }
