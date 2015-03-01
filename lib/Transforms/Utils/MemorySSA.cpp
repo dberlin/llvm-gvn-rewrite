@@ -51,13 +51,17 @@ INITIALIZE_PASS_END(MemorySSA, "memoryssa", "Memory SSA", false, true);
 // while building so they point to the nearest actual clobber
 #define OPTIMIZE_USES 1
 
+namespace llvm {
 // An annotator class to print memory ssa information in comments
 class MemorySSAAnnotatedWriter : public AssemblyAnnotationWriter {
   const MemorySSA *MSSA;
-  UniqueVector<MemoryAccess *> SlotInfo;
+  MemoryAccess::SlotInfoType SlotInfo;
 
 public:
-  MemorySSAAnnotatedWriter(const MemorySSA *M) : MSSA(M) {}
+  MemorySSAAnnotatedWriter(const MemorySSA *M) : MSSA(M) {
+    // Always want the live on entry def to print out as the lowest number
+    SlotInfo.insert(M->getLiveOnEntryDef());
+  }
 
   virtual void emitBasicBlockStartAnnot(const BasicBlock *BB,
                                         formatted_raw_ostream &OS) {
@@ -79,9 +83,33 @@ public:
     }
   }
 };
+}
 
-bool MemorySSA::isLiveOnEntryDef(const MemoryAccess *MA) const {
-  return MA == LiveOnEntryDef;
+void MemorySSA::doCacheInsert(MemoryAccess *M,
+                              const AliasAnalysis::Location &Loc,
+                              MemoryAccess *Result, bool AskingAboutCall) {
+  if (!AskingAboutCall)
+    CachedClobberingAccess.insert(
+        std::make_pair(std::make_pair(M, Loc), Result));
+  else
+    CachedClobberingCall.insert(std::make_pair(M, Result));
+}
+
+MemoryAccess *MemorySSA::doCacheLookup(MemoryAccess *M,
+                                       const AliasAnalysis::Location &Loc,
+                                       bool AskingAboutCall) {
+  ++NumClobberCacheLookups;
+  MemoryAccess *Result;
+  if (AskingAboutCall)
+    Result = CachedClobberingCall.lookup(getMemoryAccess(Loc.Ptr));
+  else
+    Result = CachedClobberingAccess.lookup(std::make_pair(M, Loc));
+
+  if (Result) {
+    ++NumClobberCacheHits;
+    return Result;
+  }
+  return nullptr;
 }
 
 // Get the clobbering memory access for a phi node and alias location
@@ -92,14 +120,9 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
   bool HitVisited = false;
 
   ++NumClobberCacheLookups;
-  auto CCV = CachedClobberingAccess.find(std::make_pair(P, Loc));
-  if (CCV != CachedClobberingAccess.end()) {
-    ++NumClobberCacheHits;
-    DEBUG(dbgs() << "Cached Memory SSA pointer for " << (uintptr_t)P << " is ");
-    DEBUG(dbgs() << (uintptr_t)CCV->second);
-    DEBUG(dbgs() << "\n");
-    return std::make_pair(CCV->second, false);
-  }
+  auto CacheResult = doCacheLookup(P, Loc, AskingAboutCall);
+  if (CacheResult)
+    return std::make_pair(CacheResult, false);
 
   // The algorithm here is fairly simple. The goal is to prove that
   // the phi node doesn't matter for this alias location, and to get
@@ -160,8 +183,7 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
       HitVisited = false;
     }
   }
-  // Cache our result
-  CachedClobberingAccess.insert(std::make_pair(std::make_pair(P, Loc), Result));
+  doCacheInsert(P, Loc, Result, AskingAboutCall);
 
   return std::make_pair(Result, HitVisited);
 }
@@ -190,20 +212,16 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
       Instruction *DefMemoryInst = MD->getMemoryInst();
       assert(DefMemoryInst &&
              "Defining instruction not actually an instruction");
+
       // While we can do lookups, we can't sanely do inserts here unless we
       // were to track every thing we saw along the way, since we don't
       // know where we will stop.
-      ++NumClobberCacheLookups;
-      auto CCV = CachedClobberingAccess.find(std::make_pair(CurrAccess, Loc));
-      if (CCV != CachedClobberingAccess.end()) {
-        ++NumClobberCacheHits;
-        DEBUG(dbgs() << "Cached Memory SSA pointer for " << *DefMemoryInst
-                     << " is ");
-        DEBUG(dbgs() << (uintptr_t)CCV->second);
-        DEBUG(dbgs() << "\n");
-        return std::make_pair(CCV->second, false);
-      }
+      // Note: There is no point in doing lookups for calls at this
+      // stage. If we knew a better result for the initial call, we
+      // would have found it in the function that calls this one.
       if (!AskingAboutCall) {
+        if (auto CacheResult = doCacheLookup(CurrAccess, Loc, AskingAboutCall))
+          return std::make_pair(CacheResult, false);
         // Check whether our memory location is modified by this instruction
         if (AA->getModRefInfo(DefMemoryInst, Loc) & AliasAnalysis::Mod)
           break;
@@ -229,8 +247,7 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
     // Walk from def to def
     CurrAccess = NextAccess;
   }
-  CachedClobberingAccess.insert(
-      std::make_pair(std::make_pair(MA, Loc), CurrAccess));
+  doCacheInsert(MA, Loc, CurrAccess, AskingAboutCall);
   return std::make_pair(CurrAccess, false);
 }
 
@@ -242,34 +259,24 @@ MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
   MemoryAccess *StartingAccess = getMemoryAccess(I);
   bool AskingAboutCall = false;
 
-  // First extract our location, then start walking until it is clobbered
-  AliasAnalysis::Location Loc;
+  // First extract our location, then start walking until it is
+  // clobbered
+
+  AliasAnalysis::Location Loc(I);
 
   if (!isa<CallInst>(I) && !isa<InvokeInst>(I)) {
     Loc = AA->getLocation(I);
   } else {
     AskingAboutCall = true;
-    Loc.Ptr = I;
   }
-
-  ++NumClobberCacheLookups;
-  auto CCV = CachedClobberingAccess.find(std::make_pair(StartingAccess, Loc));
-
-  if (CCV != CachedClobberingAccess.end()) {
-    ++NumClobberCacheHits;
-    DEBUG(dbgs() << "Cached Memory SSA Access for " << (uintptr_t)I << " is ");
-    DEBUG(dbgs() << (uintptr_t)CCV->second);
-    DEBUG(dbgs() << "\n");
-    return CCV->second;
-  }
-
+  auto CacheResult = doCacheLookup(StartingAccess, Loc, AskingAboutCall);
+  if (CacheResult)
+    return CacheResult;
   SmallPtrSet<MemoryAccess *, 32> Visited;
   MemoryAccess *FinalAccess =
       getClobberingMemoryAccess(StartingAccess, Loc, AskingAboutCall, Visited)
           .first;
-
-  CachedClobberingAccess.insert(
-      std::make_pair(std::make_pair(StartingAccess, Loc), FinalAccess));
+  doCacheInsert(StartingAccess, Loc, FinalAccess, AskingAboutCall);
   DEBUG(dbgs() << "Starting Memory SSA clobber for " << (uintptr_t)I << " is ");
   DEBUG(dbgs() << (uintptr_t)StartingAccess);
   DEBUG(dbgs() << "\n");
@@ -493,7 +500,13 @@ NextIteration:
         addUseToMap(Uses, RealVal, MU);
       } else if (MemoryDef *MD = dyn_cast<MemoryDef>(L)) {
         MD->setDefiningAccess(IncomingVal);
-        addUseToMap(Uses, IncomingVal, MD);
+#if OPTIMIZE_USES
+        auto RealVal = getClobberingMemoryAccess(MD->getMemoryInst());
+#else
+        auto RealVal = IncomingVal;
+#endif
+        MD->setDefiningAccess(RealVal);
+        addUseToMap(Uses, RealVal, MD);
         IncomingVal = MD;
       }
     }
@@ -574,6 +587,7 @@ MemorySSA::~MemorySSA() {}
 
 void MemorySSA::releaseMemory() {
   CachedClobberingAccess.clear();
+  CachedClobberingCall.clear();
   InstructionToMemoryAccess.clear();
   MemoryAccessAllocator.Reset();
 }
@@ -781,14 +795,14 @@ MemoryAccess *MemorySSA::getMemoryAccess(const Value *I) const {
   return InstructionToMemoryAccess.lookup(I);
 }
 
-void MemoryDef::print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo) {
+void MemoryDef::print(raw_ostream &OS, SlotInfoType &SlotInfo) {
   MemoryAccess *UO = getDefiningAccess();
   OS << SlotInfo.insert(this) << " = "
      << "MemoryDef(";
   OS << SlotInfo.insert(UO) << ")";
 }
 
-void MemoryPhi::print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo) {
+void MemoryPhi::print(raw_ostream &OS, SlotInfoType &SlotInfo) {
   OS << SlotInfo.insert(this) << " = "
      << "MemoryPhi(";
   for (unsigned int i = 0, e = getNumIncomingValues(); i != e; ++i) {
@@ -810,7 +824,7 @@ void MemoryPhi::print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo) {
   OS << ")";
 }
 
-void MemoryUse::print(raw_ostream &OS, UniqueVector<MemoryAccess *> &SlotInfo) {
+void MemoryUse::print(raw_ostream &OS, SlotInfoType &SlotInfo) {
   MemoryAccess *UO = getDefiningAccess();
   OS << "MemoryUse(";
   OS << SlotInfo.insert(UO);
