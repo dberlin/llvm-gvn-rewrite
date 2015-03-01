@@ -16,6 +16,7 @@
 #define LLVM_TRANSFORMS_SCALAR_GVNEXPRESSION_H
 #include <algorithm>
 #include "llvm/Support/Allocator.h"
+#include "llvm/Support/ArrayRecycler.h"
 
 namespace llvm {
 class MemoryAccess;
@@ -87,6 +88,8 @@ private:
   void operator=(const BasicExpression &) = delete;
   BasicExpression(const BasicExpression &) = delete;
   BasicExpression() = delete;
+  typedef ArrayRecycler<Value *> RecyclerType;
+  typedef RecyclerType::Capacity RecyclerCapacity;
 
 protected:
   unsigned int MaxArgs;
@@ -117,9 +120,12 @@ public:
     return et > ExpressionTypeBasicStart && et < ExpressionTypeBasicEnd;
   }
 
-  virtual void allocateArgs(BumpPtrAllocator &Allocator) {
+  void allocateArgs(RecyclerType &Recycler, BumpPtrAllocator &Allocator) {
     assert(!Args && "Args already allocated");
-    Args = Allocator.Allocate<Value *>(MaxArgs);
+    Args = Recycler.allocate(RecyclerCapacity::get(MaxArgs), Allocator);
+  }
+  void deallocateArgs(RecyclerType &Recycler) {
+    Recycler.deallocate(RecyclerCapacity::get(MaxArgs), Args);
   }
 
   void setType(Type *T) { ValueType = T; }
@@ -334,8 +340,7 @@ public:
         MaxIntArgs(NumIntArgs), NumIntArgs(0), IntArgs(nullptr) {}
 
   virtual ~InsertValueExpression() {}
-  virtual void allocateArgs(BumpPtrAllocator &Allocator) {
-    BasicExpression::allocateArgs(Allocator);
+  virtual void allocateIntArgs(BumpPtrAllocator &Allocator) {
     assert(!IntArgs && "Args already allocated");
     IntArgs = Allocator.Allocate<unsigned int>(MaxIntArgs);
   }
