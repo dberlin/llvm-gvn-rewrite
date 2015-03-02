@@ -1,5 +1,4 @@
-//===- MemorySSA.h - Build Memory SSA ----------------------------*- C++
-//-*-===//
+//===- MemorySSA.h - Build Memory SSA ---------------------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
