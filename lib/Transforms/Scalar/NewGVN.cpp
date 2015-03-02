@@ -1727,6 +1727,10 @@ bool NewGVN::eliminateInstructions(Function &F) {
         std::set<ValueDFS> DFSOrderedMembers;
         convertDenseToDFSOrdered(CC->members, DFSOrderedMembers);
         std::set<ValueDFS> DFSOrderedEquivalences;
+        // TODO: Predicate handling should now completely obviate the
+        // need for this, but need to do before/after to make sure we
+        // didn't miss anything.
+
         //        convertDenseToDFSOrdered(CC->equivalences,
         //        DFSOrderedEquivalences);
         std::vector<ValueDFS> DFSOrderedSet;
