@@ -1260,7 +1260,7 @@ void NewGVN::cleanupTables() {
 
   ValueToClass.clear();
   for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
-    DEBUG(dbgs() << "Congruence class " << i << " has "
+    DEBUG(dbgs() << "Congruence class " << CongruenceClasses[i]->id << " has "
                  << CongruenceClasses[i]->members.size() << " members\n");
     delete CongruenceClasses[i];
 
