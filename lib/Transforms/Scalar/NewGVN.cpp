@@ -2029,9 +2029,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
     // If this is a leader that is always available, and it's a
     // constant or has no equivalences, just replace everything with
     // it. We then update the congruence class with whatever members
-    // are left.  If it has equivalences and isn't constant, we take
-    // the more general approach below because we want to try to
-    // replace using the equivalences
+    // are left.
     if (alwaysAvailable(CC->leader)) {
       SmallPtrSet<Value *, 4> MembersLeft;
       for (auto M : CC->members) {
@@ -2163,8 +2161,10 @@ bool NewGVN::eliminateInstructions(Function &F) {
             continue;
           // The block in the result may be null
           Value *Result = EliminationStack.back();
-          if (Member == Result)
-            continue;
+          assert(Member != Result && "What happened here");
+
+	  // If the replacement is not constant, see if we have a
+	  // better one in an equivalence
           DEBUG(dbgs() << "Found replacement " << *Result << " for " << *Member
                        << "\n");
 
