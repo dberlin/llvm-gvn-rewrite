@@ -747,10 +747,12 @@ void MemorySSA::buildMemorySSA(Function &F) {
 }
 
 void MemorySSA::print(raw_ostream &OS, const Module *M) const {
-  F->print(OS, new MemorySSAAnnotatedWriter(this));
+  MemorySSAAnnotatedWriter Writer(this);
+  F->print(OS, &Writer);
 }
 void MemorySSA::dump(Function &F) {
-  F.print(dbgs(), new MemorySSAAnnotatedWriter(this));
+  MemorySSAAnnotatedWriter Writer(this);
+  F.print(dbgs(), &Writer);
 }
 
 void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
