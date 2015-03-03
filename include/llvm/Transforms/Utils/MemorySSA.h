@@ -242,16 +242,13 @@ public:
 private:
   void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use);
   typedef DenseMap<MemoryAccess *, std::list<MemoryAccess *> *> UseMap;
-  MemoryAccess *doCacheLookup(MemoryAccess *, const AliasAnalysis::Location &,
-                              bool);
-  void doCacheInsert(MemoryAccess *, const AliasAnalysis::Location &,
-                     MemoryAccess *, bool);
+  struct MemoryQuery;
+  MemoryAccess *doCacheLookup(MemoryAccess *, const struct MemoryQuery &);
+  void doCacheInsert(MemoryAccess *, MemoryAccess *, struct MemoryQuery &);
   std::pair<MemoryAccess *, bool>
-  getClobberingMemoryAccess(MemoryPhi *Phi, const AliasAnalysis::Location &,
-                            bool, SmallPtrSet<MemoryAccess *, 32> &);
+  getClobberingMemoryAccess(MemoryPhi *Phi, struct MemoryQuery &);
   std::pair<MemoryAccess *, bool>
-  getClobberingMemoryAccess(MemoryAccess *, const AliasAnalysis::Location &,
-                            bool, SmallPtrSet<MemoryAccess *, 32> &);
+  getClobberingMemoryAccess(MemoryAccess *, struct MemoryQuery &);
 
   void computeLiveInBlocks(const AccessMap &BlockAccesses,
                            const SmallPtrSetImpl<BasicBlock *> &DefBlocks,
