@@ -240,7 +240,7 @@ private:
   // Congruence class handling
   CongruenceClass *createCongruenceClass(Value *Leader, Expression *E) {
     CongruenceClass *result = new CongruenceClass(Leader, E);
-    CongruenceClasses.push_back(result);
+    CongruenceClasses.emplace_back(result);
     return result;
   }
 
@@ -509,7 +509,7 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
 
     SmallVector<Constant *, 8> C;
     for (unsigned i = 0, e = E->args_size(); i != e; ++i)
-      C.push_back(cast<Constant>(E->Args[i]));
+      C.emplace_back(cast<Constant>(E->Args[i]));
 
     Value *V =
         ConstantFoldInstOperands(E->getOpcode(), E->getType(), C, DL, TLI);
@@ -840,7 +840,7 @@ unsigned NewGVN::replaceAllDominatedUsesWith(Value *From, Value *To,
 
 bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
   SmallVector<std::pair<Value *, Value *>, 4> Worklist;
-  Worklist.push_back(std::make_pair(LHS, RHS));
+  Worklist.emplace_back(LHS, RHS);
   bool Changed = false;
   DEBUG(dbgs() << "Setting equivalence " << *LHS << " = " << *RHS
                << " in blocks dominated by " << getBlockName(Root) << "\n");
@@ -905,8 +905,8 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
     Value *A, *B;
     if ((isKnownTrue && match(LHS, m_And(m_Value(A), m_Value(B)))) ||
         (isKnownFalse && match(LHS, m_Or(m_Value(A), m_Value(B))))) {
-      Worklist.push_back(std::make_pair(A, RHS));
-      Worklist.push_back(std::make_pair(B, RHS));
+      Worklist.emplace_back(A, RHS);
+      Worklist.emplace_back(B, RHS);
       continue;
     }
     // If we are propagating an equality like "(A == B)" == "true"
@@ -920,7 +920,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       // A with B everywhere in the scope.
       if ((isKnownTrue && Cmp->getPredicate() == CmpInst::ICMP_EQ) ||
           (isKnownFalse && Cmp->getPredicate() == CmpInst::ICMP_NE))
-        Worklist.push_back(std::make_pair(Op0, Op1));
+        Worklist.emplace_back(Op0, Op1);
 
       // Handle the floating point versions of equality comparisons too.
       if ((isKnownTrue && Cmp->getPredicate() == CmpInst::FCMP_OEQ) ||
@@ -935,7 +935,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
         // indicator that relaxed FP semantics are being used.
 
         if (isa<ConstantFP>(Op1) && !cast<ConstantFP>(Op1)->isZero())
-          Worklist.push_back(std::make_pair(Op0, Op1));
+          Worklist.emplace_back(Op0, Op1);
       }
 
       // If "A >= B" is known true, replace "A < B" with false
@@ -1216,7 +1216,7 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
   } else if (SwitchInst *SI = dyn_cast<SwitchInst>(TI)) {
     // For switches, propagate the case values into the case
     // destinations.
-    
+
     Value *SwitchCond = SI->getCondition();
     Value *CondEvaluated = findConditionEquivalence(SwitchCond, B);
     // See if we were able to turn this switch statement into a constant
@@ -1229,16 +1229,16 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
       updateReachableEdge(B, TargetBlock);
     } else {
       for (unsigned i = 0, e = SI->getNumSuccessors(); i != e; ++i) {
-	BasicBlock *TargetBlock = SI->getSuccessor(i);
-	updateReachableEdge(B, TargetBlock);
+        BasicBlock *TargetBlock = SI->getSuccessor(i);
+        updateReachableEdge(B, TargetBlock);
       }
     }
-    
+
     // Regardless of answers, propagate equalities for case values
     for (auto i = SI->case_begin(), e = SI->case_end(); i != e; ++i) {
       BasicBlock *TargetBlock = i.getCaseSuccessor();
       if (isOnlyReachableViaThisEdge(B, TargetBlock, DT))
-	propagateEquality(SwitchCond, i.getCaseValue(), TargetBlock);
+        propagateEquality(SwitchCond, i.getCaseValue(), TargetBlock);
     }
   } else {
     // Otherwise this is either unconditional, or a type we have no
@@ -1344,7 +1344,7 @@ std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
   unsigned int Count = Start;
   for (auto &I : *B) {
     InstrDFS[&I] = Count++;
-    DFSToInstr.push_back(&I);
+    DFSToInstr.emplace_back(&I);
   }
   // All of the range functions taken half-open ranges (open on the
   // end side), we adjust endcount by 1 here so that we can use
@@ -1560,12 +1560,12 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &Dense,
     // If it's an instruction, use the real local dfs number.
     // If it's a value, it *must* have come from equality propagation,
     // and thus we know it is valid for the entire block.  By giving
-    // the local number as 0, it should sort before the instructions
+    // the local number as -1, it should sort before the instructions
     // in that block.
     if (Instruction *I = dyn_cast<Instruction>(D.first))
       VD.LocalNum = InstrDFS[I];
     else
-      VD.LocalNum = 0;
+      VD.LocalNum = -1;
 
     VD.Val = D.first;
     DFSOrderedSet.insert(VD);
@@ -1635,7 +1635,7 @@ void NewGVN::deleteInstructionsInBlock(BasicBlock *BB) {
 
 void NewGVN::markInstructionForDeletion(Instruction *I) {
   DEBUG(dbgs() << "Marking " << *I << " for deletion\n");
-  InstructionsToErase.push_back(I);
+  InstructionsToErase.emplace_back(I);
 }
 
 void NewGVN::replaceInstruction(Instruction *I, Value *V) {
@@ -1657,8 +1657,8 @@ public:
   std::pair<int, int> dfs_back() const { return DFSStack.back(); }
 
   void push_back(Value *V, int DFSIn, int DFSOut) {
-    ValueStack.push_back(V);
-    DFSStack.push_back(std::make_pair(DFSIn, DFSOut));
+    ValueStack.emplace_back(V);
+    DFSStack.emplace_back(DFSIn, DFSOut);
   }
   bool empty() const { return DFSStack.empty(); }
   bool isInScope(int DFSIn, int DFSOut) const {
@@ -1704,6 +1704,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
   // When we find something not dominated, it becomes the new leader
   // for elimination purposes
 
+  // First, destroy unreachable phi nodes and figure out DFS numbers
   for (auto &B : F) {
     if (!ReachableBlocks.count(&B)) {
       for (auto S : successors(&B)) {
@@ -1833,7 +1834,8 @@ bool NewGVN::eliminateInstructions(Function &F) {
             // Push if we need to
             ShouldPush |= EliminationStack.empty();
             if (ShouldPush) {
-              EliminationStack.push_back(Member, MemberDFSIn, MemberDFSOut);
+              EliminationStack.push_back(Member,  MemberDFSIn,
+                                         MemberDFSOut);
             }
           }
 
