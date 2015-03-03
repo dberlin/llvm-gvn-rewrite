@@ -30,7 +30,7 @@ enum ExpressionType {
   ExpressionTypeBasicStart,
   ExpressionTypeBasic,
   ExpressionTypeCall,
-  ExpressionTypeInsertValue,
+  ExpressionTypeAggregateValue,
   ExpressionTypePhi,
   ExpressionTypeLoad,
   ExpressionTypeStore,
@@ -301,11 +301,11 @@ public:
   }
 };
 
-class InsertValueExpression : public BasicExpression {
+class AggregateValueExpression : public BasicExpression {
 private:
-  void operator=(const InsertValueExpression &) = delete;
-  InsertValueExpression(const InsertValueExpression &) = delete;
-  InsertValueExpression() = delete;
+  void operator=(const AggregateValueExpression &) = delete;
+  AggregateValueExpression(const AggregateValueExpression &) = delete;
+  AggregateValueExpression() = delete;
 
   unsigned int MaxIntArgs;
   unsigned int NumIntArgs;
@@ -330,23 +330,23 @@ public:
   }
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const InsertValueExpression *) { return true; }
+  static inline bool classof(const AggregateValueExpression *) { return true; }
   static inline bool classof(const Expression *EB) {
-    return EB->getExpressionType() == ExpressionTypeInsertValue;
+    return EB->getExpressionType() == ExpressionTypeAggregateValue;
   }
 
-  InsertValueExpression(unsigned int NumArgs, unsigned int NumIntArgs)
-      : BasicExpression(NumArgs, ExpressionTypeInsertValue),
+  AggregateValueExpression(unsigned int NumArgs, unsigned int NumIntArgs)
+      : BasicExpression(NumArgs, ExpressionTypeAggregateValue),
         MaxIntArgs(NumIntArgs), NumIntArgs(0), IntArgs(nullptr) {}
 
-  virtual ~InsertValueExpression() {}
+  virtual ~AggregateValueExpression() {}
   virtual void allocateIntArgs(BumpPtrAllocator &Allocator) {
     assert(!IntArgs && "Args already allocated");
     IntArgs = Allocator.Allocate<unsigned int>(MaxIntArgs);
   }
 
   virtual bool equals(const Expression &other) const {
-    const InsertValueExpression &OE = cast<InsertValueExpression>(other);
+    const AggregateValueExpression &OE = cast<AggregateValueExpression>(other);
     if (ValueType != OE.ValueType)
       return false;
     if (NumArgs != OE.NumArgs)

@@ -222,6 +222,8 @@ private:
 
   // expression handling
   Expression *createExpression(Instruction *, BasicBlock *);
+  Expression *createBinaryExpression(unsigned, Type *, Value *, Value *,
+                                     BasicBlock *);
   bool setBasicExpressionInfo(Instruction *, BasicExpression *, BasicBlock *);
   PHIExpression *createPHIExpression(Instruction *, BasicBlock *);
   VariableExpression *createVariableExpression(Value *);
@@ -232,10 +234,8 @@ private:
                                        BasicBlock *);
   CallExpression *createCallExpression(CallInst *, MemoryAccess *,
                                        BasicBlock *);
-  InsertValueExpression *createInsertValueExpression(InsertValueInst *,
-                                                     BasicBlock *l);
-  ExtractValueExpression *createInsertValueExpression(ExtractValueInst *,
-                                                     BasicBlock *l);
+  AggregateValueExpression *createAggregateValueExpression(Instruction *,
+                                                           BasicBlock *l);
 
   Expression *uniquifyExpression(Expression *);
   BasicExpression *createCmpExpression(unsigned, Type *, CmpInst::Predicate,
@@ -263,6 +263,7 @@ private:
   Expression *performSymbolicStoreEvaluation(Instruction *, BasicBlock *);
   Expression *performSymbolicCallEvaluation(Instruction *, BasicBlock *);
   Expression *performSymbolicPHIEvaluation(Instruction *, BasicBlock *);
+  Expression *performSymbolicAggrValueEvaluation(Instruction *, BasicBlock *);
   // Congruence finding
   Value *lookupOperandLeader(Value *, BasicBlock *) const;
   Value *findDominatingEquivalent(CongruenceClass *, BasicBlock *) const;
@@ -374,18 +375,36 @@ BasicExpression *NewGVN::createCmpExpression(unsigned Opcode, Type *Type,
   return E;
 }
 
+Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
+                                           Value *Arg1, Value *Arg2,
+                                           BasicBlock *B) {
+  BasicExpression *E = new (ExpressionAllocator) BasicExpression(2);
+  E->setType(T);
+  E->setOpcode(Opcode);
+  E->allocateArgs(ArgRecycler, ExpressionAllocator);
+  E->args_push_back(lookupOperandLeader(Arg1, B));
+  E->args_push_back(lookupOperandLeader(Arg2, B));
+  Value *V = SimplifyBinOp(Opcode, E->Args[0], E->Args[1], DL, TLI, DT, AC);
+  if (Expression *simplifiedE = checkSimplificationResults(E, nullptr, V))
+    return simplifiedE;
+  return E;
+}
+
 // Take a Value returned by simplification of Expression E/Instruction
 // I, and see if it resulted in a simpler expression. If so, return
 // that expression
+// TODO: Once finished, this should not take an Instruction, we only
+// use it for printing
 Expression *NewGVN::checkSimplificationResults(Expression *E, Instruction *I,
                                                Value *V) {
   if (!V)
     return NULL;
-
-  Constant *C;
-  if ((C = dyn_cast<Constant>(V))) {
-    DEBUG(dbgs() << "Simplified " << *I << " to "
-                 << " constant " << *C << "\n");
+  if (Constant *C = dyn_cast<Constant>(V)) {
+#ifndef NDEBUG
+    if (I)
+      DEBUG(dbgs() << "Simplified " << *I << " to "
+                   << " constant " << *C << "\n");
+#endif
     NumGVNOpsSimplified++;
     assert(isa<BasicExpression>(E) &&
            "We should always have had a basic expression here");
@@ -396,8 +415,12 @@ Expression *NewGVN::checkSimplificationResults(Expression *E, Instruction *I,
   }
   CongruenceClass *CC = ValueToClass.lookup(V);
   if (CC && CC->expression) {
-    DEBUG(dbgs() << "Simplified " << *I << " to "
-                 << " expression " << *V << "\n");
+#ifndef NDEBUG
+    if (I)
+      DEBUG(dbgs() << "Simplified " << *I << " to "
+                   << " expression " << *V << "\n");
+
+#endif
     NumGVNOpsSimplified++;
     assert(isa<BasicExpression>(E) &&
            "We should always have had a basic expression here");
@@ -454,8 +477,7 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
          E->Args[1]->getType() == I->getOperand(1)->getType())) {
       Value *V =
           SimplifyCmpInst(Predicate, E->Args[0], E->Args[1], DL, TLI, DT, AC);
-      Expression *simplifiedE;
-      if ((simplifiedE = checkSimplificationResults(E, I, V)))
+      if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
         return simplifiedE;
     }
 
@@ -465,8 +487,7 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
          E->Args[2]->getType() == I->getOperand(2)->getType())) {
       Value *V = SimplifySelectInst(E->Args[0], E->Args[1], E->Args[2], DL, TLI,
                                     DT, AC);
-      Expression *simplifiedE;
-      if ((simplifiedE = checkSimplificationResults(E, I, V)))
+      if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
         return simplifiedE;
     }
   } else if (I->isBinaryOp()) {
@@ -475,13 +496,11 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
     // wrong type assumption
     Value *V =
         SimplifyBinOp(E->getOpcode(), E->Args[0], E->Args[1], DL, TLI, DT, AC);
-    Expression *simplifiedE;
-    if ((simplifiedE = checkSimplificationResults(E, I, V)))
+    if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
       return simplifiedE;
   } else if (BitCastInst *BI = dyn_cast<BitCastInst>(I)) {
     Value *V = SimplifyInstruction(BI);
-    Expression *simplifiedE;
-    if ((simplifiedE = checkSimplificationResults(E, I, V)))
+    if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
       return simplifiedE;
   } else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
     // TODO: Since we noop bitcasts, we may need to check types before
@@ -524,15 +543,29 @@ Expression *NewGVN::uniquifyExpression(Expression *E) {
   return E;
 }
 
-InsertValueExpression *NewGVN::createInsertValueExpression(InsertValueInst *I,
-                                                           BasicBlock *B) {
-  InsertValueExpression *E = new (ExpressionAllocator)
-      InsertValueExpression(I->getNumOperands(), I->getNumIndices());
-  setBasicExpressionInfo(I, E, B);
-  E->allocateIntArgs(ExpressionAllocator);
-  for (auto II = I->idx_begin(), IE = I->idx_end(); II != IE; ++II)
-    E->int_args_push_back(*II);
-  return E;
+AggregateValueExpression *
+NewGVN::createAggregateValueExpression(Instruction *I, BasicBlock *B) {
+  if (InsertValueInst *II = dyn_cast<InsertValueInst>(I)) {
+    AggregateValueExpression *E = new (ExpressionAllocator)
+        AggregateValueExpression(I->getNumOperands(), II->getNumIndices());
+    setBasicExpressionInfo(I, E, B);
+    E->allocateIntArgs(ExpressionAllocator);
+
+    for (auto &Index : II->indices())
+      E->int_args_push_back(Index);
+    return E;
+
+  } else if (ExtractValueInst *EI = dyn_cast<ExtractValueInst>(I)) {
+    AggregateValueExpression *E = new (ExpressionAllocator)
+        AggregateValueExpression(I->getNumOperands(), EI->getNumIndices());
+    setBasicExpressionInfo(EI, E, B);
+    E->allocateIntArgs(ExpressionAllocator);
+
+    for (auto &Index : EI->indices())
+      E->int_args_push_back(Index);
+    return E;
+  }
+  llvm_unreachable("Unhandled type of aggregate value operation");
 }
 
 VariableExpression *NewGVN::createVariableExpression(Value *V) {
@@ -920,6 +953,47 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
   return E;
 }
 
+Expression *NewGVN::performSymbolicAggrValueEvaluation(Instruction *I,
+                                                       BasicBlock *B) {
+  if (ExtractValueInst *EI = dyn_cast<ExtractValueInst>(I)) {
+    IntrinsicInst *II = dyn_cast<IntrinsicInst>(EI->getAggregateOperand());
+    if (II != nullptr && EI->getNumIndices() == 1 && *EI->idx_begin() == 0) {
+      unsigned Opcode = 0;
+      // EI might be an extract from one of our recognised intrinsics. If it
+      // is we'll synthesize a semantically equivalent expression instead on
+      // an extract value expression.
+      switch (II->getIntrinsicID()) {
+      case Intrinsic::sadd_with_overflow:
+      case Intrinsic::uadd_with_overflow:
+        Opcode = Instruction::Add;
+        break;
+      case Intrinsic::ssub_with_overflow:
+      case Intrinsic::usub_with_overflow:
+        Opcode = Instruction::Sub;
+        break;
+      case Intrinsic::smul_with_overflow:
+      case Intrinsic::umul_with_overflow:
+        Opcode = Instruction::Mul;
+        break;
+      default:
+        break;
+      }
+
+      if (Opcode != 0) {
+        // Intrinsic recognized. Grab its args to finish building the
+        // expression.
+        assert(II->getNumArgOperands() == 2 &&
+               "Expect two args for recognised intrinsics.");
+        return createBinaryExpression(Opcode, EI->getType(),
+                                      II->getArgOperand(0),
+                                      II->getArgOperand(1), B);
+      }
+    }
+  }
+
+  return createAggregateValueExpression(I, B);
+}
+
 /// performSymbolicEvaluation - Substitute and symbolize the value
 /// before value numbering
 Expression *NewGVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
@@ -932,12 +1006,9 @@ Expression *NewGVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
     // TODO: memory intrinsics
     Instruction *I = cast<Instruction>(V);
     switch (I->getOpcode()) {
-    // TODO: extractvalue
     case Instruction::ExtractValue:
-      E = createExtractValueExpression(cast<ExtractValueInst>(I), B);
-      break;
     case Instruction::InsertValue:
-      E = createInsertValueExpression(cast<InsertValueInst>(I), B);
+      E = performSymbolicAggrValueEvaluation(I, B);
       break;
     case Instruction::PHI:
       E = performSymbolicPHIEvaluation(I, B);
