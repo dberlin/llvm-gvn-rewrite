@@ -1815,8 +1815,17 @@ struct NewGVN::ValueDFS {
       else if (DFSOut == other.DFSOut) {
         if (LocalNum < other.LocalNum)
           return true;
-        else if (LocalNum == other.LocalNum)
-          return !!Equivalence < !!other.Equivalence;
+        else if (LocalNum == other.LocalNum) {
+          if (!!Equivalence < !!other.Equivalence)
+            return true;
+          else if (!!Equivalence == !!other.Equivalence) {
+            if (Val < other.Val)
+              return true;
+            else if (Val == other.Val) {
+              return U < other.U;
+            }
+          }
+        }
       }
     }
     return false;
@@ -2108,6 +2117,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
         // then merge them.
         std::set<ValueDFS> DFSOrderedMembers;
         convertDenseToDFSOrdered(CC->members, DFSOrderedMembers);
+
         std::set<ValueDFS> DFSOrderedEquivalences;
         // During value numbering, we already proceed as if the
         // equivalences have been propagated through, but this is the
@@ -2115,6 +2125,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
         // know the same thing we do)
 
         convertDenseToDFSOrdered(CC->equivalences, DFSOrderedEquivalences);
+
         std::vector<ValueDFS> DFSOrderedSet;
         set_union(DFSOrderedMembers.begin(), DFSOrderedMembers.end(),
                   DFSOrderedEquivalences.begin(), DFSOrderedEquivalences.end(),
@@ -2191,7 +2202,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
                        << "\n");
           if (Instruction *Original = dyn_cast<Instruction>(Result))
             patchReplacementInstruction(Original, MemberUse->getUser());
-          assert(!isa<Constant>(MemberUse->getUser()));
+          assert(isa<Instruction>(MemberUse->getUser()));
           MemberUse->set(Result);
         }
       }
