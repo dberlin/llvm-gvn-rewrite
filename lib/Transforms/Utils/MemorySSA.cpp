@@ -84,25 +84,38 @@ public:
 };
 }
 
-void MemorySSA::doCacheInsert(MemoryAccess *M,
-                              const AliasAnalysis::Location &Loc,
-                              MemoryAccess *Result, bool AskingAboutCall) {
-  if (!AskingAboutCall)
-    CachedClobberingAccess.insert(
-        std::make_pair(std::make_pair(M, Loc), Result));
-  else
+struct MemorySSA::MemoryQuery {
+  // True if our original query started off as a call
+  bool isCall;
+  // The pointer location we are going to query about. This will be
+  // empty if isCall is true
+  AliasAnalysis::Location Loc;
+  // This is the call we were querying about. This will be null if
+  // isCall is false
+  Instruction *Call;
+  // Set of visited Instructions for this query
+  SmallPtrSet<MemoryAccess *, 32> Visited;
+};
+
+void MemorySSA::doCacheInsert(MemoryAccess *M, MemoryAccess *Result,
+                              MemoryQuery &Q) {
+
+  if (!Q.isCall)
     CachedClobberingCall.insert(std::make_pair(M, Result));
+  else
+    CachedClobberingAccess.insert(
+        std::make_pair(std::make_pair(M, Q.Loc), Result));
 }
 
 MemoryAccess *MemorySSA::doCacheLookup(MemoryAccess *M,
-                                       const AliasAnalysis::Location &Loc,
-                                       bool AskingAboutCall) {
+                                       const struct MemoryQuery &Q) {
+
   ++NumClobberCacheLookups;
   MemoryAccess *Result;
-  if (AskingAboutCall)
-    Result = CachedClobberingCall.lookup(getMemoryAccess(Loc.Ptr));
+  if (Q.isCall)
+    Result = CachedClobberingCall.lookup(getMemoryAccess(Q.Call));
   else
-    Result = CachedClobberingAccess.lookup(std::make_pair(M, Loc));
+    Result = CachedClobberingAccess.lookup(std::make_pair(M, Q.Loc));
 
   if (Result) {
     ++NumClobberCacheHits;
@@ -112,14 +125,13 @@ MemoryAccess *MemorySSA::doCacheLookup(MemoryAccess *M,
 }
 
 // Get the clobbering memory access for a phi node and alias location
-std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
-    MemoryPhi *P, const AliasAnalysis::Location &Loc, bool AskingAboutCall,
-    SmallPtrSet<MemoryAccess *, 32> &Visited) {
+std::pair<MemoryAccess *, bool>
+MemorySSA::getClobberingMemoryAccess(MemoryPhi *P, struct MemoryQuery &Q) {
 
   bool HitVisited = false;
 
   ++NumClobberCacheLookups;
-  auto CacheResult = doCacheLookup(P, Loc, AskingAboutCall);
+  auto CacheResult = doCacheLookup(P, Q);
   if (CacheResult)
     return std::make_pair(CacheResult, false);
 
@@ -142,13 +154,13 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
   // arguments).  We return true here, and are careful to make sure we
   // only pass through "true" when we are giving results
   // for the cycle itself.
-  if (!Visited.insert(P).second)
+  if (!Q.Visited.insert(P).second)
     return std::make_pair(P, true);
 
   // Look through 1 argument phi nodes
   if (P->getNumIncomingValues() == 1) {
-    auto SingleResult = getClobberingMemoryAccess(P->getIncomingValue(0), Loc,
-                                                  AskingAboutCall, Visited);
+    auto SingleResult = getClobberingMemoryAccess(P->getIncomingValue(0), Q);
+
     HitVisited = SingleResult.second;
     Result = SingleResult.first;
   } else {
@@ -158,8 +170,7 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
     bool AllVisited = true;
     for (unsigned i = 0; i < P->getNumIncomingValues(); ++i) {
       MemoryAccess *Arg = P->getIncomingValue(i);
-      auto ArgResult =
-          getClobberingMemoryAccess(Arg, Loc, AskingAboutCall, Visited);
+      auto ArgResult = getClobberingMemoryAccess(Arg, Q);
       if (!ArgResult.second) {
         AllVisited = false;
         // Fill in target result we are looking for if we haven't so far
@@ -182,7 +193,7 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
       HitVisited = false;
     }
   }
-  doCacheInsert(P, Loc, Result, AskingAboutCall);
+  doCacheInsert(P, Result, Q);
 
   return std::make_pair(Result, HitVisited);
 }
@@ -190,9 +201,8 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
 // For a given MemoryAccess, walk backwards using Memory SSA and find
 // the MemoryAccess that actually clobbers Loc.  The second part of
 // the pair we return is whether we hit a cyclic phi node.
-std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
-    MemoryAccess *MA, const AliasAnalysis::Location &Loc, bool AskingAboutCall,
-    SmallPtrSet<MemoryAccess *, 32> &Visited) {
+std::pair<MemoryAccess *, bool>
+MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA, struct MemoryQuery &Q) {
   MemoryAccess *CurrAccess = MA;
   while (true) {
     // If we started with a heap use, walk to the def
@@ -201,7 +211,7 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
 
     // Should be either a Memory Def or a Phi node at this point
     if (MemoryPhi *P = dyn_cast<MemoryPhi>(CurrAccess))
-      return getClobberingMemoryAccess(P, Loc, AskingAboutCall, Visited);
+      return getClobberingMemoryAccess(P, Q);
     else {
       MemoryDef *MD = dyn_cast<MemoryDef>(CurrAccess);
       assert(MD && "Use linked to something that is not a def");
@@ -218,16 +228,17 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
       // Note: There is no point in doing lookups for calls at this
       // stage. If we knew a better result for the initial call, we
       // would have found it in the function that calls this one.
-      if (!AskingAboutCall) {
-        if (auto CacheResult = doCacheLookup(CurrAccess, Loc, AskingAboutCall))
+      if (!Q.isCall) {
+        if (auto CacheResult = doCacheLookup(CurrAccess, Q))
           return std::make_pair(CacheResult, false);
         // Check whether our memory location is modified by this instruction
-        if (AA->getModRefInfo(DefMemoryInst, Loc) & AliasAnalysis::Mod)
+        if (AA->getModRefInfo(DefMemoryInst, Q.Loc) & AliasAnalysis::Mod)
           break;
       } else {
+        // We may have two calls
         if (isa<CallInst>(DefMemoryInst) || isa<InvokeInst>(DefMemoryInst)) {
           // Check if the two calls touch the same memory
-          if (AA->getModRefInfo(Loc.Ptr, DefMemoryInst) & AliasAnalysis::Mod)
+          if (AA->getModRefInfo(Q.Call, DefMemoryInst) & AliasAnalysis::Mod)
             break;
         } else {
           // Otherwise, check if the call modifies or references the
@@ -235,8 +246,7 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
           // is that if the call references what this instruction
           // defines, it must be clobbered by this location.
           const AliasAnalysis::Location DefLoc = AA->getLocation(DefMemoryInst);
-          if (AA->getModRefInfo(cast<Instruction>(Loc.Ptr), DefLoc) !=
-              AliasAnalysis::NoModRef)
+          if (AA->getModRefInfo(Q.Call, DefLoc) != AliasAnalysis::NoModRef)
             break;
         }
       }
@@ -246,7 +256,7 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
     // Walk from def to def
     CurrAccess = NextAccess;
   }
-  doCacheInsert(MA, Loc, CurrAccess, AskingAboutCall);
+  doCacheInsert(MA, CurrAccess, Q);
   return std::make_pair(CurrAccess, false);
 }
 
@@ -255,7 +265,7 @@ std::pair<MemoryAccess *, bool> MemorySSA::getClobberingMemoryAccess(
 // ones along the way
 MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
   MemoryAccess *StartingAccess = getMemoryAccess(I);
-  bool AskingAboutCall = false;
+  struct MemoryQuery Q;
 
   // First extract our location, then start walking until it is
   // clobbered
@@ -264,22 +274,24 @@ MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
   AliasAnalysis::Location Loc(I);
 
   // We can't sanely do anything with a FenceInst, they conservatively
-  // clobber all memory
+  // clobber all memory, and have no locations to get pointers from to
+  // try to disambiguate
   if (isa<FenceInst>(I)) {
     return StartingAccess;
   } else if (!isa<CallInst>(I) && !isa<InvokeInst>(I)) {
-    Loc = AA->getLocation(I);
+    Q.isCall = false;
+    Q.Loc = AA->getLocation(I);
   } else {
-    AskingAboutCall = true;
+    Q.isCall = true;
+    Q.Call = I;
   }
-  auto CacheResult = doCacheLookup(StartingAccess, Loc, AskingAboutCall);
+  auto CacheResult = doCacheLookup(StartingAccess, Q);
   if (CacheResult)
     return CacheResult;
   SmallPtrSet<MemoryAccess *, 32> Visited;
   MemoryAccess *FinalAccess =
-      getClobberingMemoryAccess(StartingAccess, Loc, AskingAboutCall, Visited)
-          .first;
-  doCacheInsert(StartingAccess, Loc, FinalAccess, AskingAboutCall);
+      getClobberingMemoryAccess(StartingAccess, Q).first;
+  doCacheInsert(StartingAccess, FinalAccess, Q);
   DEBUG(dbgs() << "Starting Memory SSA clobber for " << (uintptr_t)I << " is ");
   DEBUG(dbgs() << (uintptr_t)StartingAccess);
   DEBUG(dbgs() << "\n");
