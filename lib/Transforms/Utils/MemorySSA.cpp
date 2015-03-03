@@ -1,15 +1,15 @@
-//===-- MemorySSA.cpp - Memory SSA Builder----------------------------------===//
+//===-- MemorySSA.cpp - Memory SSA Builder---------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
 // This file is distributed under the University of Illinois Open Source
 // License. See LICENSE.TXT for details.
 //
-//===----------------------------------------------------------------------===//
+//===----------------------------------------------------------------===//
 //
 // This file implements the MemorySSA class.
 //
-//===----------------------------------------------------------------------===//
+//===----------------------------------------------------------------===//
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PostOrderIterator.h"
