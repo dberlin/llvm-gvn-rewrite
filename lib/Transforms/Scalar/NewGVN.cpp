@@ -1982,7 +1982,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
   // values, and eliminating them.  However, this is mildly
   // pointless. It requires doing lookups on every instruction,
   // regardless of whether we will ever eliminate it.  For
-  // instructions part of a singleton congruence class, we know we
+  // instructions part of most singleton congruence class, we know we
   // will never eliminate it.
 
   // Instead, this eliminator looks at the congruence classes directly, sorts
@@ -2063,8 +2063,16 @@ bool NewGVN::eliminateInstructions(Function &F) {
 
     } else {
       DEBUG(dbgs() << "Eliminating in congruence class " << CC->id << "\n");
-      // If this is a singleton, we can skip it
+      // If this is a singleton, with no equivalences, we can skip it
       if (CC->members.size() != 1 || !CC->equivalences.empty()) {
+
+        // If it's a singleton with equivalences, just do equivalence
+        // replacement and move on
+        if (0 && CC->members.size() == 1) {
+          for (auto &Equiv : CC->equivalences)
+            replaceAllDominatedUsesWith(CC->leader, Equiv.first, Equiv.second);
+          continue;
+        }
 
         // This is a stack because equality replacement/etc may place
         // constants in the middle of the member list, and we want to use
@@ -2088,7 +2096,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
         set_union(DFSOrderedMembers.begin(), DFSOrderedMembers.end(),
                   DFSOrderedEquivalences.begin(), DFSOrderedEquivalences.end(),
                   std::inserter(DFSOrderedSet, DFSOrderedSet.begin()));
-
+        bool HaveEquivalences = !CC->equivalences.empty();
         for (auto &C : DFSOrderedSet) {
           int MemberDFSIn = C.DFSIn;
           int MemberDFSOut = C.DFSOut;
@@ -2111,7 +2119,11 @@ bool NewGVN::eliminateInstructions(Function &F) {
 
           DEBUG(dbgs() << "Current DFS numbers are (" << MemberDFSIn << ","
                        << MemberDFSOut << ")\n");
-          // First, we synchronize to our current scope, by
+          // First, we see if we are out of scope or empty.  If so,
+          // and there equivalences, we try to replace the top of
+          // stack with equivalences (if it's on the stack, it must
+          // not have been eliminated yet)
+          // Then we synchronize to our current scope, by
           // popping until we are back within a DFS scope that
           // dominates the current member.
           // Then, what happens depends on a few factors
@@ -2124,6 +2136,17 @@ bool NewGVN::eliminateInstructions(Function &F) {
                             EquivalenceOnly;
           bool OutOfScope =
               !EliminationStack.isInScope(MemberDFSIn, MemberDFSOut);
+          if (HaveEquivalences && !EquivalenceOnly &&
+              (OutOfScope || EliminationStack.empty())) {
+            for (auto &Equiv : CC->equivalences)
+              replaceAllDominatedUsesWith(Member, Equiv.first, Equiv.second);
+            // If we got rid of this member, move to the next. We
+            // are guaranteed we don't need to put it on the stack,
+            // since we eliminated all users.
+            if (0 && Member->use_empty())
+              continue;
+          }
+
           if (OutOfScope || ShouldPush) {
             // Sync to our current scope
             EliminationStack.popUntilDFSScope(MemberDFSIn, MemberDFSOut);
