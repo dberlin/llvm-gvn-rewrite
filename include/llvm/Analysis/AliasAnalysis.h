@@ -156,8 +156,7 @@ public:
       return getLocation(I);
     else if (auto *I = dyn_cast<AtomicRMWInst>(Inst))
       return getLocation(I);
-    else
-      llvm_unreachable("unsupported memory instruction");
+    llvm_unreachable("unsupported memory instruction");
   }
 
   /// Alias analysis result - Either we know for sure that it does not alias, we
