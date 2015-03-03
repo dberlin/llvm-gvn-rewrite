@@ -1132,13 +1132,13 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
   SmallVector<std::pair<Value *, Value *>, 4> Worklist;
   Worklist.emplace_back(LHS, RHS);
   bool Changed = false;
-  DEBUG(dbgs() << "Setting equivalence " << *LHS << " = " << *RHS
-               << " in blocks dominated by " << getBlockName(Root) << "\n");
 
   while (!Worklist.empty()) {
     std::pair<Value *, Value *> Item = Worklist.pop_back_val();
     LHS = Item.first;
     RHS = Item.second;
+    DEBUG(dbgs() << "Setting equivalence " << *LHS << " = " << *RHS
+                 << " in blocks dominated by " << getBlockName(Root) << "\n");
 
     if (LHS == RHS)
       continue;
@@ -1151,6 +1151,13 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
     // Prefer a constant on the right-hand side, or an Argument if no constants.
     if (isa<Constant>(LHS) || (isa<Argument>(LHS) && !isa<Constant>(RHS)))
       std::swap(LHS, RHS);
+
+    // Put the most dominating value on the RHS. This ensures that we
+    // replace later things in favor of earlier things
+    if (isa<Instruction>(LHS) && isa<Instruction>(RHS))
+      if (InstrDFS[cast<Instruction>(LHS)] < InstrDFS[cast<Instruction>(RHS)])
+        std::swap(LHS, RHS);
+
     assert((isa<Argument>(LHS) || isa<Instruction>(LHS)) &&
            "Unexpected value!");
     assert((!isa<Instruction>(RHS) ||
@@ -1795,7 +1802,9 @@ struct NewGVN::ValueDFS {
   int DFSIn;
   int DFSOut;
   int LocalNum;
+  // Only one of these will be set
   Value *Val;
+  Use *U;
   bool Equivalence;
   bool operator<(const ValueDFS &other) const {
     if (DFSIn < other.DFSIn)
@@ -1817,6 +1826,7 @@ struct NewGVN::ValueDFS {
 void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
                                       std::set<ValueDFS> &DFSOrderedSet) {
   for (auto D : Dense) {
+    // First add the value
     BasicBlock *BB = getBlockForValue(D);
     // Constants are handled prior to ever calling this function, so
     // we should only be left with instructions as members
@@ -1827,15 +1837,30 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
     std::pair<int, int> DFSPair = DFSBBMap[BB];
     VD.DFSIn = DFSPair.first;
     VD.DFSOut = DFSPair.second;
-
+    VD.U = nullptr;
+    VD.Val = D;
     // If it's an instruction, use the real local dfs number,
     if (Instruction *I = dyn_cast<Instruction>(D))
       VD.LocalNum = InstrDFS[I];
     else
       llvm_unreachable("Should have been an instruction");
 
-    VD.Val = D;
     DFSOrderedSet.insert(VD);
+    // Now add the users
+    for (auto &U : D->uses()) {
+      if (Instruction *I = dyn_cast<Instruction>(U.getUser())) {
+        ValueDFS VD;
+        VD.Equivalence = false;
+
+        std::pair<int, int> DFSPair = DFSBBMap[I->getParent()];
+        VD.DFSIn = DFSPair.first;
+        VD.DFSOut = DFSPair.second;
+        VD.LocalNum = InstrDFS[I];
+        VD.U = &U;
+        VD.Val = nullptr;
+        DFSOrderedSet.insert(VD);
+      }
+    }
   }
 }
 
@@ -1988,7 +2013,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
   // Instead, this eliminator looks at the congruence classes directly, sorts
   // them into a DFS ordering of the dominator tree, and then we just
   // perform eliminate straight on the sets by walking the congruence
-  // class members in order, and eliminate the ones dominated by the
+  // class member uses in order, and eliminate the ones dominated by the
   // last member.   This is technically O(N log N) where N = number of
   // instructions (since in theory all instructions may be in the same
   // congruence class).
@@ -2066,7 +2091,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
 
         // If it's a singleton with equivalences, just do equivalence
         // replacement and move on
-        if (0 && CC->members.size() == 1) {
+        if (CC->members.size() == 1 && 0) {
           for (auto &Equiv : CC->equivalences)
             replaceAllDominatedUsesWith(CC->leader, Equiv.first, Equiv.second);
           continue;
@@ -2087,22 +2112,22 @@ bool NewGVN::eliminateInstructions(Function &F) {
         // During value numbering, we already proceed as if the
         // equivalences have been propagated through, but this is the
         // only place we actually do elimination (so that other passes
-        // know the same thing we do
+        // know the same thing we do)
 
         convertDenseToDFSOrdered(CC->equivalences, DFSOrderedEquivalences);
         std::vector<ValueDFS> DFSOrderedSet;
         set_union(DFSOrderedMembers.begin(), DFSOrderedMembers.end(),
                   DFSOrderedEquivalences.begin(), DFSOrderedEquivalences.end(),
                   std::inserter(DFSOrderedSet, DFSOrderedSet.begin()));
-        bool HaveEquivalences = !CC->equivalences.empty();
         for (auto &C : DFSOrderedSet) {
           int MemberDFSIn = C.DFSIn;
           int MemberDFSOut = C.DFSOut;
           Value *Member = C.Val;
+          Use *MemberUse = C.U;
           bool EquivalenceOnly = C.Equivalence;
           // We ignore stores because we can't replace them, since,
           // they have no uses
-          if (isa<StoreInst>(Member))
+          if (Member && isa<StoreInst>(Member))
             continue;
 
           if (EliminationStack.empty()) {
@@ -2112,7 +2137,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
                          << EliminationStack.dfs_back().first << ","
                          << EliminationStack.dfs_back().second << ")\n");
           }
-          if (isa<Constant>(Member))
+          if (Member && isa<Constant>(Member))
             assert(isa<Constant>(CC->leader) || EquivalenceOnly);
 
           DEBUG(dbgs() << "Current DFS numbers are (" << MemberDFSIn << ","
@@ -2130,55 +2155,48 @@ bool NewGVN::eliminateInstructions(Function &F) {
           // start using, we also push
           // Otherwise, we walk along, processing members who are
           // dominated by this scope, and eliminate them
-          bool ShouldPush = EliminationStack.empty() || isa<Constant>(Member) ||
-                            EquivalenceOnly;
+          bool ShouldPush =
+              Member && (EliminationStack.empty() || isa<Constant>(Member) ||
+                         EquivalenceOnly);
           bool OutOfScope =
               !EliminationStack.isInScope(MemberDFSIn, MemberDFSOut);
-          if (HaveEquivalences && !EquivalenceOnly &&
-              (OutOfScope || EliminationStack.empty())) {
-            for (auto &Equiv : CC->equivalences)
-              replaceAllDominatedUsesWith(Member, Equiv.first, Equiv.second);
-            // If we got rid of this member, move to the next. We
-            // are guaranteed we don't need to put it on the stack,
-            // since we eliminated all users.
-            if (0 && Member->use_empty())
-              continue;
-          }
 
           if (OutOfScope || ShouldPush) {
             // Sync to our current scope
             EliminationStack.popUntilDFSScope(MemberDFSIn, MemberDFSOut);
             // Push if we need to
-            ShouldPush |= EliminationStack.empty();
+            ShouldPush |= Member && EliminationStack.empty();
             if (ShouldPush) {
               EliminationStack.push_back(Member, MemberDFSIn, MemberDFSOut);
             }
           }
 
-          // Skip the case of trying to eliminate the leader, or trying
-          // to eliminate equivalence-only candidates
-          if (Member == CC->leader || EquivalenceOnly)
+          // If we get to this point, and the stack is empty we must have a use
+          // with nothing
+          // we can use to eliminate it, just skip it
+          if (EliminationStack.empty())
             continue;
-          // The block in the result may be null
+
+          // Skip the Value's, we only want to eliminate on their uses
+          if (Member || EquivalenceOnly)
+            continue;
           Value *Result = EliminationStack.back();
-          assert(Member != Result && "What happened here");
 
-	  // If the replacement is not constant, see if we have a
-	  // better one in an equivalence
-          DEBUG(dbgs() << "Found replacement " << *Result << " for " << *Member
+          // Don't replace our existing users with ourselves
+          if (MemberUse->get() == Result)
+            continue;
+
+          DEBUG(dbgs() << "Found replacement " << *Result << " for "
+                       << *MemberUse->get() << " in " << *(MemberUse->getUser())
                        << "\n");
-
-          // Perform actual replacement. We should only end up with
-          // instructions or constant values here.
-          if (Instruction *I = dyn_cast<Instruction>(Member)) {
-            assert(CC->leader != I &&
-                   "About to accidentally remove our leader");
-            replaceInstruction(I, Result);
-            CC->members.erase(Member);
-          }
+          if (Instruction *Original = dyn_cast<Instruction>(Result))
+            patchReplacementInstruction(Original, MemberUse->getUser());
+          assert(!isa<Constant>(MemberUse->getUser()));
+          MemberUse->set(Result);
         }
       }
     }
   }
+
   return true;
 }
