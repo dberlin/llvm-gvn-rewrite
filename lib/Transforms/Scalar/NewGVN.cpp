@@ -1213,34 +1213,39 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
       updateReachableEdge(B, TrueSucc);
       updateReachableEdge(B, FalseSucc);
     }
-  } else {
+  } else if (SwitchInst *SI = dyn_cast<SwitchInst>(TI)) {
     // For switches, propagate the case values into the case
     // destinations.
-    // TODO: We may be able to completely eliminate the switch
-    if (SwitchInst *SI = dyn_cast<SwitchInst>(TI)) {
-      Value *SwitchCond = SI->getCondition();
-      Value *CondEvaluated = findConditionEquivalence(SwitchCond, B);
-      // See if we were able to turn this switch statement into a constant
-      if (CondEvaluated && isa<ConstantInt>(CondEvaluated)) {
-        ConstantInt *CondVal = cast<ConstantInt>(CondEvaluated);
-        // We should be able to get case value for this
-        auto CaseVal = SI->findCaseValue(CondVal);
-        // Now get where it goes and mark it reachable
-        BasicBlock *TargetBlock = CaseVal.getCaseSuccessor();
-        updateReachableEdge(B, TargetBlock);
-      } else {
-        for (unsigned i = 0, e = TI->getNumSuccessors(); i != e; ++i) {
-          BasicBlock *TargetBlock = TI->getSuccessor(i);
-          updateReachableEdge(B, TargetBlock);
-        }
+    
+    Value *SwitchCond = SI->getCondition();
+    Value *CondEvaluated = findConditionEquivalence(SwitchCond, B);
+    // See if we were able to turn this switch statement into a constant
+    if (CondEvaluated && isa<ConstantInt>(CondEvaluated)) {
+      ConstantInt *CondVal = cast<ConstantInt>(CondEvaluated);
+      // We should be able to get case value for this
+      auto CaseVal = SI->findCaseValue(CondVal);
+      // Now get where it goes and mark it reachable
+      BasicBlock *TargetBlock = CaseVal.getCaseSuccessor();
+      updateReachableEdge(B, TargetBlock);
+    } else {
+      for (unsigned i = 0, e = SI->getNumSuccessors(); i != e; ++i) {
+	BasicBlock *TargetBlock = SI->getSuccessor(i);
+	updateReachableEdge(B, TargetBlock);
       }
-
-      // Regardless of answers, propagate equalities for case values
-      for (auto i = SI->case_begin(), e = SI->case_end(); i != e; ++i) {
-        BasicBlock *TargetBlock = i.getCaseSuccessor();
-        if (isOnlyReachableViaThisEdge(B, TargetBlock, DT))
-          propagateEquality(SwitchCond, i.getCaseValue(), TargetBlock);
-      }
+    }
+    
+    // Regardless of answers, propagate equalities for case values
+    for (auto i = SI->case_begin(), e = SI->case_end(); i != e; ++i) {
+      BasicBlock *TargetBlock = i.getCaseSuccessor();
+      if (isOnlyReachableViaThisEdge(B, TargetBlock, DT))
+	propagateEquality(SwitchCond, i.getCaseValue(), TargetBlock);
+    }
+  } else {
+    // Otherwise this is either unconditional, or a type we have no
+    // idea about. Just mark successors as reachable
+    for (unsigned i = 0, e = TI->getNumSuccessors(); i != e; ++i) {
+      BasicBlock *TargetBlock = TI->getSuccessor(i);
+      updateReachableEdge(B, TargetBlock);
     }
   }
 }
