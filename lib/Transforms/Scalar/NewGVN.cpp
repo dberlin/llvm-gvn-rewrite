@@ -234,6 +234,9 @@ private:
                                        BasicBlock *);
   InsertValueExpression *createInsertValueExpression(InsertValueInst *,
                                                      BasicBlock *l);
+  ExtractValueExpression *createInsertValueExpression(ExtractValueInst *,
+                                                     BasicBlock *l);
+
   Expression *uniquifyExpression(Expression *);
   BasicExpression *createCmpExpression(unsigned, Type *, CmpInst::Predicate,
                                        Value *, Value *, BasicBlock *);
@@ -405,13 +408,6 @@ Expression *NewGVN::checkSimplificationResults(Expression *E, Instruction *I,
   return NULL;
 }
 
-static bool atLeastOneArgConstant(BasicExpression *E) {
-  for (unsigned i = 0, e = E->args_size(); i != e; ++i)
-    if (isa<Constant>(E->Args[i]))
-      return true;
-  return false;
-}
-
 Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
 
   BasicExpression *E =
@@ -438,32 +434,31 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
   //  and x, x -> x
   // We should handle this by simply rewriting the expression.
   if (CmpInst *CI = dyn_cast<CmpInst>(I)) {
-    if (atLeastOneArgConstant(E)) {
-      // Sort the operand value numbers so x<y and y>x get the same value
-      // number.
-      CmpInst::Predicate Predicate = CI->getPredicate();
-      if (E->Args[0] > E->Args[1]) {
-        std::swap(E->Args[0], E->Args[1]);
-        Predicate = CmpInst::getSwappedPredicate(Predicate);
-      }
-      E->setOpcode((CI->getOpcode() << 8) | Predicate);
-      // TODO: 25% of our time is spent in SimplifyCmpInst with pointer operands
-      // TODO: Since we noop bitcasts, we may need to check types before
-      // simplifying, so that we don't end up simplifying based on a wrong
-      // type assumption. We should clean this up so we can use constants of the
-      // wrong type
-
-      assert(I->getOperand(0)->getType() == I->getOperand(1)->getType() &&
-             "Wrong types on cmp instruction");
-      if ((E->Args[0]->getType() == I->getOperand(0)->getType() &&
-           E->Args[1]->getType() == I->getOperand(1)->getType())) {
-        Value *V =
-            SimplifyCmpInst(Predicate, E->Args[0], E->Args[1], DL, TLI, DT, AC);
-        Expression *simplifiedE;
-        if ((simplifiedE = checkSimplificationResults(E, I, V)))
-          return simplifiedE;
-      }
+    // Sort the operand value numbers so x<y and y>x get the same value
+    // number.
+    CmpInst::Predicate Predicate = CI->getPredicate();
+    if (E->Args[0] > E->Args[1]) {
+      std::swap(E->Args[0], E->Args[1]);
+      Predicate = CmpInst::getSwappedPredicate(Predicate);
     }
+    E->setOpcode((CI->getOpcode() << 8) | Predicate);
+    // TODO: 25% of our time is spent in SimplifyCmpInst with pointer operands
+    // TODO: Since we noop bitcasts, we may need to check types before
+    // simplifying, so that we don't end up simplifying based on a wrong
+    // type assumption. We should clean this up so we can use constants of the
+    // wrong type
+
+    assert(I->getOperand(0)->getType() == I->getOperand(1)->getType() &&
+           "Wrong types on cmp instruction");
+    if ((E->Args[0]->getType() == I->getOperand(0)->getType() &&
+         E->Args[1]->getType() == I->getOperand(1)->getType())) {
+      Value *V =
+          SimplifyCmpInst(Predicate, E->Args[0], E->Args[1], DL, TLI, DT, AC);
+      Expression *simplifiedE;
+      if ((simplifiedE = checkSimplificationResults(E, I, V)))
+        return simplifiedE;
+    }
+
   } else if (isa<SelectInst>(I)) {
     if (isa<Constant>(E->Args[0]) ||
         (E->Args[1]->getType() == I->getOperand(1)->getType() &&
@@ -627,6 +622,183 @@ StoreExpression *NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *HV,
   // load have the same value, and thus, it isn't clobbering the load)
   return E;
 }
+
+/// This function is called when we have a
+/// memdep query of a load that ends up being a clobbering memory write (store,
+/// memset, memcpy, memmove).  This means that the write *may* provide bits used
+/// by the load but we can't be sure because the pointers don't mustalias.
+///
+/// Check this case to see if there is anything more we can do before we give
+/// up.  This returns -1 if we have to give up, or a byte number in the stored
+/// value of the piece that feeds the load.
+static int AnalyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
+                                          Value *WritePtr,
+                                          uint64_t WriteSizeInBits,
+                                          const DataLayout &DL) {
+  // If the loaded or stored value is a first class array or struct, don't try
+  // to transform them.  We need to be able to bitcast to integer.
+  if (LoadTy->isStructTy() || LoadTy->isArrayTy())
+    return -1;
+
+  int64_t StoreOffset = 0, LoadOffset = 0;
+  Value *StoreBase =
+      GetPointerBaseWithConstantOffset(WritePtr, StoreOffset, &DL);
+  Value *LoadBase = GetPointerBaseWithConstantOffset(LoadPtr, LoadOffset, &DL);
+  if (StoreBase != LoadBase)
+    return -1;
+
+// If the load and store are to the exact same address, they should have been
+// a must alias.  AA must have gotten confused.
+// FIXME: Study to see if/when this happens.  One case is forwarding a memset
+// to a load from the base of the memset.
+#if 0
+  if (LoadOffset == StoreOffset) {
+    dbgs() << "STORE/LOAD DEP WITH COMMON POINTER MISSED:\n"
+    << "Base       = " << *StoreBase << "\n"
+    << "Store Ptr  = " << *WritePtr << "\n"
+    << "Store Offs = " << StoreOffset << "\n"
+    << "Load Ptr   = " << *LoadPtr << "\n";
+    abort();
+  }
+#endif
+
+  // If the load and store don't overlap at all, the store doesn't provide
+  // anything to the load.  In this case, they really don't alias at all, AA
+  // must have gotten confused.
+  uint64_t LoadSize = DL.getTypeSizeInBits(LoadTy);
+
+  if ((WriteSizeInBits & 7) | (LoadSize & 7))
+    return -1;
+  uint64_t StoreSize = WriteSizeInBits >> 3; // Convert to bytes.
+  LoadSize >>= 3;
+
+  bool isAAFailure = false;
+  if (StoreOffset < LoadOffset)
+    isAAFailure = StoreOffset + int64_t(StoreSize) <= LoadOffset;
+  else
+    isAAFailure = LoadOffset + int64_t(LoadSize) <= StoreOffset;
+
+  if (isAAFailure) {
+#if 0
+    dbgs() << "STORE LOAD DEP WITH COMMON BASE:\n"
+    << "Base       = " << *StoreBase << "\n"
+    << "Store Ptr  = " << *WritePtr << "\n"
+    << "Store Offs = " << StoreOffset << "\n"
+    << "Load Ptr   = " << *LoadPtr << "\n";
+    abort();
+#endif
+    return -1;
+  }
+
+  // If the Load isn't completely contained within the stored bits, we don't
+  // have all the bits to feed it.  We could do something crazy in the future
+  // (issue a smaller load then merge the bits in) but this seems unlikely to be
+  // valuable.
+  if (StoreOffset > LoadOffset ||
+      StoreOffset + StoreSize < LoadOffset + LoadSize)
+    return -1;
+
+  // Okay, we can do this transformation.  Return the number of bytes into the
+  // store that the load is.
+  return LoadOffset - StoreOffset;
+}
+
+/// This function is called when we have a
+/// memdep query of a load that ends up being a clobbering store.
+static int AnalyzeLoadFromClobberingStore(Type *LoadTy, Value *LoadPtr,
+                                          StoreInst *DepSI,
+                                          const DataLayout &DL) {
+  // Cannot handle reading from store of first-class aggregate yet.
+  if (DepSI->getValueOperand()->getType()->isStructTy() ||
+      DepSI->getValueOperand()->getType()->isArrayTy())
+    return -1;
+
+  Value *StorePtr = DepSI->getPointerOperand();
+  uint64_t StoreSize =
+      DL.getTypeSizeInBits(DepSI->getValueOperand()->getType());
+  return AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, StorePtr, StoreSize,
+                                        DL);
+}
+
+/// This function is called when we have a
+/// memdep query of a load that ends up being clobbered by another load.  See if
+/// the other load can feed into the second load.
+static int AnalyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
+                                         LoadInst *DepLI,
+                                         const DataLayout &DL) {
+  // Cannot handle reading from store of first-class aggregate yet.
+  if (DepLI->getType()->isStructTy() || DepLI->getType()->isArrayTy())
+    return -1;
+
+  Value *DepPtr = DepLI->getPointerOperand();
+  uint64_t DepSize = DL.getTypeSizeInBits(DepLI->getType());
+  int R = AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, DepSize, DL);
+  if (R != -1)
+    return R;
+
+  // If we have a load/load clobber an DepLI can be widened to cover this load,
+  // then we should widen it!
+  int64_t LoadOffs = 0;
+  const Value *LoadBase =
+      GetPointerBaseWithConstantOffset(LoadPtr, LoadOffs, &DL);
+  unsigned LoadSize = DL.getTypeStoreSize(LoadTy);
+
+  unsigned Size = MemoryDependenceAnalysis::getLoadLoadClobberFullWidthSize(
+      LoadBase, LoadOffs, LoadSize, DepLI, DL);
+  if (Size == 0)
+    return -1;
+
+  return AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, Size * 8, DL);
+}
+
+static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
+                                            MemIntrinsic *MI,
+                                            const DataLayout &DL) {
+  // If the mem operation is a non-constant size, we can't handle it.
+  ConstantInt *SizeCst = dyn_cast<ConstantInt>(MI->getLength());
+  if (!SizeCst)
+    return -1;
+  uint64_t MemSizeInBits = SizeCst->getZExtValue() * 8;
+
+  // If this is memset, we just need to see if the offset is valid in the size
+  // of the memset..
+  if (MI->getIntrinsicID() == Intrinsic::memset)
+    return AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, MI->getDest(),
+                                          MemSizeInBits, DL);
+
+  // If we have a memcpy/memmove, the only case we can handle is if this is a
+  // copy from constant memory.  In that case, we can read directly from the
+  // constant memory.
+  MemTransferInst *MTI = cast<MemTransferInst>(MI);
+
+  Constant *Src = dyn_cast<Constant>(MTI->getSource());
+  if (!Src)
+    return -1;
+
+  GlobalVariable *GV = dyn_cast<GlobalVariable>(GetUnderlyingObject(Src, &DL));
+  if (!GV || !GV->isConstant())
+    return -1;
+
+  // See if the access is within the bounds of the transfer.
+  int Offset = AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, MI->getDest(),
+                                              MemSizeInBits, DL);
+  if (Offset == -1)
+    return Offset;
+
+  unsigned AS = Src->getType()->getPointerAddressSpace();
+  // Otherwise, see if we can constant fold a load from the constant with the
+  // offset applied as appropriate.
+  Src =
+      ConstantExpr::getBitCast(Src, Type::getInt8PtrTy(Src->getContext(), AS));
+  Constant *OffsetCst =
+      ConstantInt::get(Type::getInt64Ty(Src->getContext()), (unsigned)Offset);
+  Src = ConstantExpr::getGetElementPtr(Src, OffsetCst);
+  Src = ConstantExpr::getBitCast(Src, PointerType::get(LoadTy, AS));
+  if (ConstantFoldLoadFromConstPtr(Src, &DL))
+    return Offset;
+  return -1;
+}
+
 Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
                                                    BasicBlock *B) {
   StoreInst *SI = cast<StoreInst>(I);
@@ -640,7 +812,51 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
   LoadInst *LI = cast<LoadInst>(I);
   if (!LI->isSimple())
     return NULL;
+  Value *LoadAddressLeader = lookupOperandLeader(LI->getPointerOperand(), B);
+  // Load of undef is
+  if (isa<UndefValue>(LoadAddressLeader))
+    return createConstantExpression(UndefValue::get(LI->getType()));
   MemoryAccess *DefiningAccess = MSSA->getClobberingMemoryAccess(I);
+  // TODO: Fix this up later, need to rewrite equivalents of the get
+  // clobbering values
+  if (DL && !MSSA->isLiveOnEntryDef(DefiningAccess))
+    if (MemoryDef *MD = dyn_cast<MemoryDef>(DefiningAccess)) {
+      Instruction *DefiningInst = MD->getMemoryInst();
+      if (StoreInst *SI = dyn_cast<StoreInst>(DefiningInst)) {
+        uint64_t LoadSize = DL->getTypeSizeInBits(LI->getType());
+        uint64_t StoreSize =
+            DL->getTypeSizeInBits(SI->getValueOperand()->getType());
+        if (LoadSize == StoreSize) {
+          Value *StoreAddressLeader =
+              lookupOperandLeader(SI->getPointerOperand(), B);
+          if (LoadAddressLeader == StoreAddressLeader) {
+            if (AnalyzeLoadFromClobberingStore(LI->getType(), LoadAddressLeader,
+                                               SI, *DL) == 0)
+              return performSymbolicEvaluation(SI->getValueOperand(), B);
+          }
+        }
+      }
+      // If this load really doesn't depend on anything, then we must be loading
+      // an
+      // undef value.  This can happen when loading for a fresh allocation with
+      // no
+      // intervening stores, for example.
+      else if (isa<AllocaInst>(DefiningInst) ||
+               isMallocLikeFn(DefiningInst, TLI))
+        return createConstantExpression(UndefValue::get(LI->getType()));
+
+      // If this load occurs either right after a lifetime begin,
+      // then the loaded value is undefined.
+      else if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(DefiningInst)) {
+        if (II->getIntrinsicID() == Intrinsic::lifetime_start)
+          return createConstantExpression(UndefValue::get(LI->getType()));
+      }
+
+      // If this load follows a calloc (which zero initializes memory),
+      // then the loaded value is zero
+      else if (isCallocLikeFn(DefiningInst, TLI))
+        return createConstantExpression(Constant::getNullValue(LI->getType()));
+    }
   Expression *E = createLoadExpression(LI, DefiningAccess, B);
   return E;
 }
@@ -717,6 +933,9 @@ Expression *NewGVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
     Instruction *I = cast<Instruction>(V);
     switch (I->getOpcode()) {
     // TODO: extractvalue
+    case Instruction::ExtractValue:
+      E = createExtractValueExpression(cast<ExtractValueInst>(I), B);
+      break;
     case Instruction::InsertValue:
       E = createInsertValueExpression(cast<InsertValueInst>(I), B);
       break;
