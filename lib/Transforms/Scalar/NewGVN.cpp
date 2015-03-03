@@ -261,14 +261,16 @@ private:
   Expression *performSymbolicCallEvaluation(Instruction *, BasicBlock *);
   Expression *performSymbolicPHIEvaluation(Instruction *, BasicBlock *);
   // Congruence finding
-  Value *lookupOperandLeader(Value *, BasicBlock *);
-  Value *findDominatingEquivalent(CongruenceClass *, BasicBlock *);
+  Value *lookupOperandLeader(Value *, BasicBlock *) const;
+  Value *findDominatingEquivalent(CongruenceClass *, BasicBlock *) const;
   void performCongruenceFinding(Value *, BasicBlock *, Expression *);
   // Predicate and reachability handling
   void updateReachableEdge(BasicBlock *, BasicBlock *);
-  void processOutgoingEdges(TerminatorInst *);
+  void processOutgoingEdges(TerminatorInst *, BasicBlock *);
   void propagateChangeInEdge(BasicBlock *);
   bool propagateEquality(Value *, Value *, BasicBlock *);
+  Value *findConditionEquivalence(Value *, BasicBlock *) const;
+
   // Instruction replacement
   unsigned replaceAllDominatedUsesWith(Value *, Value *, BasicBlock *);
 
@@ -562,14 +564,15 @@ CallExpression *NewGVN::createCallExpression(CallInst *CI, MemoryAccess *HV,
 // if one exists
 // TODO: Compare this against the predicate handling system in the paper
 
-Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, BasicBlock *B) {
+Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC,
+                                        BasicBlock *B) const {
   // This check is much faster than doing 0 iterations of the loop below
   if (CC->equivalences.empty())
     return nullptr;
 
   // TODO: This can be made faster by different set ordering, if
   // necessary, or caching whether we found one
-  for (auto &Member : CC->equivalences) {
+  for (const auto &Member : CC->equivalences) {
     if (DT->dominates(Member.second, B))
       return Member.first;
   }
@@ -579,20 +582,16 @@ Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, BasicBlock *B) {
 // lookupOperandLeader -- See if we have a congruence class and leader
 // for this operand, and if so, return it. Otherwise, return the
 // original operand
-Value *NewGVN::lookupOperandLeader(Value *V, BasicBlock *B) {
-  auto VTCI = ValueToClass.find(V);
-  if (VTCI != ValueToClass.end()) {
-    CongruenceClass *CC = VTCI->second;
-    if (CC != InitialClass) {
-      auto Equivalence = findDominatingEquivalent(CC, B);
-      if (Equivalence) {
-        DEBUG(dbgs() << "Found equivalence " << *Equivalence << " for value "
-                     << *V << " in block " << getBlockName(B) << "\n");
-        return Equivalence;
-      }
-
-      return CC->leader;
+Value *NewGVN::lookupOperandLeader(Value *V, BasicBlock *B) const {
+  CongruenceClass *CC = ValueToClass.lookup(V);
+  if (CC && (CC != InitialClass)) {
+    Value *Equivalence = findDominatingEquivalent(CC, B);
+    if (Equivalence) {
+      DEBUG(dbgs() << "Found equivalence " << *Equivalence << " for value "
+                   << *V << " in block " << getBlockName(B) << "\n");
+      return Equivalence;
     }
+    return CC->leader;
   }
   return V;
 }
@@ -843,6 +842,8 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
   SmallVector<std::pair<Value *, Value *>, 4> Worklist;
   Worklist.push_back(std::make_pair(LHS, RHS));
   bool Changed = false;
+  DEBUG(dbgs() << "Setting equivalence " << *LHS << " = " << *RHS
+               << " in blocks dominated by " << getBlockName(Root) << "\n");
 
   while (!Worklist.empty()) {
     std::pair<Value *, Value *> Item = Worklist.pop_back_val();
@@ -921,6 +922,22 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
           (isKnownFalse && Cmp->getPredicate() == CmpInst::ICMP_NE))
         Worklist.push_back(std::make_pair(Op0, Op1));
 
+      // Handle the floating point versions of equality comparisons too.
+      if ((isKnownTrue && Cmp->getPredicate() == CmpInst::FCMP_OEQ) ||
+          (isKnownFalse && Cmp->getPredicate() == CmpInst::FCMP_UNE)) {
+
+        // Floating point -0.0 and 0.0 compare equal, so we can only
+        // propagate values if we know that we have a constant and that
+        // its value is non-zero.
+
+        // FIXME: We should do this optimization if 'no signed zeros' is
+        // applicable via an instruction-level fast-math-flag or some other
+        // indicator that relaxed FP semantics are being used.
+
+        if (isa<ConstantFP>(Op1) && !cast<ConstantFP>(Op1)->isZero())
+          Worklist.push_back(std::make_pair(Op0, Op1));
+      }
+
       // If "A >= B" is known true, replace "A < B" with false
       // everywhere.
       // Since we don't have the instruction "A < B" immediately to
@@ -956,6 +973,11 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
         CC->equivalences.insert(std::make_pair(NotVal, Root));
       }
       // TODO: Equality propagation - do equivalent of this
+      // The problem in our world is that if nothing has this value
+      // and this expression never appears, we would end up with a
+      // class that has no leader (this value can't be a leader for
+      // all members), no members, etc.
+
       // Ensure that any instruction in scope that gets the "A < B" value number
       // is replaced with false.
       // The leader table only tracks basic blocks, not edges. Only add to if we
@@ -1136,23 +1158,37 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
   }
 }
 
+// findConditionEquivalence - Given a predicate condition (from a
+// switch, cmp, or whatever) and a block, see if we know some constant
+// value for it already
+Value *NewGVN::findConditionEquivalence(Value *Cond, BasicBlock *B) const {
+  Value *Result = lookupOperandLeader(Cond, B);
+  if (isa<Constant>(Result))
+    return Result;
+
+  return nullptr;
+}
+
 //  processOutgoingEdges - Process the outgoing edges of a block for
 //  reachability.
-void NewGVN::processOutgoingEdges(TerminatorInst *TI) {
+void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
   // Evaluate Reachability of terminator instruction
   // Conditional branch
   BranchInst *BR;
   if ((BR = dyn_cast<BranchInst>(TI)) && BR->isConditional()) {
     Value *Cond = BR->getCondition();
-    Value *CondEvaluated = NULL;
-    if (Instruction *I = dyn_cast<Instruction>(Cond)) {
-      Expression *E = createExpression(I, TI->getParent());
-      if (ConstantExpression *CE = dyn_cast<ConstantExpression>(E)) {
-        CondEvaluated = CE->getConstantValue();
+    Value *CondEvaluated = findConditionEquivalence(Cond, B);
+    if (!CondEvaluated) {
+      if (Instruction *I = dyn_cast<Instruction>(Cond)) {
+        Expression *E = createExpression(I, B);
+        if (ConstantExpression *CE = dyn_cast<ConstantExpression>(E)) {
+          CondEvaluated = CE->getConstantValue();
+        }
+      } else if (isa<ConstantInt>(Cond)) {
+        CondEvaluated = Cond;
       }
-    } else if (isa<ConstantInt>(Cond)) {
-      CondEvaluated = Cond;
     }
+
     ConstantInt *CI;
     BasicBlock *TrueSucc = BR->getSuccessor(0);
     BasicBlock *FalseSucc = BR->getSuccessor(1);
@@ -1160,39 +1196,51 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI) {
       if (CI->isOne()) {
         DEBUG(dbgs() << "Condition for Terminator " << *TI
                      << " evaluated to true\n");
-        updateReachableEdge(TI->getParent(), TrueSucc);
+        updateReachableEdge(B, TrueSucc);
       } else if (CI->isZero()) {
         DEBUG(dbgs() << "Condition for Terminator " << *TI
                      << " evaluated to false\n");
-        updateReachableEdge(TI->getParent(), FalseSucc);
+        updateReachableEdge(B, FalseSucc);
       }
     } else {
-      BasicBlock *Parent = BR->getParent();
-      if (isOnlyReachableViaThisEdge(Parent, TrueSucc, DT))
+      if (isOnlyReachableViaThisEdge(B, TrueSucc, DT))
         propagateEquality(Cond, ConstantInt::getTrue(TrueSucc->getContext()),
                           TrueSucc);
 
-      if (isOnlyReachableViaThisEdge(Parent, FalseSucc, DT))
+      if (isOnlyReachableViaThisEdge(B, FalseSucc, DT))
         propagateEquality(Cond, ConstantInt::getFalse(FalseSucc->getContext()),
                           FalseSucc);
-      updateReachableEdge(TI->getParent(), TrueSucc);
-      updateReachableEdge(TI->getParent(), FalseSucc);
+      updateReachableEdge(B, TrueSucc);
+      updateReachableEdge(B, FalseSucc);
     }
   } else {
-    // For switches, propagate the case values into the case destinations.
+    // For switches, propagate the case values into the case
+    // destinations.
+    // TODO: We may be able to completely eliminate the switch
     if (SwitchInst *SI = dyn_cast<SwitchInst>(TI)) {
       Value *SwitchCond = SI->getCondition();
-      BasicBlock *Parent = SI->getParent();
-      for (auto i = SI->case_begin(), e = SI->case_end(); i != e; ++i) {
-        BasicBlock *Dst = i.getCaseSuccessor();
-        if (isOnlyReachableViaThisEdge(Parent, Dst, DT))
-          propagateEquality(SwitchCond, i.getCaseValue(), Dst);
+      Value *CondEvaluated = findConditionEquivalence(SwitchCond, B);
+      // See if we were able to turn this switch statement into a constant
+      if (CondEvaluated && isa<ConstantInt>(CondEvaluated)) {
+        ConstantInt *CondVal = cast<ConstantInt>(CondEvaluated);
+        // We should be able to get case value for this
+        auto CaseVal = SI->findCaseValue(CondVal);
+        // Now get where it goes and mark it reachable
+        BasicBlock *TargetBlock = CaseVal.getCaseSuccessor();
+        updateReachableEdge(B, TargetBlock);
+      } else {
+        for (unsigned i = 0, e = TI->getNumSuccessors(); i != e; ++i) {
+          BasicBlock *TargetBlock = TI->getSuccessor(i);
+          updateReachableEdge(B, TargetBlock);
+        }
       }
-    }
 
-    for (unsigned i = 0, e = TI->getNumSuccessors(); i != e; ++i) {
-      BasicBlock *B = TI->getSuccessor(i);
-      updateReachableEdge(TI->getParent(), B);
+      // Regardless of answers, propagate equalities for case values
+      for (auto i = SI->case_begin(), e = SI->case_end(); i != e; ++i) {
+        BasicBlock *TargetBlock = i.getCaseSuccessor();
+        if (isOnlyReachableViaThisEdge(B, TargetBlock, DT))
+          propagateEquality(SwitchCond, i.getCaseValue(), TargetBlock);
+      }
     }
   }
 }
@@ -1402,7 +1450,7 @@ bool NewGVN::runOnFunction(Function &F) {
         Expression *Symbolized = performSymbolicEvaluation(I, CurrBlock);
         performCongruenceFinding(I, CurrBlock, Symbolized);
       } else {
-        processOutgoingEdges(dyn_cast<TerminatorInst>(I));
+        processOutgoingEdges(dyn_cast<TerminatorInst>(I), CurrBlock);
       }
     }
   }
@@ -1727,12 +1775,12 @@ bool NewGVN::eliminateInstructions(Function &F) {
         std::set<ValueDFS> DFSOrderedMembers;
         convertDenseToDFSOrdered(CC->members, DFSOrderedMembers);
         std::set<ValueDFS> DFSOrderedEquivalences;
-        // TODO: Predicate handling should now completely obviate the
-        // need for this, but need to do before/after to make sure we
-        // didn't miss anything.
+        // During value numbering, we already proceed as if the
+        // equivalences have been propagated through, but this is the
+        // only place we actually do elimination (so that other passes
+        // know the same thing we do
 
-        //        convertDenseToDFSOrdered(CC->equivalences,
-        //        DFSOrderedEquivalences);
+        convertDenseToDFSOrdered(CC->equivalences, DFSOrderedEquivalences);
         std::vector<ValueDFS> DFSOrderedSet;
         set_union(DFSOrderedMembers.begin(), DFSOrderedMembers.end(),
                   DFSOrderedEquivalences.begin(), DFSOrderedEquivalences.end(),
