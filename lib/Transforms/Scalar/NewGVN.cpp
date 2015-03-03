@@ -878,7 +878,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
     // scope.  As LHS always has at least one use that is not
     // dominated by Root, this will never do anything if LHS has only
     // one use.
-    if (!LHS->hasOneUse()) {
+    if (!LHS->hasOneUse() && 0) {
       unsigned NumReplacements = replaceAllDominatedUsesWith(LHS, RHS, Root);
       Changed |= NumReplacements > 0;
       NumGVNEqProp += NumReplacements;
@@ -961,7 +961,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       // If we didn't find a congruence class, there is no equivalent
       // instruction already
       if (CC) {
-        if (CC->members.size() == 1) {
+        if (CC->members.size() == 1 && 0) {
           unsigned NumReplacements =
               replaceAllDominatedUsesWith(CC->leader, NotVal, Root);
           Changed |= NumReplacements > 0;
@@ -1532,6 +1532,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
     // we should only be left with instructions as members
     assert(BB || "Should have figured out a basic block for value");
     ValueDFS VD;
+
     VD.Equivalence = false;
     std::pair<int, int> DFSPair = DFSBBMap[BB];
     VD.DFSIn = DFSPair.first;
@@ -1735,14 +1736,20 @@ bool NewGVN::eliminateInstructions(Function &F) {
       continue;
     assert(CC->leader && "We should have had a leader");
 
-    // If this is a leader that is always available, just replace
-    // everything with it. We then update the congruence class with
-    // whatever members are left.
+    // If this is a leader that is always available, and it's a
+    // constant or has no equivalences, just replace everything with
+    // it. We then update the congruence class with whatever members
+    // are left.  If it has equivalences and isn't constant, we take
+    // the more general approach below because we want to try to
+    // replace using the equivalences
     if (alwaysAvailable(CC->leader)) {
       SmallPtrSet<Value *, 4> MembersLeft;
       for (auto M : CC->members) {
 
         Value *Member = M;
+        for (auto &Equiv : CC->equivalences)
+          replaceAllDominatedUsesWith(M, Equiv.first, Equiv.second);
+
         // Stores can't be replaced directly since they have no uses
         if (Member == CC->leader || isa<StoreInst>(Member)) {
           MembersLeft.insert(Member);
@@ -1767,7 +1774,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
     } else {
       DEBUG(dbgs() << "Eliminating in congruence class " << CC->id << "\n");
       // If this is a singleton, we can skip it
-      if (CC->members.size() != 1) {
+      if (CC->members.size() != 1 || !CC->equivalences.empty()) {
 
         // This is a stack because equality replacement/etc may place
         // constants in the middle of the member list, and we want to use
@@ -1797,7 +1804,6 @@ bool NewGVN::eliminateInstructions(Function &F) {
           int MemberDFSOut = C.DFSOut;
           Value *Member = C.Val;
           bool EquivalenceOnly = C.Equivalence;
-
           // We ignore stores because we can't replace them, since,
           // they have no uses
           if (isa<StoreInst>(Member))
@@ -1834,8 +1840,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
             // Push if we need to
             ShouldPush |= EliminationStack.empty();
             if (ShouldPush) {
-              EliminationStack.push_back(Member,  MemberDFSIn,
-                                         MemberDFSOut);
+              EliminationStack.push_back(Member, MemberDFSIn, MemberDFSOut);
             }
           }
 
@@ -1843,19 +1848,18 @@ bool NewGVN::eliminateInstructions(Function &F) {
           // to eliminate equivalence-only candidates
           if (Member == CC->leader || EquivalenceOnly)
             continue;
-
+          // The block in the result may be null
           Value *Result = EliminationStack.back();
           if (Member == Result)
             continue;
           DEBUG(dbgs() << "Found replacement " << *Result << " for " << *Member
                        << "\n");
 
-          // Perform actual replacement
-          Instruction *I;
-          if ((I = dyn_cast<Instruction>(Member)) && Member != CC->leader) {
+          // Perform actual replacement. We should only end up with
+          // instructions or constant values here.
+          if (Instruction *I = dyn_cast<Instruction>(Member)) {
             assert(CC->leader != I &&
                    "About to accidentally remove our leader");
-
             replaceInstruction(I, Result);
             CC->members.erase(Member);
           }
