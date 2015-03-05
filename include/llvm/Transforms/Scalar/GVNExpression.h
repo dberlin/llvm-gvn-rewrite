@@ -186,7 +186,6 @@ public:
   virtual ~CallExpression() {}
 
   virtual bool equals(const Expression &other) const {
-    // Two calls are never the same if we don't have memory dependence info
     const CallExpression &OE = cast<CallExpression>(other);
     if (ValueType != OE.ValueType)
       return false;

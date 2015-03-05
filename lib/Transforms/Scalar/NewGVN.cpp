@@ -862,18 +862,11 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
       if (!ReachableBlocks.count(DefiningInst->getParent()))
         return createConstantExpression(UndefValue::get(LI->getType()));
       if (StoreInst *SI = dyn_cast<StoreInst>(DefiningInst)) {
-
-        uint64_t LoadSize = DL->getTypeSizeInBits(LI->getType());
-        uint64_t StoreSize =
-            DL->getTypeSizeInBits(SI->getValueOperand()->getType());
-        if (LoadSize == StoreSize) {
-          Value *StoreAddressLeader =
-              lookupOperandLeader(SI->getPointerOperand(), B);
-          if (LoadAddressLeader == StoreAddressLeader) {
-            if (AnalyzeLoadFromClobberingStore(LI->getType(), LoadAddressLeader,
-                                               SI, *DL) == 0) {
-              return createVariableOrConstant(SI->getValueOperand(), B);
-            }
+	Value *StoreAddressLeader =
+	  lookupOperandLeader(SI->getPointerOperand(), B);
+	if (LoadAddressLeader == StoreAddressLeader) {
+	  if (SI->getValueOperand()->getType() == LI->getType()) {
+	    return createVariableOrConstant(SI->getValueOperand(), B);
           }
         }
       }
@@ -1865,11 +1858,20 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
       if (Instruction *I = dyn_cast<Instruction>(U.getUser())) {
         ValueDFS VD;
         VD.Equivalence = false;
-
-        std::pair<int, int> DFSPair = DFSBBMap[I->getParent()];
+	// Put the phi node uses in the incoming block
+	BasicBlock *IBlock;
+	if (PHINode *P = dyn_cast<PHINode>(I)) {
+	  IBlock = P->getIncomingBlock(U);
+	  // Make phi node users appear last in the incoming block
+	  // they are from.
+	  VD.LocalNum = InstrDFS.size() + 1;
+	} else {
+	  IBlock = I->getParent();
+	  VD.LocalNum = InstrDFS[I];
+	}
+        std::pair<int, int> DFSPair = DFSBBMap[IBlock];
         VD.DFSIn = DFSPair.first;
         VD.DFSOut = DFSPair.second;
-        VD.LocalNum = InstrDFS[I];
         VD.U = &U;
         VD.Val = nullptr;
         DFSOrderedSet.push_back(VD);
@@ -2077,8 +2079,8 @@ bool NewGVN::eliminateInstructions(Function &F) {
         for (auto &Equiv : CC->equivalences)
           replaceAllDominatedUsesWith(M, Equiv.first, Equiv.second);
 
-        // Stores can't be replaced directly since they have no uses
-        if (Member == CC->leader || isa<StoreInst>(Member)) {
+        // Void things have no uses we can replace
+        if (Member == CC->leader || Member->getType()->isVoidTy()) {
           MembersLeft.insert(Member);
           continue;
         }
@@ -2143,9 +2145,9 @@ bool NewGVN::eliminateInstructions(Function &F) {
           Value *Member = C.Val;
           Use *MemberUse = C.U;
           bool EquivalenceOnly = C.Equivalence;
-          // We ignore stores because we can't replace them, since,
-          // they have no uses
-          if (Member && isa<StoreInst>(Member))
+          // We ignore void things because we can't get a value from
+          // them.
+          if (Member && Member->getType()->isVoidTy())
             continue;
 
           if (EliminationStack.empty()) {
