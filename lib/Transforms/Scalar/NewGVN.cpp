@@ -535,8 +535,8 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
     // simplify (IE there is no SimplifyZExt)
 
     SmallVector<Constant *, 8> C;
-    for (unsigned i = 0, e = E->args_size(); i != e; ++i)
-      C.emplace_back(cast<Constant>(E->Args[i]));
+    for (Value *Arg : E->arguments())
+      C.emplace_back(cast<Constant>(Arg));
 
     Value *V =
         ConstantFoldInstOperands(E->getOpcode(), E->getType(), C, DL, TLI);
@@ -881,18 +881,17 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
       if (StoreInst *DepSI = dyn_cast<StoreInst>(DefiningInst)) {
         Value *StoreAddressLeader =
             lookupOperandLeader(DepSI->getPointerOperand(), B);
-        if (LoadAddressLeader == StoreAddressLeader) {
-          Type *LoadType = LI->getType();
-          Value *StoreVal = DepSI->getValueOperand();
-          if (StoreVal->getType() == LoadType) {
-            return createVariableOrConstant(DepSI->getValueOperand(), B);
-          } else {
-            int Offset = analyzeLoadFromClobberingStore(
-                LoadType, LoadAddressLeader, DepSI, *DL);
-            if (Offset >= 0)
-              return createCoercibleLoadExpression(
-                  LI, DefiningAccess, (unsigned)Offset, StoreVal, B);
-          }
+        Type *LoadType = LI->getType();
+        Value *StoreVal = DepSI->getValueOperand();
+        if (StoreVal->getType() == LoadType &&
+            LoadAddressLeader == StoreAddressLeader) {
+          return createVariableOrConstant(DepSI->getValueOperand(), B);
+        } else {
+          int Offset = analyzeLoadFromClobberingStore(
+              LoadType, LoadAddressLeader, DepSI, *DL);
+          if (Offset >= 0)
+            return createCoercibleLoadExpression(LI, DefiningAccess,
+                                                 (unsigned)Offset, StoreVal, B);
         }
       } else if (LoadInst *DepLI = dyn_cast<LoadInst>(DefiningInst)) {
         Value *PointerLeader = LI->getPointerOperand();
@@ -966,13 +965,12 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
 
   Value *AllSameValue = E->Args[0];
 
-  for (unsigned i = 1, e = E->args_size(); i != e; ++i) {
-    if (E->Args[i] != AllSameValue) {
+  for (const Value *Arg : E->arguments())
+    if (Arg != AllSameValue) {
       AllSameValue = NULL;
       break;
     }
-  }
-  //
+
   if (AllSameValue) {
     // It's possible to have phi nodes with cycles (IE dependent on
     // other phis that are .... dependent on the original phi node), especially
@@ -1419,7 +1417,7 @@ void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
       DEBUG(dbgs() << "New congruence class for " << V << " is " << EClass->id
                    << "\n");
 
-      if (isa<CoercibleLoadExpression>(E)) {
+      if (E && isa<CoercibleLoadExpression>(E)) {
         VClass->coercible_members.erase(V);
         EClass->coercible_members.insert(V);
       } else {
