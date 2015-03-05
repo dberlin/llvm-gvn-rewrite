@@ -62,14 +62,14 @@ public:
 
   virtual ~Expression() {}
 
-  virtual bool operator==(const Expression &other) const {
-    if (Opcode != other.Opcode)
+  bool operator==(const Expression &Other) const {
+    if (Opcode != Other.Opcode)
       return false;
     if (Opcode == ~0U || Opcode == ~1U)
       return true;
-    if (EType != other.EType)
+    if (EType != Other.EType)
       return false;
-    return equals(other);
+    return equals(Other);
   }
 
   virtual bool equals(const Expression &other) const { return true; }
@@ -141,8 +141,8 @@ public:
 
   virtual ~BasicExpression() {}
 
-  virtual bool equals(const Expression &other) const {
-    const BasicExpression &OE = cast<BasicExpression>(other);
+  virtual bool equals(const Expression &Other) const {
+    const BasicExpression &OE = cast<BasicExpression>(Other);
     if (ValueType != OE.ValueType)
       return false;
     if (NumArgs != OE.NumArgs)
@@ -186,23 +186,18 @@ public:
 
   virtual ~CallExpression() {}
 
-  virtual bool equals(const Expression &other) const {
-    const CallExpression &OE = cast<CallExpression>(other);
-    if (ValueType != OE.ValueType)
+  virtual bool equals(const Expression &Other) const {
+    if (!this->BasicExpression::equals(Other))
       return false;
-    // Calls are unequal unless they have the same arguments
-    if (NumArgs != OE.NumArgs)
-      return false;
-    if (!std::equal(args_begin(), args_end(), OE.args_begin()))
-      return false;
+    const CallExpression &OE = cast<CallExpression>(Other);
     if (DefiningAccess != OE.DefiningAccess)
       return false;
     return true;
   }
 
   virtual hash_code getHashValue() const {
-    return hash_combine(EType, Opcode, ValueType,
-                        hash_combine_range(args_begin(), args_end()));
+    return hash_combine(this->BasicExpression::getHashValue(), DefiningAccess,
+                        Call);
   }
 
   virtual void print(raw_ostream &OS) {
@@ -245,21 +240,18 @@ public:
 
   virtual ~LoadExpression() {}
 
-  virtual bool equals(const Expression &other) const {
-    const LoadExpression &OE = cast<LoadExpression>(other);
-    if (NumArgs != OE.NumArgs)
+  virtual bool equals(const Expression &Other) const {
+    if (!this->BasicExpression::equals(Other))
       return false;
-    if (!std::equal(args_begin(), args_end(), OE.args_begin()))
-      return false;
-
+    const LoadExpression &OE = cast<LoadExpression>(Other);
     if (DefiningAccess != OE.DefiningAccess)
       return false;
     return true;
   }
 
   virtual hash_code getHashValue() const {
-    return hash_combine(EType, Opcode, DefiningAccess,
-                        hash_combine_range(args_begin(), args_end()));
+    return hash_combine(this->BasicExpression::getHashValue(), DefiningAccess,
+                        Load);
   }
 };
 class CoercibleLoadExpression : public LoadExpression {
@@ -291,11 +283,20 @@ public:
         Src(S) {}
 
   virtual ~CoercibleLoadExpression() {}
-  virtual hash_code getHashValue() const {
-    return hash_combine(this->LoadExpression::getHashValue(),
-                        Offset, Src);
-  }
+  virtual bool equals(const Expression &Other) const {
+    if (!this->LoadExpression::equals(Other))
+      return false;
+    const CoercibleLoadExpression &OE = cast<CoercibleLoadExpression>(Other);
+    if (Src != OE.Src)
+      return false;
+    if (Offset != OE.Offset)
+      return false;
 
+    return true;
+  }
+  virtual hash_code getHashValue() const {
+    return hash_combine(this->LoadExpression::getHashValue(), Offset, Src);
+  }
 };
 
 class StoreExpression : public BasicExpression {
@@ -323,20 +324,18 @@ public:
 
   virtual ~StoreExpression() {}
 
-  virtual bool equals(const Expression &other) const {
-    const StoreExpression &OE = cast<StoreExpression>(other);
-    if (NumArgs != OE.NumArgs)
+  virtual bool equals(const Expression &Other) const {
+    if (!this->BasicExpression::equals(Other))
       return false;
-    if (!std::equal(args_begin(), args_end(), OE.args_begin()))
-      return false;
+    const StoreExpression &OE = cast<StoreExpression>(Other);
     if (DefiningAccess != OE.DefiningAccess)
       return false;
     return true;
   }
 
   virtual hash_code getHashValue() const {
-    return hash_combine(EType, Opcode, DefiningAccess,
-                        hash_combine_range(args_begin(), args_end()));
+    return hash_combine(this->BasicExpression::getHashValue(), DefiningAccess,
+                        Store);
   }
 };
 
@@ -384,15 +383,11 @@ public:
     IntArgs = Allocator.Allocate<unsigned int>(MaxIntArgs);
   }
 
-  virtual bool equals(const Expression &other) const {
-    const AggregateValueExpression &OE = cast<AggregateValueExpression>(other);
-    if (ValueType != OE.ValueType)
+  virtual bool equals(const Expression &Other) const {
+    if (!this->BasicExpression::equals(Other))
       return false;
-    if (NumArgs != OE.NumArgs)
-      return false;
+    const AggregateValueExpression &OE = cast<AggregateValueExpression>(Other);
     if (NumIntArgs != OE.NumIntArgs)
-      return false;
-    if (!std::equal(args_begin(), args_end(), OE.args_begin()))
       return false;
     if (!std::equal(int_args_begin(), int_args_end(), OE.int_args_begin()))
       return false;
@@ -401,8 +396,7 @@ public:
   }
 
   virtual hash_code getHashValue() const {
-    return hash_combine(EType, Opcode, ValueType,
-                        hash_combine_range(args_begin(), args_end()),
+    return hash_combine(this->BasicExpression::getHashValue(),
                         hash_combine_range(int_args_begin(), int_args_end()));
   }
   virtual void print(raw_ostream &OS) {
@@ -429,15 +423,11 @@ public:
 
   void setBB(BasicBlock *bb) { BB = bb; }
 
-  virtual bool equals(const Expression &other) const {
-    const PHIExpression &OE = cast<PHIExpression>(other);
+  virtual bool equals(const Expression &Other) const {
+    if (!this->BasicExpression::equals(Other))
+      return false;
+    const PHIExpression &OE = cast<PHIExpression>(Other);
     if (BB != OE.BB)
-      return false;
-    if (ValueType != OE.ValueType)
-      return false;
-    if (NumArgs != OE.NumArgs)
-      return false;
-    if (!std::equal(args_begin(), args_end(), OE.args_begin()))
       return false;
     return true;
   }
@@ -448,8 +438,7 @@ public:
   virtual ~PHIExpression() {}
 
   virtual hash_code getHashValue() const {
-    return hash_combine(EType, BB, Opcode, ValueType,
-                        hash_combine_range(args_begin(), args_end()));
+    return hash_combine(this->BasicExpression::getHashValue(), BB);
   }
   virtual void print(raw_ostream &OS) {
     OS << "{etype = " << EType << ", opcode = " << Opcode << ", Args = {";
@@ -475,8 +464,8 @@ public:
 
   Value *getVariableValue() const { return VariableValue; }
   void setVariableValue(Value *V) { VariableValue = V; }
-  virtual bool equals(const Expression &other) const {
-    const VariableExpression &OC = cast<VariableExpression>(other);
+  virtual bool equals(const Expression &Other) const {
+    const VariableExpression &OC = cast<VariableExpression>(Other);
     if (VariableValue != OC.VariableValue)
       return false;
     return true;
@@ -510,8 +499,8 @@ public:
   Constant *getConstantValue() const { return ConstantValue; }
 
   void setConstantValue(Constant *V) { ConstantValue = V; }
-  virtual bool equals(const Expression &other) const {
-    const ConstantExpression &OC = cast<ConstantExpression>(other);
+  virtual bool equals(const Expression &Other) const {
+    const ConstantExpression &OC = cast<ConstantExpression>(Other);
     if (ConstantValue != OC.ConstantValue)
       return false;
     return true;
