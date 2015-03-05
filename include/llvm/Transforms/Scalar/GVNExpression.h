@@ -33,6 +33,7 @@ enum ExpressionType {
   ExpressionTypeAggregateValue,
   ExpressionTypePhi,
   ExpressionTypeLoad,
+  ExpressionTypeCoercibleLoad,
   ExpressionTypeStore,
   ExpressionTypeBasicEnd
 };
@@ -61,7 +62,7 @@ public:
 
   virtual ~Expression() {}
 
-  bool operator==(const Expression &other) const {
+  virtual bool operator==(const Expression &other) const {
     if (Opcode != other.Opcode)
       return false;
     if (Opcode == ~0U || Opcode == ~1U)
@@ -223,6 +224,10 @@ protected:
   LoadInst *Load;
   MemoryAccess *DefiningAccess;
 
+  LoadExpression(enum ExpressionType EType, unsigned int NumArgs, LoadInst *L,
+                 MemoryAccess *DA)
+      : BasicExpression(NumArgs, EType), Load(L), DefiningAccess(DA) {}
+
 public:
   LoadInst *getLoadInst() const { return Load; }
 
@@ -231,12 +236,12 @@ public:
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const LoadExpression *) { return true; }
   static inline bool classof(const Expression *EB) {
-    return EB->getExpressionType() == ExpressionTypeLoad;
+    return EB->getExpressionType() >= ExpressionTypeLoad &&
+           EB->getExpressionType() <= ExpressionTypeCoercibleLoad;
   }
 
   LoadExpression(unsigned int NumArgs, LoadInst *L, MemoryAccess *DA)
-      : BasicExpression(NumArgs, ExpressionTypeLoad), Load(L),
-        DefiningAccess(DA) {}
+      : LoadExpression(ExpressionTypeLoad, NumArgs, L, DA) {}
 
   virtual ~LoadExpression() {}
 
@@ -256,6 +261,41 @@ public:
     return hash_combine(EType, Opcode, DefiningAccess,
                         hash_combine_range(args_begin(), args_end()));
   }
+};
+class CoercibleLoadExpression : public LoadExpression {
+private:
+  void operator=(const CoercibleLoadExpression &) = delete;
+  CoercibleLoadExpression(const CoercibleLoadExpression &) = delete;
+  CoercibleLoadExpression() = delete;
+
+  // Offset into the value we can coerce from;
+  unsigned int Offset;
+  // Value we can coerce from
+  Value *Src;
+
+public:
+  unsigned int getOffset() const { return Offset; }
+  void setOffset(unsigned int O) { Offset = O; }
+  Value *getSrc() const { return Src; }
+  void setSrc(Value *S) { Src = S; }
+
+  /// Methods for support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const CoercibleLoadExpression *) { return true; }
+  static inline bool classof(const Expression *EB) {
+    return EB->getExpressionType() == ExpressionTypeCoercibleLoad;
+  }
+
+  CoercibleLoadExpression(unsigned int NumArgs, LoadInst *L, MemoryAccess *DA,
+                          unsigned int O, Value *S)
+      : LoadExpression(ExpressionTypeCoercibleLoad, NumArgs, L, DA), Offset(O),
+        Src(S) {}
+
+  virtual ~CoercibleLoadExpression() {}
+  virtual hash_code getHashValue() const {
+    return hash_combine(this->LoadExpression::getHashValue(),
+                        Offset, Src);
+  }
+
 };
 
 class StoreExpression : public BasicExpression {
