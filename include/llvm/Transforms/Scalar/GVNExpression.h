@@ -75,8 +75,16 @@ public:
   virtual bool equals(const Expression &other) const { return true; }
 
   virtual hash_code getHashValue() const { return hash_combine(EType, Opcode); }
-  virtual void print(raw_ostream &OS) {
-    OS << "{etype = " << EType << ", opcode = " << Opcode << " }";
+  virtual void printInternal(raw_ostream &OS, bool printEType) {
+    if (printEType)
+      OS << "etype = " << EType << ",";
+    OS << "opcode = " << Opcode << ", ";
+  }
+
+  void print(raw_ostream &OS) {
+    OS << "{ ";
+    printInternal(OS, true);
+    OS << "}";
   }
 };
 inline raw_ostream &operator<<(raw_ostream &OS, Expression &E) {
@@ -106,6 +114,14 @@ public:
   inline arg_iterator args_end() { return Args + NumArgs; }
   inline const_arg_iterator args_begin() const { return Args; }
   inline const_arg_iterator args_end() const { return Args + NumArgs; }
+  inline iterator_range<arg_iterator> arguments() {
+    return iterator_range<arg_iterator>(args_begin(), args_end());
+  }
+
+  inline iterator_range<const_arg_iterator> arguments() const {
+    return iterator_range<const_arg_iterator>(args_begin(), args_end());
+  }
+
   inline unsigned int args_size() const { return NumArgs; }
   inline void args_push_back(Value *Arg) {
     assert(NumArgs < MaxArgs && "Tried to add too many args");
@@ -151,12 +167,16 @@ public:
       return false;
     return true;
   }
-  virtual void print(raw_ostream &OS) {
-    OS << "{etype = " << EType << ", opcode = " << Opcode << ", VarArgs = {";
+  virtual void printInternal(raw_ostream &OS, bool printEType) {
+    if (printEType)
+      OS << "ExpressionTypeBasic, ";
+
+    this->Expression::printInternal(OS, false);
+    OS << "args = {";
     for (unsigned i = 0, e = args_size(); i != e; ++i) {
       OS << "[" << i << "] = " << Args[i] << "  ";
     }
-    OS << "}  }";
+    OS << "} ";
   }
 
   virtual hash_code getHashValue() const {
@@ -200,13 +220,11 @@ public:
                         Call);
   }
 
-  virtual void print(raw_ostream &OS) {
-    OS << "{etype = " << EType << ", opcode = " << Opcode << ", Args = {";
-    for (unsigned i = 0, e = args_size(); i != e; ++i) {
-      OS << "[" << i << "] = " << Args[i] << "  ";
-    }
-    OS << "}";
-    OS << " represents call at " << Call << "}";
+  virtual void printInternal(raw_ostream &OS, bool printEType) {
+    if (printEType)
+      OS << "ExpressionTypeCall, ";
+    this->BasicExpression::printInternal(OS, false);
+    OS << " represents call at " << Call;
   }
 };
 class LoadExpression : public BasicExpression {
@@ -253,6 +271,13 @@ public:
     return hash_combine(this->BasicExpression::getHashValue(), DefiningAccess,
                         Load);
   }
+
+  virtual void printInternal(raw_ostream &OS, bool printEType) {
+    if (printEType)
+      OS << "ExpressionTypeLoad, ";
+    this->BasicExpression::printInternal(OS, false);
+    OS << " represents Load at " << Load;
+  }
 };
 class CoercibleLoadExpression : public LoadExpression {
 private:
@@ -297,6 +322,13 @@ public:
   virtual hash_code getHashValue() const {
     return hash_combine(this->LoadExpression::getHashValue(), Offset, Src);
   }
+  virtual void printInternal(raw_ostream &OS, bool printEType) {
+    if (printEType)
+      OS << "ExpressionTypeCoercibleLoad, ";
+    this->LoadExpression::printInternal(OS, false);
+    OS << " represents CoercibleLoad at " << Load << " with Src " << Src
+       << " and offset " << Offset;
+  }
 };
 
 class StoreExpression : public BasicExpression {
@@ -331,6 +363,13 @@ public:
     if (DefiningAccess != OE.DefiningAccess)
       return false;
     return true;
+  }
+
+  virtual void printInternal(raw_ostream &OS, bool printEType) {
+    if (printEType)
+      OS << "ExpressionTypeStore, ";
+    this->BasicExpression::printInternal(OS, false);
+    OS << " represents Store at " << Store;
   }
 
   virtual hash_code getHashValue() const {
@@ -399,16 +438,15 @@ public:
     return hash_combine(this->BasicExpression::getHashValue(),
                         hash_combine_range(int_args_begin(), int_args_end()));
   }
-  virtual void print(raw_ostream &OS) {
-    OS << "{etype = " << EType << ", opcode = " << Opcode << ", Args = {";
-    for (unsigned i = 0, e = args_size(); i != e; ++i) {
-      OS << "[" << i << "] = " << Args[i] << "  ";
-    }
-    OS << "}, intargs = {";
+  virtual void printInternal(raw_ostream &OS, bool printEType) {
+    if (printEType)
+      OS << "ExpressionTypeAggregateValue, ";
+    this->BasicExpression::printInternal(OS, false);
+    OS << ", intargs = {";
     for (unsigned i = 0, e = int_args_size(); i != e; ++i) {
       OS << "[" << i << "] = " << IntArgs[i] << "  ";
     }
-    OS << "}  }";
+    OS << "}";
   }
 };
 
@@ -440,12 +478,11 @@ public:
   virtual hash_code getHashValue() const {
     return hash_combine(this->BasicExpression::getHashValue(), BB);
   }
-  virtual void print(raw_ostream &OS) {
-    OS << "{etype = " << EType << ", opcode = " << Opcode << ", Args = {";
-    for (unsigned i = 0, e = args_size(); i != e; ++i) {
-      OS << "[" << i << "] = " << Args[i] << "  ";
-    }
-    OS << "}, bb = " << BB << "  }";
+  virtual void printInternal(raw_ostream &OS, bool printEType) {
+    if (printEType)
+      OS << "ExpressionTypePhi, ";
+    this->BasicExpression::printInternal(OS, false);
+    OS << "bb = " << BB;
   }
 
 private:
@@ -477,9 +514,11 @@ public:
     return hash_combine(EType, VariableValue->getType(), VariableValue);
   }
 
-  virtual void print(raw_ostream &OS) {
-    OS << "{etype = " << EType << ", opcode = " << Opcode
-       << ", variable = " << VariableValue << " }";
+  virtual void printInternal(raw_ostream &OS, bool printEType) {
+    if (printEType)
+      OS << "ExpressionTypeVariable, ";
+    this->Expression::printInternal(OS, false);
+    OS << " variable = " << *VariableValue;
   }
 
 private:
@@ -513,6 +552,12 @@ public:
       : Expression(ExpressionTypeConstant), ConstantValue(constantValue) {}
   virtual hash_code getHashValue() const {
     return hash_combine(EType, ConstantValue->getType(), ConstantValue);
+  }
+  virtual void printInternal(raw_ostream &OS, bool printEType) {
+    if (printEType)
+      OS << "ExpressionTypeConstant, ";
+    this->Expression::printInternal(OS, false);
+    OS << " constant = " << *ConstantValue;
   }
 
 private:
