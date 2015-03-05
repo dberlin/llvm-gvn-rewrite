@@ -107,6 +107,12 @@ struct CongruenceClass {
   Expression *expression;
   // Actual members of this class.  These are the things the same everywhere
   MemberSet members;
+  // Coercible members of this class. These are loads where we can pull the
+  // value out of a store. This means they need special processing during
+  // elimination to do this, but they are otherwise the same as members,
+  // in particular, we can eliminate one in favor of a dominating one.
+  MemberSet coercible_members;
+
   typedef DenseSet<std::pair<Value *, BasicBlock *>> EquivalenceSet;
 
   // Noted equivalences.  These are things that are equivalence to
@@ -232,6 +238,10 @@ private:
                                          BasicBlock *);
   LoadExpression *createLoadExpression(LoadInst *, MemoryAccess *,
                                        BasicBlock *);
+  CoercibleLoadExpression *createCoercibleLoadExpression(LoadInst *,
+                                                         MemoryAccess *,
+                                                         unsigned, Value *,
+                                                         BasicBlock *);
   CallExpression *createCallExpression(CallInst *, MemoryAccess *,
                                        BasicBlock *);
   AggregateValueExpression *createAggregateValueExpression(Instruction *,
@@ -378,11 +388,22 @@ Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
                                            Value *Arg1, Value *Arg2,
                                            BasicBlock *B) {
   BasicExpression *E = new (ExpressionAllocator) BasicExpression(2);
+
   E->setType(T);
   E->setOpcode(Opcode);
   E->allocateArgs(ArgRecycler, ExpressionAllocator);
+  if (Instruction::isCommutative(Opcode)) {
+    // Ensure that commutative instructions that only differ by a permutation
+    // of their operands get the same value number by sorting the operand value
+    // numbers.  Since all commutative instructions have two operands it is more
+    // efficient to sort by hand rather than using, say, std::sort.
+    if (Arg1 > Arg2)
+      std::swap(Arg1, Arg2);
+  }
+
   E->args_push_back(lookupOperandLeader(Arg1, B));
   E->args_push_back(lookupOperandLeader(Arg2, B));
+
   Value *V = SimplifyBinOp(Opcode, E->Args[0], E->Args[1], DL, TLI, DT, AC);
   if (Expression *simplifiedE = checkSimplificationResults(E, nullptr, V))
     return simplifiedE;
@@ -625,13 +646,13 @@ Value *NewGVN::lookupOperandLeader(Value *V, BasicBlock *B) const {
   return V;
 }
 
-LoadExpression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *HV,
+LoadExpression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *DA,
                                              BasicBlock *B) {
   LoadExpression *E =
-      new (ExpressionAllocator) LoadExpression(LI->getNumOperands(), LI, HV);
+      new (ExpressionAllocator) LoadExpression(LI->getNumOperands(), LI, DA);
   E->allocateArgs(ArgRecycler, ExpressionAllocator);
   E->setType(LI->getType());
-  // Need opcodes to match on loads and store
+  // Give store and loads same opcode so they value number together
   E->setOpcode(0);
   Value *Operand = lookupOperandLeader(LI->getPointerOperand(), B);
   E->args_push_back(Operand);
@@ -641,13 +662,32 @@ LoadExpression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *HV,
   return E;
 }
 
-StoreExpression *NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *HV,
+CoercibleLoadExpression *NewGVN::createCoercibleLoadExpression(LoadInst *LI,
+                                                               MemoryAccess *DA,
+                                                               unsigned Offset,
+                                                               Value *SrcVal,
+                                                               BasicBlock *B) {
+  CoercibleLoadExpression *E = new (ExpressionAllocator)
+      CoercibleLoadExpression(LI->getNumOperands(), LI, DA, Offset, SrcVal);
+  E->allocateArgs(ArgRecycler, ExpressionAllocator);
+  E->setType(LI->getType());
+  // Give store and loads same opcode so they value number together
+  E->setOpcode(0);
+  Value *Operand = lookupOperandLeader(LI->getPointerOperand(), B);
+  E->args_push_back(Operand);
+  // TODO: Value number heap versions. We may be able to discover
+  // things alias analysis can't on it's own (IE that a store and a
+  // load have the same value, and thus, it isn't clobbering the load)
+  return E;
+}
+
+StoreExpression *NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *DA,
                                                BasicBlock *B) {
   StoreExpression *E =
-      new (ExpressionAllocator) StoreExpression(SI->getNumOperands(), SI, HV);
+      new (ExpressionAllocator) StoreExpression(SI->getNumOperands(), SI, DA);
   E->allocateArgs(ArgRecycler, ExpressionAllocator);
   E->setType(SI->getType());
-  // Need opcodes to match on loads and store
+  // Give store and loads same opcode so they value number together
   E->setOpcode(0);
   Value *Operand = lookupOperandLeader(SI->getPointerOperand(), B);
   E->args_push_back(Operand);
@@ -665,7 +705,7 @@ StoreExpression *NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *HV,
 /// Check this case to see if there is anything more we can do before we give
 /// up.  This returns -1 if we have to give up, or a byte number in the stored
 /// value of the piece that feeds the load.
-static int AnalyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
+static int analyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
                                           Value *WritePtr,
                                           uint64_t WriteSizeInBits,
                                           const DataLayout &DL) {
@@ -680,21 +720,6 @@ static int AnalyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
   Value *LoadBase = GetPointerBaseWithConstantOffset(LoadPtr, LoadOffset, &DL);
   if (StoreBase != LoadBase)
     return -1;
-
-// If the load and store are to the exact same address, they should have been
-// a must alias.  AA must have gotten confused.
-// FIXME: Study to see if/when this happens.  One case is forwarding a memset
-// to a load from the base of the memset.
-#if 0
-  if (LoadOffset == StoreOffset) {
-    dbgs() << "STORE/LOAD DEP WITH COMMON POINTER MISSED:\n"
-    << "Base       = " << *StoreBase << "\n"
-    << "Store Ptr  = " << *WritePtr << "\n"
-    << "Store Offs = " << StoreOffset << "\n"
-    << "Load Ptr   = " << *LoadPtr << "\n";
-    abort();
-  }
-#endif
 
   // If the load and store don't overlap at all, the store doesn't provide
   // anything to the load.  In this case, they really don't alias at all, AA
@@ -713,14 +738,6 @@ static int AnalyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
     isAAFailure = LoadOffset + int64_t(LoadSize) <= StoreOffset;
 
   if (isAAFailure) {
-#if 0
-    dbgs() << "STORE LOAD DEP WITH COMMON BASE:\n"
-    << "Base       = " << *StoreBase << "\n"
-    << "Store Ptr  = " << *WritePtr << "\n"
-    << "Store Offs = " << StoreOffset << "\n"
-    << "Load Ptr   = " << *LoadPtr << "\n";
-    abort();
-#endif
     return -1;
   }
 
@@ -739,7 +756,7 @@ static int AnalyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
 
 /// This function is called when we have a
 /// memdep query of a load that ends up being a clobbering store.
-static int AnalyzeLoadFromClobberingStore(Type *LoadTy, Value *LoadPtr,
+static int analyzeLoadFromClobberingStore(Type *LoadTy, Value *LoadPtr,
                                           StoreInst *DepSI,
                                           const DataLayout &DL) {
   // Cannot handle reading from store of first-class aggregate yet.
@@ -750,14 +767,14 @@ static int AnalyzeLoadFromClobberingStore(Type *LoadTy, Value *LoadPtr,
   Value *StorePtr = DepSI->getPointerOperand();
   uint64_t StoreSize =
       DL.getTypeSizeInBits(DepSI->getValueOperand()->getType());
-  return AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, StorePtr, StoreSize,
+  return analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, StorePtr, StoreSize,
                                         DL);
 }
 
 /// This function is called when we have a
 /// memdep query of a load that ends up being clobbered by another load.  See if
 /// the other load can feed into the second load.
-static int AnalyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
+static int analyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
                                          LoadInst *DepLI,
                                          const DataLayout &DL) {
   // Cannot handle reading from store of first-class aggregate yet.
@@ -766,7 +783,7 @@ static int AnalyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
 
   Value *DepPtr = DepLI->getPointerOperand();
   uint64_t DepSize = DL.getTypeSizeInBits(DepLI->getType());
-  int R = AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, DepSize, DL);
+  int R = analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, DepSize, DL);
   if (R != -1)
     return R;
 
@@ -782,10 +799,10 @@ static int AnalyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
   if (Size == 0)
     return -1;
 
-  return AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, Size * 8, DL);
+  return analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, Size * 8, DL);
 }
 
-static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
+static int analyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
                                             MemIntrinsic *MI,
                                             const DataLayout &DL) {
   // If the mem operation is a non-constant size, we can't handle it.
@@ -797,7 +814,7 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
   // If this is memset, we just need to see if the offset is valid in the size
   // of the memset..
   if (MI->getIntrinsicID() == Intrinsic::memset)
-    return AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, MI->getDest(),
+    return analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, MI->getDest(),
                                           MemSizeInBits, DL);
 
   // If we have a memcpy/memmove, the only case we can handle is if this is a
@@ -814,7 +831,7 @@ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
     return -1;
 
   // See if the access is within the bounds of the transfer.
-  int Offset = AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, MI->getDest(),
+  int Offset = analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, MI->getDest(),
                                               MemSizeInBits, DL);
   if (Offset == -1)
     return Offset;
@@ -861,14 +878,38 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
       // undef
       if (!ReachableBlocks.count(DefiningInst->getParent()))
         return createConstantExpression(UndefValue::get(LI->getType()));
-      if (StoreInst *SI = dyn_cast<StoreInst>(DefiningInst)) {
-	Value *StoreAddressLeader =
-	  lookupOperandLeader(SI->getPointerOperand(), B);
-	if (LoadAddressLeader == StoreAddressLeader) {
-	  if (SI->getValueOperand()->getType() == LI->getType()) {
-	    return createVariableOrConstant(SI->getValueOperand(), B);
+      if (StoreInst *DepSI = dyn_cast<StoreInst>(DefiningInst)) {
+        Value *StoreAddressLeader =
+            lookupOperandLeader(DepSI->getPointerOperand(), B);
+        if (LoadAddressLeader == StoreAddressLeader) {
+          Type *LoadType = LI->getType();
+          Value *StoreVal = DepSI->getValueOperand();
+          if (StoreVal->getType() == LoadType) {
+            return createVariableOrConstant(DepSI->getValueOperand(), B);
+          } else {
+            int Offset = analyzeLoadFromClobberingStore(
+                LoadType, LoadAddressLeader, DepSI, *DL);
+            if (Offset >= 0)
+              return createCoercibleLoadExpression(
+                  LI, DefiningAccess, (unsigned)Offset, StoreVal, B);
           }
         }
+      } else if (LoadInst *DepLI = dyn_cast<LoadInst>(DefiningInst)) {
+        Value *PointerLeader = LI->getPointerOperand();
+        PointerLeader = lookupOperandLeader(PointerLeader, B);
+        int Offset = analyzeLoadFromClobberingLoad(LI->getType(), PointerLeader,
+                                                   DepLI, *DL);
+        if (Offset >= 0)
+          return createCoercibleLoadExpression(LI, DefiningAccess,
+                                               (unsigned)Offset, DepLI, B);
+      } else if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(DefiningInst)) {
+        Value *PointerLeader = LI->getPointerOperand();
+        PointerLeader = lookupOperandLeader(PointerLeader, B);
+        int Offset = analyzeLoadFromClobberingMemInst(
+            LI->getType(), PointerLeader, DepMI, *DL);
+        if (Offset >= 0)
+          return createCoercibleLoadExpression(LI, DefiningAccess,
+                                               (unsigned)Offset, DepMI, B);
       }
 
       // If this load really doesn't depend on anything, then we must be loading
@@ -1377,14 +1418,19 @@ void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
     if (VClass != EClass) {
       DEBUG(dbgs() << "New congruence class for " << V << " is " << EClass->id
                    << "\n");
-      VClass->members.erase(V);
-      // assert(std::find(EClass->members.begin(), EClass->members.end(), V) ==
-      // EClass->members.end() && "Tried to add something to members
-      // twice!");
-      EClass->members.insert(V);
+
+      if (isa<CoercibleLoadExpression>(E)) {
+        VClass->coercible_members.erase(V);
+        EClass->coercible_members.insert(V);
+      } else {
+        VClass->members.erase(V);
+        EClass->members.insert(V);
+      }
+
       ValueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
-      if (VClass->members.empty() && VClass != InitialClass) {
+      if ((VClass->members.empty() && VClass->coercible_members.empty()) &&
+          VClass != InitialClass) {
         if (VClass->expression) {
           VClass->dead = true;
           // TODO: I think this may be wrong.
@@ -1400,10 +1446,15 @@ void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
       } else if (VClass->leader == V) {
         // TODO: Check what happens if expression represented the leader
         VClass->leader = *(VClass->members.begin());
-        for (auto L : VClass->members) {
-          if (Instruction *I = dyn_cast<Instruction>(L))
+        for (auto M : VClass->members) {
+          if (Instruction *I = dyn_cast<Instruction>(M))
             TouchedInstructions.set(InstrDFS[I]);
-          ChangedValues.insert(L);
+          ChangedValues.insert(M);
+        }
+        for (auto EM : VClass->coercible_members) {
+          if (Instruction *I = dyn_cast<Instruction>(EM))
+            TouchedInstructions.set(InstrDFS[I]);
+          ChangedValues.insert(EM);
         }
       }
     }
@@ -1858,17 +1909,17 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
       if (Instruction *I = dyn_cast<Instruction>(U.getUser())) {
         ValueDFS VD;
         VD.Equivalence = false;
-	// Put the phi node uses in the incoming block
-	BasicBlock *IBlock;
-	if (PHINode *P = dyn_cast<PHINode>(I)) {
-	  IBlock = P->getIncomingBlock(U);
-	  // Make phi node users appear last in the incoming block
-	  // they are from.
-	  VD.LocalNum = InstrDFS.size() + 1;
-	} else {
-	  IBlock = I->getParent();
-	  VD.LocalNum = InstrDFS[I];
-	}
+        // Put the phi node uses in the incoming block
+        BasicBlock *IBlock;
+        if (PHINode *P = dyn_cast<PHINode>(I)) {
+          IBlock = P->getIncomingBlock(U);
+          // Make phi node users appear last in the incoming block
+          // they are from.
+          VD.LocalNum = InstrDFS.size() + 1;
+        } else {
+          IBlock = I->getParent();
+          VD.LocalNum = InstrDFS[I];
+        }
         std::pair<int, int> DFSPair = DFSBBMap[IBlock];
         VD.DFSIn = DFSPair.first;
         VD.DFSOut = DFSPair.second;
