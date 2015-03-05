@@ -134,7 +134,6 @@ class NewGVN : public FunctionPass {
 
   // Congruence class info
   DenseMap<Value *, CongruenceClass *> ValueToClass;
-  DenseMap<Value *, Expression *> ValueToExpression;
   struct ComparingExpressionInfo {
     static inline Expression *getEmptyKey() {
       intptr_t Val = -1;
@@ -225,9 +224,10 @@ private:
   Expression *createBinaryExpression(unsigned, Type *, Value *, Value *,
                                      BasicBlock *);
   bool setBasicExpressionInfo(Instruction *, BasicExpression *, BasicBlock *);
-  PHIExpression *createPHIExpression(Instruction *, BasicBlock *);
+  PHIExpression *createPHIExpression(Instruction *);
   VariableExpression *createVariableExpression(Value *);
   ConstantExpression *createConstantExpression(Constant *);
+  Expression *createVariableOrConstant(Value *V, BasicBlock *B);
   StoreExpression *createStoreExpression(StoreInst *, MemoryAccess *,
                                          BasicBlock *);
   LoadExpression *createLoadExpression(LoadInst *, MemoryAccess *,
@@ -247,8 +247,7 @@ private:
     return result;
   }
 
-  CongruenceClass *createSingletonCongruenceClass(Value *Member,
-                                                  BasicBlock *B) {
+  CongruenceClass *createSingletonCongruenceClass(Value *Member) {
     CongruenceClass *CClass = createCongruenceClass(Member, NULL);
     CClass->members.insert(Member);
     ValueToClass[Member] = CClass;
@@ -267,7 +266,7 @@ private:
   // Congruence finding
   Value *lookupOperandLeader(Value *, BasicBlock *) const;
   Value *findDominatingEquivalent(CongruenceClass *, BasicBlock *) const;
-  void performCongruenceFinding(Value *, BasicBlock *, Expression *);
+  void performCongruenceFinding(Value *, Expression *);
   // Predicate and reachability handling
   void updateReachableEdge(BasicBlock *, BasicBlock *);
   void processOutgoingEdges(TerminatorInst *, BasicBlock *);
@@ -281,9 +280,9 @@ private:
   // Elimination
   struct ValueDFS;
   void convertDenseToDFSOrdered(CongruenceClass::MemberSet &,
-                                std::set<ValueDFS> &);
+                                std::vector<ValueDFS> &);
   void convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &,
-                                std::set<ValueDFS> &);
+                                std::vector<ValueDFS> &);
 
   bool eliminateInstructions(Function &);
   void replaceInstruction(Instruction *, Value *);
@@ -315,7 +314,7 @@ INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_END(NewGVN, "newgvn", "Global Value Numbering", false, false)
-PHIExpression *NewGVN::createPHIExpression(Instruction *I, BasicBlock *B) {
+PHIExpression *NewGVN::createPHIExpression(Instruction *I) {
   PHINode *PN = cast<PHINode>(I);
   PHIExpression *E = new (ExpressionAllocator)
       PHIExpression(PN->getNumOperands(), I->getParent());
@@ -491,9 +490,6 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
         return simplifiedE;
     }
   } else if (I->isBinaryOp()) {
-    // TODO: Since we noop bitcasts, we may need to check types before
-    // simplifying, so that we don't end up simplifying based on a
-    // wrong type assumption
     Value *V =
         SimplifyBinOp(E->getOpcode(), E->Args[0], E->Args[1], DL, TLI, DT, AC);
     if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
@@ -503,10 +499,6 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
     if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
       return simplifiedE;
   } else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
-    // TODO: Since we noop bitcasts, we may need to check types before
-    // simplifying, so that we don't end up simplifying based on a
-    // wrong type assumption. We should clean this up so we can use
-    // constants of the wrong type.
     if (GEP->getPointerOperandType() == E->Args[0]->getType()) {
       Value *V = SimplifyGEPInst(ArrayRef<Value *>(E->Args, E->args_size()), DL,
                                  TLI, DT, AC);
@@ -571,12 +563,21 @@ NewGVN::createAggregateValueExpression(Instruction *I, BasicBlock *B) {
 VariableExpression *NewGVN::createVariableExpression(Value *V) {
   VariableExpression *E = new (ExpressionAllocator) VariableExpression(V);
   E->setOpcode(V->getValueID());
+  E = cast<VariableExpression>(uniquifyExpression(E));
   return E;
+}
+
+Expression *NewGVN::createVariableOrConstant(Value *V, BasicBlock *B) {
+  Value *LeaderVal = lookupOperandLeader(V, B);
+  if (Constant *C = dyn_cast<Constant>(LeaderVal))
+    return createConstantExpression(C);
+  return createVariableExpression(LeaderVal);
 }
 
 ConstantExpression *NewGVN::createConstantExpression(Constant *C) {
   ConstantExpression *E = new (ExpressionAllocator) ConstantExpression(C);
   E->setOpcode(C->getValueID());
+  E = cast<ConstantExpression>(uniquifyExpression(E));
   return E;
 }
 
@@ -849,13 +850,19 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
   // Load of undef is
   if (isa<UndefValue>(LoadAddressLeader))
     return createConstantExpression(UndefValue::get(LI->getType()));
+
   MemoryAccess *DefiningAccess = MSSA->getClobberingMemoryAccess(I);
   // TODO: Fix this up later, need to rewrite equivalents of the get
   // clobbering values
   if (DL && !MSSA->isLiveOnEntryDef(DefiningAccess))
     if (MemoryDef *MD = dyn_cast<MemoryDef>(DefiningAccess)) {
       Instruction *DefiningInst = MD->getMemoryInst();
+      // If the defining instruction is not reachable, replace with
+      // undef
+      if (!ReachableBlocks.count(DefiningInst->getParent()))
+        return createConstantExpression(UndefValue::get(LI->getType()));
       if (StoreInst *SI = dyn_cast<StoreInst>(DefiningInst)) {
+
         uint64_t LoadSize = DL->getTypeSizeInBits(LI->getType());
         uint64_t StoreSize =
             DL->getTypeSizeInBits(SI->getValueOperand()->getType());
@@ -864,11 +871,13 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
               lookupOperandLeader(SI->getPointerOperand(), B);
           if (LoadAddressLeader == StoreAddressLeader) {
             if (AnalyzeLoadFromClobberingStore(LI->getType(), LoadAddressLeader,
-                                               SI, *DL) == 0)
-              return performSymbolicEvaluation(SI->getValueOperand(), B);
+                                               SI, *DL) == 0) {
+              return createVariableOrConstant(SI->getValueOperand(), B);
+            }
           }
         }
       }
+
       // If this load really doesn't depend on anything, then we must be loading
       // an
       // undef value.  This can happen when loading for a fresh allocation with
@@ -911,14 +920,14 @@ Expression *NewGVN::performSymbolicCallEvaluation(Instruction *I,
 // create an expression result
 Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
                                                  BasicBlock *B) {
-  PHIExpression *E = cast<PHIExpression>(createPHIExpression(I, B));
+  PHIExpression *E = cast<PHIExpression>(createPHIExpression(I));
   E->setOpcode(I->getOpcode());
   if (E->args_empty()) {
-    DEBUG(dbgs() << "Simplified PHI node " << I << " to undef"
+    DEBUG(dbgs() << "Simplified PHI node " << *I << " to undef"
                  << "\n");
     E->deallocateArgs(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
-    return createVariableExpression(UndefValue::get(I->getType()));
+    return createConstantExpression(UndefValue::get(I->getType()));
   }
 
   Value *AllSameValue = E->Args[0];
@@ -944,11 +953,13 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
     if (isa<PHINode>(AllSameValue))
       return E;
     NumGVNPhisAllSame++;
-    DEBUG(dbgs() << "Simplified PHI node " << I << " to " << *AllSameValue
+    DEBUG(dbgs() << "Simplified PHI node " << *I << " to " << *AllSameValue
                  << "\n");
     E->deallocateArgs(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
-    return performSymbolicEvaluation(AllSameValue, B);
+    if (Constant *C = dyn_cast<Constant>(AllSameValue))
+      return createConstantExpression(C);
+    return createVariableExpression(AllSameValue);
   }
   return E;
 }
@@ -1023,14 +1034,6 @@ Expression *NewGVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
       E = performSymbolicLoadEvaluation(I, B);
       break;
     case Instruction::BitCast: {
-      // // Pointer bitcasts are noops, we can just make them out of whole
-      // // cloth if we need to.
-      // if (I->getType()->isPointerTy()) {
-      //   if (Instruction *I0 = dyn_cast<Instruction>(I->getOperand(0)))
-      //     return performSymbolicEvaluation(I0, I0->getParent());
-      //   else
-      //     return performSymbolicEvaluation(I->getOperand(0), B);
-      // }
       E = createExpression(I, B);
     } break;
 
@@ -1078,9 +1081,6 @@ Expression *NewGVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
   }
   if (!E)
     return NULL;
-
-  if (isa<ConstantExpression>(E) || isa<VariableExpression>(E))
-    E = uniquifyExpression(E);
   return E;
 }
 /// replaceAllDominatedUsesWith - Replace all uses of 'From' with 'To'
@@ -1291,8 +1291,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
 /// isOnlyReachableViaThisEdge - There is an edge from 'Src' to 'Dst'.  Return
 /// true if every path from the entry block to 'Dst' passes via this edge.  In
 /// particular 'Dst' must not be reachable via another edge from 'Src'.
-static bool isOnlyReachableViaThisEdge(BasicBlock *Src, BasicBlock *Dst,
-                                       DominatorTree *DT) {
+static bool isOnlyReachableViaThisEdge(BasicBlock *Src, BasicBlock *Dst) {
   // While in theory it is interesting to consider the case in which Dst has
   // more than one predecessor, because Dst might be part of a loop which is
   // only reachable from Src, in practice it is pointless since at the time
@@ -1315,9 +1314,7 @@ void NewGVN::markUsersTouched(Value *V) {
 
 /// performCongruenceFinding - Perform congruence finding on a given
 /// value numbering expression
-void NewGVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
-  ValueToExpression[V] = E;
-
+void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
   // This is guaranteed to return something, since it will at least find INITIAL
   CongruenceClass *VClass = ValueToClass[V];
   assert(VClass && "Should have found a vclass");
@@ -1341,6 +1338,8 @@ void NewGVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
     } else {
       EClass = VClass;
     }
+  } else if (VariableExpression *VE = dyn_cast<VariableExpression>(E)) {
+    EClass = ValueToClass[VE->getVariableValue()];
   } else {
 
     ExpressionClassMap *lookupMap = &ExpressionToClass;
@@ -1367,7 +1366,7 @@ void NewGVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
         NewClass->leader = V;
 
       EClass = NewClass;
-      DEBUG(dbgs() << "Created new congruence class for " << V
+      DEBUG(dbgs() << "Created new congruence class for " << *V
                    << " using expression " << *E << " at " << NewClass->id
                    << "\n");
     } else {
@@ -1399,6 +1398,8 @@ void NewGVN::performCongruenceFinding(Value *V, BasicBlock *BB, Expression *E) {
           // I think we should be keeping track of the expression for
           // each instruction, not for each class, and erase the old
           // expression for the instruction when the class dies.
+          DEBUG(dbgs() << "Erasing expression " << *E << " from table\n");
+
           ExpressionToClass.erase(VClass->expression);
           MemoryExpressionToClass.erase(VClass->expression);
         }
@@ -1500,11 +1501,11 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
         updateReachableEdge(B, FalseSucc);
       }
     } else {
-      if (isOnlyReachableViaThisEdge(B, TrueSucc, DT))
+      if (isOnlyReachableViaThisEdge(B, TrueSucc))
         propagateEquality(Cond, ConstantInt::getTrue(TrueSucc->getContext()),
                           TrueSucc);
 
-      if (isOnlyReachableViaThisEdge(B, FalseSucc, DT))
+      if (isOnlyReachableViaThisEdge(B, FalseSucc))
         propagateEquality(Cond, ConstantInt::getFalse(FalseSucc->getContext()),
                           FalseSucc);
       updateReachableEdge(B, TrueSucc);
@@ -1534,7 +1535,7 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
     // Regardless of answers, propagate equalities for case values
     for (auto i = SI->case_begin(), e = SI->case_end(); i != e; ++i) {
       BasicBlock *TargetBlock = i.getCaseSuccessor();
-      if (isOnlyReachableViaThisEdge(B, TargetBlock, DT))
+      if (isOnlyReachableViaThisEdge(B, TargetBlock))
         propagateEquality(SwitchCond, i.getCaseValue(), TargetBlock);
     }
   } else {
@@ -1603,7 +1604,7 @@ void NewGVN::initializeCongruenceClasses(Function &F) {
   // Initialize arguments to be in their own unique congruence classes
   // In an IPA-GVN, this would not be done
   for (auto &FA : F.args())
-    createSingletonCongruenceClass(&FA, &F.getEntryBlock());
+    createSingletonCongruenceClass(&FA);
 }
 
 void NewGVN::cleanupTables() {
@@ -1629,11 +1630,11 @@ void NewGVN::cleanupTables() {
   ProcessedBlockCount.clear();
   DFSBBMap.clear();
   InstrDFS.clear();
-  ValueToExpression.clear();
   InstructionsToErase.clear();
   UniquePredecessorBlocks.clear();
   DFSToInstr.clear();
   BlockInstRange.clear();
+  TouchedInstructions.clear();
 }
 
 std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
@@ -1674,8 +1675,10 @@ bool NewGVN::runOnFunction(Function &F) {
     BlockInstRange.insert(std::make_pair(B, BlockRange));
     ICount += BlockRange.second - BlockRange.first;
   }
+
   // Handle forward unreachable blocks and figure out which blocks
   // have single preds
+
   for (auto &B : F) {
     // Assign numbers to unreachable blocks
     if (&B != &F.getEntryBlock() && pred_empty(&B)) {
@@ -1723,15 +1726,17 @@ bool NewGVN::runOnFunction(Function &F) {
                        << " because it is unreachable\n");
           continue;
         }
-#ifndef NDEBUG
+        // #ifndef NDEBUG
         if (ProcessedBlockCount.count(CurrBlock) == 0) {
           ProcessedBlockCount.insert(std::make_pair(CurrBlock, 1));
         } else {
           ProcessedBlockCount[CurrBlock] += 1;
           assert(ProcessedBlockCount[CurrBlock] < 100 &&
                  "Seem to have processed the same block a lot\n");
+          if (ProcessedBlockCount[CurrBlock] >= 100)
+            report_fatal_error("Processed block too many times");
         }
-#endif
+        // #endif
       }
       TouchedInstructions.reset(InstrNum);
 
@@ -1750,7 +1755,7 @@ bool NewGVN::runOnFunction(Function &F) {
 #endif
       if (!I->isTerminator()) {
         Expression *Symbolized = performSymbolicEvaluation(I, CurrBlock);
-        performCongruenceFinding(I, CurrBlock, Symbolized);
+        performCongruenceFinding(I, Symbolized);
       } else {
         processOutgoingEdges(dyn_cast<TerminatorInst>(I), CurrBlock);
       }
@@ -1833,7 +1838,7 @@ struct NewGVN::ValueDFS {
 };
 
 void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
-                                      std::set<ValueDFS> &DFSOrderedSet) {
+                                      std::vector<ValueDFS> &DFSOrderedSet) {
   for (auto D : Dense) {
     // First add the value
     BasicBlock *BB = getBlockForValue(D);
@@ -1854,7 +1859,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
     else
       llvm_unreachable("Should have been an instruction");
 
-    DFSOrderedSet.insert(VD);
+    DFSOrderedSet.push_back(VD);
     // Now add the users
     for (auto &U : D->uses()) {
       if (Instruction *I = dyn_cast<Instruction>(U.getUser())) {
@@ -1867,14 +1872,14 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
         VD.LocalNum = InstrDFS[I];
         VD.U = &U;
         VD.Val = nullptr;
-        DFSOrderedSet.insert(VD);
+        DFSOrderedSet.push_back(VD);
       }
     }
   }
 }
 
 void NewGVN::convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &Dense,
-                                      std::set<ValueDFS> &DFSOrderedSet) {
+                                      std::vector<ValueDFS> &DFSOrderedSet) {
   for (auto D : Dense) {
     std::pair<int, int> &DFSPair = DFSBBMap[D.second];
     ValueDFS VD;
@@ -1893,7 +1898,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &Dense,
       VD.LocalNum = -1;
 
     VD.Val = D.first;
-    DFSOrderedSet.insert(VD);
+    DFSOrderedSet.push_back(VD);
   }
 }
 static void patchReplacementInstruction(Instruction *I, Value *Repl) {
@@ -2029,7 +2034,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
   // When we find something not dominated, it becomes the new leader
   // for elimination purposes
 
-  // First, destroy unreachable phi nodes and figure out DFS numbers
+  // First, figure out DFS numbers and get rid of unreachable phi node values
   for (auto &B : F) {
     if (!ReachableBlocks.count(&B)) {
       for (auto S : successors(&B)) {
@@ -2038,12 +2043,12 @@ bool NewGVN::eliminateInstructions(Function &F) {
           DEBUG(dbgs() << "Replacing incoming value of " << *II << " for block "
                        << getBlockName(&B)
                        << " with undef due to it being unreachable\n");
-          Phi.setIncomingValue(Phi.getBasicBlockIndex(&B),
-                               UndefValue::get(Phi.getType()));
+          for (auto &Operand : Phi.incoming_values())
+            if (Phi.getIncomingBlock(Operand) == &B)
+              Operand.set(UndefValue::get(Phi.getType()));
         }
       }
     }
-
     DomTreeNode *DTN = DT->getNode(&B);
     if (!DTN)
       continue;
@@ -2115,16 +2120,18 @@ bool NewGVN::eliminateInstructions(Function &F) {
 
         // Convert the members and equivalences to DFS ordered sets and
         // then merge them.
-        std::set<ValueDFS> DFSOrderedMembers;
+        std::vector<ValueDFS> DFSOrderedMembers;
         convertDenseToDFSOrdered(CC->members, DFSOrderedMembers);
+        sort(DFSOrderedMembers.begin(), DFSOrderedMembers.end());
 
-        std::set<ValueDFS> DFSOrderedEquivalences;
+        std::vector<ValueDFS> DFSOrderedEquivalences;
         // During value numbering, we already proceed as if the
         // equivalences have been propagated through, but this is the
         // only place we actually do elimination (so that other passes
         // know the same thing we do)
 
         convertDenseToDFSOrdered(CC->equivalences, DFSOrderedEquivalences);
+        sort(DFSOrderedEquivalences.begin(), DFSOrderedEquivalences.end());
 
         std::vector<ValueDFS> DFSOrderedSet;
         set_union(DFSOrderedMembers.begin(), DFSOrderedMembers.end(),
