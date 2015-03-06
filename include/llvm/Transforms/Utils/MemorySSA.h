@@ -102,7 +102,6 @@ public:
   iterator_range<const_iterator> uses() const {
     return iterator_range<const_iterator>(use_begin(), use_end());
   }
-  
 
 protected:
   friend class MemorySSA;
