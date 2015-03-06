@@ -196,7 +196,7 @@ class NewGVN : public FunctionPass {
   DenseMap<BasicBlock *, std::pair<int, int>> DFSBBMap;
   DenseMap<const Instruction *, unsigned int> InstrDFS;
   std::vector<Instruction *> DFSToInstr;
-  std::vector<Instruction *> InstructionsToErase;
+  SmallPtrSet<Instruction *, 8> InstructionsToErase;
   // This is a mapping from Load to (offset into source, coercion source)
   DenseMap<const Value *, std::pair<unsigned, Value *>> CoercionInfo;
 
@@ -270,6 +270,8 @@ private:
   // Symbolic evaluation
   Expression *checkSimplificationResults(Expression *, Instruction *, Value *);
   Expression *performSymbolicEvaluation(Value *, BasicBlock *);
+  Expression *performSymbolicLoadCoercion(LoadInst *, Instruction *,
+                                          MemoryAccess *, BasicBlock *);
   Expression *performSymbolicLoadEvaluation(Instruction *, BasicBlock *);
   Expression *performSymbolicStoreEvaluation(Instruction *, BasicBlock *);
   Expression *performSymbolicCallEvaluation(Instruction *, BasicBlock *);
@@ -866,6 +868,62 @@ Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
   return E;
 }
 
+Expression *NewGVN::performSymbolicLoadCoercion(LoadInst *LI,
+                                                Instruction *DepInst,
+                                                MemoryAccess *DefiningAccess,
+                                                BasicBlock *B) {
+  Type *LoadType = LI->getType();
+  if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
+    Value *LoadAddressLeader = lookupOperandLeader(LI->getPointerOperand(), B);
+    Value *StoreAddressLeader =
+        lookupOperandLeader(DepSI->getPointerOperand(), B);
+    Value *StoreVal = DepSI->getValueOperand();
+    if (StoreVal->getType() == LoadType &&
+        LoadAddressLeader == StoreAddressLeader) {
+      return createVariableOrConstant(DepSI->getValueOperand(), B);
+    } else {
+      int Offset = analyzeLoadFromClobberingStore(
+          LoadType, LI->getPointerOperand(), DepSI);
+      if (Offset >= 0)
+        return createCoercibleLoadExpression(LI, DefiningAccess,
+                                             (unsigned)Offset, DepSI, B);
+    }
+  } else if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInst)) {
+    int Offset =
+        analyzeLoadFromClobberingLoad(LoadType, LI->getPointerOperand(), DepLI);
+    if (Offset >= 0)
+      return createCoercibleLoadExpression(LI, DefiningAccess, (unsigned)Offset,
+                                           DepLI, B);
+  } else if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(DepInst)) {
+    int Offset = analyzeLoadFromClobberingMemInst(
+        LoadType, LI->getPointerOperand(), DepMI);
+    if (Offset >= 0)
+      return createCoercibleLoadExpression(LI, DefiningAccess, (unsigned)Offset,
+                                           DepMI, B);
+  }
+  // If this load really doesn't depend on anything, then we must be loading
+  // an
+  // undef value.  This can happen when loading for a fresh allocation with
+  // no
+  // intervening stores, for example.
+  else if (isa<AllocaInst>(DepInst) || isMallocLikeFn(DepInst, TLI))
+    return createConstantExpression(UndefValue::get(LoadType));
+
+  // If this load occurs either right after a lifetime begin,
+  // then the loaded value is undefined.
+  else if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(DepInst)) {
+    if (II->getIntrinsicID() == Intrinsic::lifetime_start)
+      return createConstantExpression(UndefValue::get(LoadType));
+  }
+  // If this load follows a calloc (which zero initializes memory),
+  // then the loaded value is zero
+  else if (isCallocLikeFn(DepInst, TLI)) {
+    return createConstantExpression(Constant::getNullValue(LoadType));
+  }
+
+  return nullptr;
+}
+
 Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
                                                   BasicBlock *B) {
   LoadInst *LI = cast<LoadInst>(I);
@@ -877,70 +935,49 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
     return createConstantExpression(UndefValue::get(LI->getType()));
 
   MemoryAccess *DefiningAccess = MSSA->getClobberingMemoryAccess(I);
-  // TODO: Fix this up later, need to rewrite equivalents of the get
-  // clobbering values
-  if (DL && !MSSA->isLiveOnEntryDef(DefiningAccess)) {
-    if (MemoryDef *MD = dyn_cast<MemoryDef>(DefiningAccess)) {
-      Instruction *DefiningInst = MD->getMemoryInst();
-      // If the defining instruction is not reachable, replace with
-      // undef
-      if (!ReachableBlocks.count(DefiningInst->getParent()))
-        return createConstantExpression(UndefValue::get(LI->getType()));
-      if (StoreInst *DepSI = dyn_cast<StoreInst>(DefiningInst)) {
-        Value *StoreAddressLeader =
-            lookupOperandLeader(DepSI->getPointerOperand(), B);
-        Type *LoadType = LI->getType();
-        Value *StoreVal = DepSI->getValueOperand();
-        if (StoreVal->getType() == LoadType &&
-            LoadAddressLeader == StoreAddressLeader) {
-          return createVariableOrConstant(DepSI->getValueOperand(), B);
-        } else {
-          int Offset = analyzeLoadFromClobberingStore(LoadType,
-                                                      LoadAddressLeader, DepSI);
-          if (Offset >= 0)
-            return createCoercibleLoadExpression(LI, DefiningAccess,
-                                                 (unsigned)Offset, DepSI, B);
-        }
-      } else if (LoadInst *DepLI = dyn_cast<LoadInst>(DefiningInst)) {
-        Value *PointerLeader = LI->getPointerOperand();
-        PointerLeader = lookupOperandLeader(PointerLeader, B);
-        int Offset =
-            analyzeLoadFromClobberingLoad(LI->getType(), PointerLeader, DepLI);
-        if (Offset >= 0)
-          return createCoercibleLoadExpression(LI, DefiningAccess,
-                                               (unsigned)Offset, DepLI, B);
-      } else if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(DefiningInst)) {
-        Value *PointerLeader = LI->getPointerOperand();
-        PointerLeader = lookupOperandLeader(PointerLeader, B);
-        int Offset = analyzeLoadFromClobberingMemInst(LI->getType(),
-                                                      PointerLeader, DepMI);
-        if (Offset >= 0)
-          return createCoercibleLoadExpression(LI, DefiningAccess,
-                                               (unsigned)Offset, DepMI, B);
-      }
-      // If this load really doesn't depend on anything, then we must be loading
-      // an
-      // undef value.  This can happen when loading for a fresh allocation with
-      // no
-      // intervening stores, for example.
-      else if (isa<AllocaInst>(DefiningInst) ||
-               isMallocLikeFn(DefiningInst, TLI))
-        return createConstantExpression(UndefValue::get(LI->getType()));
 
-      // If this load occurs either right after a lifetime begin,
-      // then the loaded value is undefined.
-      else if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(DefiningInst)) {
-        if (II->getIntrinsicID() == Intrinsic::lifetime_start)
+  if (DL) {
+    if (!MSSA->isLiveOnEntryDef(DefiningAccess)) {
+      if (MemoryDef *MD = dyn_cast<MemoryDef>(DefiningAccess)) {
+        Instruction *DefiningInst = MD->getMemoryInst();
+        // If the defining instruction is not reachable, replace with
+        // undef
+        if (!ReachableBlocks.count(DefiningInst->getParent()))
           return createConstantExpression(UndefValue::get(LI->getType()));
+        Expression *CoercionResult =
+            performSymbolicLoadCoercion(LI, DefiningInst, DefiningAccess, B);
+        if (CoercionResult)
+          return CoercionResult;
       }
-
-      // If this load follows a calloc (which zero initializes memory),
-      // then the loaded value is zero
-      else if (isCallocLikeFn(DefiningInst, TLI))
-        return createConstantExpression(Constant::getNullValue(LI->getType()));
+    } else {
+      BasicBlock *LoadBlock = LI->getParent();
+      MemoryAccess *LoadAccess = MSSA->getMemoryAccess(LI);
+      // Okay, so uh, we couldn't use the defining access to grab a value out of
+      // See if we can reuse any of it's uses by widening a load.
+      for (const MemoryAccess *MA : DefiningAccess->uses()) {
+        if (MA == LoadAccess)
+          continue;
+        if (const MemoryUse *MU = dyn_cast<MemoryUse>(MA)) {
+          Instruction *DefiningInst = MU->getMemoryInst();
+          if (LoadInst *DepLI = dyn_cast<LoadInst>(DefiningInst)) {
+            BasicBlock *DefiningBlock = DefiningInst->getParent();
+            if (!DT->dominates(DefiningBlock, LoadBlock))
+              continue;
+            // Make sure the dependent load comes before the load we are trying
+            // to coerce if they are in the same block
+            if (InstrDFS[DepLI] >= InstrDFS[LI])
+              continue;
+            int Offset = analyzeLoadFromClobberingLoad(
+                LI->getType(), LI->getPointerOperand(), DepLI);
+            if (Offset >= 0)
+              return createCoercibleLoadExpression(LI, DefiningAccess,
+                                                   (unsigned)Offset, DepLI, B);
+          }
+        }
+      }
     }
   }
-  
+
   Expression *E = createLoadExpression(LI, DefiningAccess, B);
   return E;
 }
@@ -982,10 +1019,12 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
 
   if (AllSameValue) {
     // It's possible to have phi nodes with cycles (IE dependent on
-    // other phis that are .... dependent on the original phi node), especially
+    // other phis that are .... dependent on the original phi node),
+    // especially
     // in weird CFG's where some arguments are unreachable, or
     // uninitialized along certain paths.
-    // This can cause infinite loops  during evaluation (even if you disable the
+    // This can cause infinite loops  during evaluation (even if you disable
+    // the
     // recursion below, you will simply ping-pong between congruence classes)
     // If a phi node symbolically evaluates to another phi node, just
     // leave it alone
@@ -1133,7 +1172,8 @@ unsigned NewGVN::replaceAllDominatedUsesWith(Value *From, Value *To,
   for (auto UI = From->use_begin(), UE = From->use_end(); UI != UE;) {
     Use &U = *UI++;
 
-    // If From occurs as a phi node operand then the use implicitly lives in the
+    // If From occurs as a phi node operand then the use implicitly lives in
+    // the
     // corresponding incoming block.  Otherwise it is the block containing the
     // user that must be dominated by Root.
     BasicBlock *UsingBlock;
@@ -1189,7 +1229,8 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
     if (isa<Constant>(LHS) && isa<Constant>(RHS))
       continue;
 
-    // Prefer a constant on the right-hand side, or an Argument if no constants.
+    // Prefer a constant on the right-hand side, or an Argument if no
+    // constants.
     if (isa<Constant>(LHS) || (isa<Argument>(LHS) && !isa<Constant>(RHS)))
       std::swap(LHS, RHS);
 
@@ -1316,9 +1357,11 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       // class that has no leader (this value can't be a leader for
       // all members), no members, etc.
 
-      // Ensure that any instruction in scope that gets the "A < B" value number
+      // Ensure that any instruction in scope that gets the "A < B" value
+      // number
       // is replaced with false.
-      // The leader table only tracks basic blocks, not edges. Only add to if we
+      // The leader table only tracks basic blocks, not edges. Only add to if
+      // we
       // have the simple case where the edge dominates the end.
       // if (RootDominatesEnd)
       //   addToLeaderTable(Num, NotVal, Root.getEnd());
@@ -1356,7 +1399,8 @@ void NewGVN::markUsersTouched(Value *V) {
 /// performCongruenceFinding - Perform congruence finding on a given
 /// value numbering expression
 void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
-  // This is guaranteed to return something, since it will at least find INITIAL
+  // This is guaranteed to return something, since it will at least find
+  // INITIAL
   CongruenceClass *VClass = ValueToClass[V];
   assert(VClass && "Should have found a vclass");
   // Dead classes should have been eliminated from the mapping
@@ -1706,7 +1750,8 @@ std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
   return std::make_pair(Start, Count);
 }
 
-/// runOnFunction - This is the main transformation entry point for a function.
+/// runOnFunction - This is the main transformation entry point for a
+/// function.
 bool NewGVN::runOnFunction(Function &F) {
   bool Changed = false;
   if (skipOptnoneFunction(F))
@@ -1796,6 +1841,11 @@ bool NewGVN::runOnFunction(Function &F) {
       TouchedInstructions.reset(InstrNum);
 
       DEBUG(dbgs() << "Processing instruction " << *I << "\n");
+      if (I->use_empty() && !I->getType()->isVoidTy()) {
+        DEBUG(dbgs() << "Skipping unused instruction\n");
+        continue;
+      }
+
 // This is done in case something eliminates the instruction
 // along the way.
 
@@ -1820,13 +1870,11 @@ bool NewGVN::runOnFunction(Function &F) {
   Changed |= eliminateInstructions(F);
 
   // Delete all instructions marked for deletion.
-  for (unsigned i = 0, e = InstructionsToErase.size(); i != e; ++i) {
-    Instruction *toErase = InstructionsToErase[i];
-    if (!toErase->use_empty())
-      toErase->replaceAllUsesWith(UndefValue::get(toErase->getType()));
+  for (Instruction *ToErase : InstructionsToErase) {
+    if (!ToErase->use_empty())
+      ToErase->replaceAllUsesWith(UndefValue::get(ToErase->getType()));
 
-    toErase->eraseFromParent();
-    InstructionsToErase[i] = nullptr;
+    ToErase->eraseFromParent();
   }
 
   // Delete all unreachable blocks
@@ -1876,7 +1924,8 @@ struct NewGVN::ValueDFS {
     // Val 0
     // DFS (1, 2)
     // Val 50
-    // We want the second to be less than the first, but if we just go field by
+    // We want the second to be less than the first, but if we just go field
+    // by
     // field, we will get to Val 0 < Val 50 and say the first is less than the
     // second
 
@@ -2030,7 +2079,8 @@ void NewGVN::deleteInstructionsInBlock(BasicBlock *BB) {
   if (isa<TerminatorInst>(BB->begin()))
     return;
 
-  // Delete the instructions backwards, as it has a reduced likelihood of having
+  // Delete the instructions backwards, as it has a reduced likelihood of
+  // having
   // to update as many def-use and use-def chains.
   Instruction *EndInst = BB->getTerminator(); // Last not to be deleted.
   while (EndInst != BB->begin()) {
@@ -2050,7 +2100,7 @@ void NewGVN::deleteInstructionsInBlock(BasicBlock *BB) {
 
 void NewGVN::markInstructionForDeletion(Instruction *I) {
   DEBUG(dbgs() << "Marking " << *I << " for deletion\n");
-  InstructionsToErase.emplace_back(I);
+  InstructionsToErase.insert(I);
 }
 
 void NewGVN::replaceInstruction(Instruction *I, Value *V) {
@@ -2104,7 +2154,8 @@ private:
 /// CoerceAvailableValueToLoadType will succeed.
 bool NewGVN::canCoerceMustAliasedValueToLoad(Value *StoredVal, Type *LoadTy) {
 
-  // If the loaded or stored value is an first class array or struct, don't try
+  // If the loaded or stored value is an first class array or struct, don't
+  // try
   // to transform them.  We need to be able to bitcast to integer.
   if (LoadTy->isStructTy() || LoadTy->isArrayTy() ||
       StoredVal->getType()->isStructTy() || StoredVal->getType()->isArrayTy())
@@ -2118,7 +2169,8 @@ bool NewGVN::canCoerceMustAliasedValueToLoad(Value *StoredVal, Type *LoadTy) {
   return true;
 }
 
-/// CoerceAvailableValueToLoadType - If we saw a store of a value to memory, and
+/// CoerceAvailableValueToLoadType - If we saw a store of a value to memory,
+/// and
 /// then a load from a must-aliased pointer of a different type, try to coerce
 /// the stored value.  LoadedTy is the type of the load we want to replace and
 /// InsertPt is the place to insert new instructions.
@@ -2173,7 +2225,8 @@ Value *NewGVN::coerceAvailableValueToLoadType(Value *StoredVal, Type *LoadedTy,
   }
 
   // If the loaded value is smaller than the available value, then we can
-  // extract out a piece from it.  If the available value is too small, then we
+  // extract out a piece from it.  If the available value is too small, then
+  // we
   // can't do anything.
   assert(StoreSize >= LoadSize && "CanCoerceMustAliasedValueToLoad fail");
 
@@ -2193,7 +2246,8 @@ Value *NewGVN::coerceAvailableValueToLoadType(Value *StoredVal, Type *LoadedTy,
     handleNewInstruction(I);
   }
 
-  // If this is a big-endian system, we need to shift the value down to the low
+  // If this is a big-endian system, we need to shift the value down to the
+  // low
   // bits so that a truncate will work.
   if (DL->isBigEndian()) {
     Constant *Val =
@@ -2240,7 +2294,8 @@ Value *NewGVN::getStoreValueForLoad(Value *SrcVal, unsigned Offset,
 
   IRBuilder<> Builder(InsertPt->getParent(), InsertPt);
 
-  // Compute which bits of the stored value are being used by the load.  Convert
+  // Compute which bits of the stored value are being used by the load.
+  // Convert
   // to an integer type to start with.
   if (SrcVal->getType()->isPointerTy()) {
     SrcVal = Builder.CreatePtrToInt(SrcVal, DL->getIntPtrType(Ctx));
@@ -2301,8 +2356,8 @@ Value *NewGVN::getLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     // load completely because it is already in the value numbering table.
     IRBuilder<> Builder(SrcVal->getParent(), ++BasicBlock::iterator(SrcVal));
     Type *DestPTy = IntegerType::get(LoadTy->getContext(), NewLoadSize * 8);
-    DestPTy = PointerType::get(
-        DestPTy, cast<PointerType>(PtrVal->getType())->getAddressSpace());
+    DestPTy =
+        PointerType::get(DestPTy, PtrVal->getType()->getPointerAddressSpace());
     Builder.SetCurrentDebugLocation(SrcVal->getDebugLoc());
     PtrVal = Builder.CreateBitCast(PtrVal, DestPTy);
     if (Instruction *I = dyn_cast<Instruction>(PtrVal))
@@ -2328,8 +2383,11 @@ Value *NewGVN::getLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     if (Instruction *I = dyn_cast<Instruction>(RV))
       handleNewInstruction(I);
 
-    markUsersTouched(SrcVal);
-    assert(false && "Need to debug this");
+    // markUsersTouched(SrcVal);
+    // assert(false && "Need to debug this");
+    // So, we just widened a load that we will have already gone past in
+    // elimination, so in order to get rid of the uses, we have to do it here
+
     SrcVal->replaceAllUsesWith(RV);
 
     // We would like to use gvn.markInstructionForDeletion here, but we can't
@@ -2405,8 +2463,8 @@ Value *NewGVN::getMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 
   // Otherwise, see if we can constant fold a load from the constant with the
   // offset applied as appropriate.
-  Src = ConstantExpr::getBitCast(Src,
-                                 llvm::Type::getInt8PtrTy(Src->getContext(), AS));
+  Src = ConstantExpr::getBitCast(
+      Src, llvm::Type::getInt8PtrTy(Src->getContext(), AS));
   Constant *OffsetCst =
       ConstantInt::get(Type::getInt64Ty(Src->getContext()), (unsigned)Offset);
   Src = ConstantExpr::getGetElementPtr(Src, OffsetCst);
@@ -2628,8 +2686,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
           }
 
           // If we get to this point, and the stack is empty we must have a use
-          // with nothing
-          // we can use to eliminate it, just skip it
+          // with nothing we can use to eliminate it, just skip it
           if (EliminationStack.empty())
             continue;
 
