@@ -503,6 +503,10 @@ public:
   ModRefResult getModRefInfo(const VAArgInst* I, const Value* P, uint64_t Size){
     return getModRefInfo(I, Location(P, Size));
   }
+  /// instructionClobbersCall - Return whether a given instruction could modify
+  /// memory used by a given call
+  virtual bool instructionClobbersCall(Instruction *I,
+                                       ImmutableCallSite Call);
 
   /// getModRefInfo - Return information about whether two call sites may refer
   /// to the same set of memory locations.  See 
