@@ -212,14 +212,11 @@ public:
     const CallExpression &OE = cast<CallExpression>(Other);
     if (DefiningAccess != OE.DefiningAccess)
       return false;
-    if (Call != OE.Call)
-      return false;
     return true;
   }
 
   virtual hash_code getHashValue() const {
-    return hash_combine(this->BasicExpression::getHashValue(), DefiningAccess,
-                        Call);
+    return hash_combine(this->BasicExpression::getHashValue(), DefiningAccess);
   }
 
   virtual void printInternal(raw_ostream &OS, bool printEType) {
