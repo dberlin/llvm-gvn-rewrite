@@ -197,6 +197,8 @@ class NewGVN : public FunctionPass {
   DenseMap<const Instruction *, unsigned int> InstrDFS;
   std::vector<Instruction *> DFSToInstr;
   std::vector<Instruction *> InstructionsToErase;
+  // This is a mapping from Load to (offset into source, coercion source)
+  DenseMap<const Value *, std::pair<unsigned, Value *>> CoercionInfo;
 
 public:
   static char ID; // Pass identification, replacement for typeid
@@ -273,6 +275,10 @@ private:
   Expression *performSymbolicCallEvaluation(Instruction *, BasicBlock *);
   Expression *performSymbolicPHIEvaluation(Instruction *, BasicBlock *);
   Expression *performSymbolicAggrValueEvaluation(Instruction *, BasicBlock *);
+  int analyzeLoadFromClobberingStore(Type *, Value *, StoreInst *);
+  int analyzeLoadFromClobberingLoad(Type *, Value *, LoadInst *);
+  int analyzeLoadFromClobberingMemInst(Type *, Value *, MemIntrinsic *);
+  int analyzeLoadFromClobberingWrite(Type *, Value *, Value *, uint64_t);
   // Congruence finding
   Value *lookupOperandLeader(Value *, BasicBlock *) const;
   Value *findDominatingEquivalent(CongruenceClass *, BasicBlock *) const;
@@ -290,7 +296,7 @@ private:
   // Elimination
   struct ValueDFS;
   void convertDenseToDFSOrdered(CongruenceClass::MemberSet &,
-                                std::vector<ValueDFS> &);
+                                std::vector<ValueDFS> &, bool);
   void convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &,
                                 std::vector<ValueDFS> &);
 
@@ -298,9 +304,15 @@ private:
   void replaceInstruction(Instruction *, Value *);
   void markInstructionForDeletion(Instruction *);
   void deleteInstructionsInBlock(BasicBlock *);
-
+  bool canCoerceMustAliasedValueToLoad(Value *, Type *);
+  Value *coerceAvailableValueToLoadType(Value *, Type *, Instruction *);
+  Value *getStoreValueForLoad(Value *, unsigned, Type *, Instruction *);
+  Value *getLoadValueForLoad(LoadInst *, unsigned, Type *, Instruction *);
+  Value *getMemInstValueForLoad(MemIntrinsic *, unsigned, Type *,
+                                Instruction *);
+  Value *coerceLoad(Value *);
   // New instruction creation
-  void handleNewInstruction(Instruction *);
+  void handleNewInstruction(Instruction *){};
   void markUsersTouched(Value *);
   // Utilities
   void cleanupTables();
@@ -705,10 +717,9 @@ StoreExpression *NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *DA,
 /// Check this case to see if there is anything more we can do before we give
 /// up.  This returns -1 if we have to give up, or a byte number in the stored
 /// value of the piece that feeds the load.
-static int analyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
-                                          Value *WritePtr,
-                                          uint64_t WriteSizeInBits,
-                                          const DataLayout &DL) {
+int NewGVN::analyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
+                                           Value *WritePtr,
+                                           uint64_t WriteSizeInBits) {
   // If the loaded or stored value is a first class array or struct, don't try
   // to transform them.  We need to be able to bitcast to integer.
   if (LoadTy->isStructTy() || LoadTy->isArrayTy())
@@ -716,15 +727,15 @@ static int analyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
 
   int64_t StoreOffset = 0, LoadOffset = 0;
   Value *StoreBase =
-      GetPointerBaseWithConstantOffset(WritePtr, StoreOffset, &DL);
-  Value *LoadBase = GetPointerBaseWithConstantOffset(LoadPtr, LoadOffset, &DL);
+      GetPointerBaseWithConstantOffset(WritePtr, StoreOffset, DL);
+  Value *LoadBase = GetPointerBaseWithConstantOffset(LoadPtr, LoadOffset, DL);
   if (StoreBase != LoadBase)
     return -1;
 
   // If the load and store don't overlap at all, the store doesn't provide
   // anything to the load.  In this case, they really don't alias at all, AA
   // must have gotten confused.
-  uint64_t LoadSize = DL.getTypeSizeInBits(LoadTy);
+  uint64_t LoadSize = DL->getTypeSizeInBits(LoadTy);
 
   if ((WriteSizeInBits & 7) | (LoadSize & 7))
     return -1;
@@ -756,9 +767,9 @@ static int analyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
 
 /// This function is called when we have a
 /// memdep query of a load that ends up being a clobbering store.
-static int analyzeLoadFromClobberingStore(Type *LoadTy, Value *LoadPtr,
-                                          StoreInst *DepSI,
-                                          const DataLayout &DL) {
+int NewGVN::analyzeLoadFromClobberingStore(Type *LoadTy, Value *LoadPtr,
+                                           StoreInst *DepSI) {
+
   // Cannot handle reading from store of first-class aggregate yet.
   if (DepSI->getValueOperand()->getType()->isStructTy() ||
       DepSI->getValueOperand()->getType()->isArrayTy())
@@ -766,24 +777,22 @@ static int analyzeLoadFromClobberingStore(Type *LoadTy, Value *LoadPtr,
 
   Value *StorePtr = DepSI->getPointerOperand();
   uint64_t StoreSize =
-      DL.getTypeSizeInBits(DepSI->getValueOperand()->getType());
-  return analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, StorePtr, StoreSize,
-                                        DL);
+      DL->getTypeSizeInBits(DepSI->getValueOperand()->getType());
+  return analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, StorePtr, StoreSize);
 }
 
 /// This function is called when we have a
 /// memdep query of a load that ends up being clobbered by another load.  See if
 /// the other load can feed into the second load.
-static int analyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
-                                         LoadInst *DepLI,
-                                         const DataLayout &DL) {
+int NewGVN::analyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
+                                          LoadInst *DepLI) {
   // Cannot handle reading from store of first-class aggregate yet.
   if (DepLI->getType()->isStructTy() || DepLI->getType()->isArrayTy())
     return -1;
 
   Value *DepPtr = DepLI->getPointerOperand();
-  uint64_t DepSize = DL.getTypeSizeInBits(DepLI->getType());
-  int R = analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, DepSize, DL);
+  uint64_t DepSize = DL->getTypeSizeInBits(DepLI->getType());
+  int R = analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, DepSize);
   if (R != -1)
     return R;
 
@@ -791,20 +800,19 @@ static int analyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
   // then we should widen it!
   int64_t LoadOffs = 0;
   const Value *LoadBase =
-      GetPointerBaseWithConstantOffset(LoadPtr, LoadOffs, &DL);
-  unsigned LoadSize = DL.getTypeStoreSize(LoadTy);
+      GetPointerBaseWithConstantOffset(LoadPtr, LoadOffs, DL);
+  unsigned LoadSize = DL->getTypeStoreSize(LoadTy);
 
   unsigned Size = MemoryDependenceAnalysis::getLoadLoadClobberFullWidthSize(
-      LoadBase, LoadOffs, LoadSize, DepLI, DL);
+      LoadBase, LoadOffs, LoadSize, DepLI, *DL);
   if (Size == 0)
     return -1;
 
-  return analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, Size * 8, DL);
+  return analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, Size * 8);
 }
 
-static int analyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
-                                            MemIntrinsic *MI,
-                                            const DataLayout &DL) {
+int NewGVN::analyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
+                                             MemIntrinsic *MI) {
   // If the mem operation is a non-constant size, we can't handle it.
   ConstantInt *SizeCst = dyn_cast<ConstantInt>(MI->getLength());
   if (!SizeCst)
@@ -815,7 +823,7 @@ static int analyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
   // of the memset..
   if (MI->getIntrinsicID() == Intrinsic::memset)
     return analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, MI->getDest(),
-                                          MemSizeInBits, DL);
+                                          MemSizeInBits);
 
   // If we have a memcpy/memmove, the only case we can handle is if this is a
   // copy from constant memory.  In that case, we can read directly from the
@@ -826,13 +834,13 @@ static int analyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
   if (!Src)
     return -1;
 
-  GlobalVariable *GV = dyn_cast<GlobalVariable>(GetUnderlyingObject(Src, &DL));
+  GlobalVariable *GV = dyn_cast<GlobalVariable>(GetUnderlyingObject(Src, DL));
   if (!GV || !GV->isConstant())
     return -1;
 
   // See if the access is within the bounds of the transfer.
   int Offset = analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, MI->getDest(),
-                                              MemSizeInBits, DL);
+                                              MemSizeInBits);
   if (Offset == -1)
     return Offset;
 
@@ -845,7 +853,7 @@ static int analyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
       ConstantInt::get(Type::getInt64Ty(Src->getContext()), (unsigned)Offset);
   Src = ConstantExpr::getGetElementPtr(Src, OffsetCst);
   Src = ConstantExpr::getBitCast(Src, PointerType::get(LoadTy, AS));
-  if (ConstantFoldLoadFromConstPtr(Src, &DL))
+  if (ConstantFoldLoadFromConstPtr(Src, DL))
     return Offset;
   return -1;
 }
@@ -887,25 +895,25 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
             LoadAddressLeader == StoreAddressLeader) {
           return createVariableOrConstant(DepSI->getValueOperand(), B);
         } else {
-          int Offset = analyzeLoadFromClobberingStore(
-              LoadType, LoadAddressLeader, DepSI, *DL);
+          int Offset = analyzeLoadFromClobberingStore(LoadType,
+                                                      LoadAddressLeader, DepSI);
           if (Offset >= 0)
             return createCoercibleLoadExpression(LI, DefiningAccess,
-                                                 (unsigned)Offset, StoreVal, B);
+                                                 (unsigned)Offset, DepSI, B);
         }
       } else if (LoadInst *DepLI = dyn_cast<LoadInst>(DefiningInst)) {
         Value *PointerLeader = LI->getPointerOperand();
         PointerLeader = lookupOperandLeader(PointerLeader, B);
-        int Offset = analyzeLoadFromClobberingLoad(LI->getType(), PointerLeader,
-                                                   DepLI, *DL);
+        int Offset =
+            analyzeLoadFromClobberingLoad(LI->getType(), PointerLeader, DepLI);
         if (Offset >= 0)
           return createCoercibleLoadExpression(LI, DefiningAccess,
                                                (unsigned)Offset, DepLI, B);
       } else if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(DefiningInst)) {
         Value *PointerLeader = LI->getPointerOperand();
         PointerLeader = lookupOperandLeader(PointerLeader, B);
-        int Offset = analyzeLoadFromClobberingMemInst(
-            LI->getType(), PointerLeader, DepMI, *DL);
+        int Offset = analyzeLoadFromClobberingMemInst(LI->getType(),
+                                                      PointerLeader, DepMI);
         if (Offset >= 0)
           return createCoercibleLoadExpression(LI, DefiningAccess,
                                                (unsigned)Offset, DepMI, B);
@@ -1418,8 +1426,11 @@ void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
                    << "\n");
 
       if (E && isa<CoercibleLoadExpression>(E)) {
+        CoercibleLoadExpression *L = cast<CoercibleLoadExpression>(E);
         VClass->coercible_members.erase(V);
         EClass->coercible_members.insert(V);
+        CoercionInfo.insert(
+            std::make_pair(V, std::make_pair(L->getOffset(), L->getSrc())));
       } else {
         VClass->members.erase(V);
         EClass->members.insert(V);
@@ -1677,6 +1688,7 @@ void NewGVN::cleanupTables() {
   DFSToInstr.clear();
   BlockInstRange.clear();
   TouchedInstructions.clear();
+  CoercionInfo.clear();
 }
 
 std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
@@ -1853,7 +1865,20 @@ struct NewGVN::ValueDFS {
   Value *Val;
   Use *U;
   bool Equivalence;
+  bool Coercible;
+
   bool operator<(const ValueDFS &other) const {
+    // It's not enough that any given field be less than - we have sets
+    // of fields that need to be evaluated together to give a proper ordering
+    // for example, if you have
+    // DFS (1, 3)
+    // Val 0
+    // DFS (1, 2)
+    // Val 50
+    // We want the second to be less than the first, but if we just go field by
+    // field, we will get to Val 0 < Val 50 and say the first is less than the
+    // second
+
     if (DFSIn < other.DFSIn)
       return true;
     else if (DFSIn == other.DFSIn) {
@@ -1865,11 +1890,15 @@ struct NewGVN::ValueDFS {
         else if (LocalNum == other.LocalNum) {
           if (!!Equivalence < !!other.Equivalence)
             return true;
-          else if (!!Equivalence == !!other.Equivalence) {
-            if (Val < other.Val)
+          else if (Equivalence == other.Equivalence) {
+            if (!!Coercible < !!other.Coercible)
               return true;
-            else if (Val == other.Val) {
-              return U < other.U;
+            else if (Coercible == other.Coercible) {
+              if (Val < other.Val)
+                return true;
+              else if (Val == other.Val)
+                if (U < other.U)
+                  return true;
             }
           }
         }
@@ -1880,7 +1909,8 @@ struct NewGVN::ValueDFS {
 };
 
 void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
-                                      std::vector<ValueDFS> &DFSOrderedSet) {
+                                      std::vector<ValueDFS> &DFSOrderedSet,
+                                      bool Coercible) {
   for (auto D : Dense) {
     // First add the value
     BasicBlock *BB = getBlockForValue(D);
@@ -1895,6 +1925,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
     VD.DFSOut = DFSPair.second;
     VD.U = nullptr;
     VD.Val = D;
+    VD.Coercible = Coercible;
     // If it's an instruction, use the real local dfs number,
     if (Instruction *I = dyn_cast<Instruction>(D))
       VD.LocalNum = InstrDFS[I];
@@ -1907,6 +1938,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
       if (Instruction *I = dyn_cast<Instruction>(U.getUser())) {
         ValueDFS VD;
         VD.Equivalence = false;
+        VD.Coercible = Coercible;
         // Put the phi node uses in the incoming block
         BasicBlock *IBlock;
         if (PHINode *P = dyn_cast<PHINode>(I)) {
@@ -1937,6 +1969,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &Dense,
     VD.DFSIn = DFSPair.first;
     VD.DFSOut = DFSPair.second;
     VD.Equivalence = true;
+    VD.Coercible = false;
 
     // If it's an instruction, use the real local dfs number.
     // If it's a value, it *must* have come from equality propagation,
@@ -2066,6 +2099,342 @@ private:
 };
 }
 
+/// CanCoerceMustAliasedValueToLoad - Return true if
+/// CoerceAvailableValueToLoadType will succeed.
+bool NewGVN::canCoerceMustAliasedValueToLoad(Value *StoredVal, Type *LoadTy) {
+
+  // If the loaded or stored value is an first class array or struct, don't try
+  // to transform them.  We need to be able to bitcast to integer.
+  if (LoadTy->isStructTy() || LoadTy->isArrayTy() ||
+      StoredVal->getType()->isStructTy() || StoredVal->getType()->isArrayTy())
+    return false;
+
+  // The store has to be at least as big as the load.
+  if (DL->getTypeSizeInBits(StoredVal->getType()) <
+      DL->getTypeSizeInBits(LoadTy))
+    return false;
+
+  return true;
+}
+
+/// CoerceAvailableValueToLoadType - If we saw a store of a value to memory, and
+/// then a load from a must-aliased pointer of a different type, try to coerce
+/// the stored value.  LoadedTy is the type of the load we want to replace and
+/// InsertPt is the place to insert new instructions.
+///
+/// If we can't do it, return null.
+Value *NewGVN::coerceAvailableValueToLoadType(Value *StoredVal, Type *LoadedTy,
+                                              Instruction *InsertPt) {
+
+  if (!canCoerceMustAliasedValueToLoad(StoredVal, LoadedTy))
+    return 0;
+
+  // If this is already the right type, just return it.
+  Type *StoredValTy = StoredVal->getType();
+
+  uint64_t StoreSize = DL->getTypeSizeInBits(StoredValTy);
+  uint64_t LoadSize = DL->getTypeSizeInBits(LoadedTy);
+
+  // If the store and reload are the same size, we can always reuse it.
+  if (StoreSize == LoadSize) {
+    // Pointer to Pointer -> use bitcast.
+    if (StoredValTy->isPointerTy() && LoadedTy->isPointerTy()) {
+      Instruction *I = new BitCastInst(StoredVal, LoadedTy, "", InsertPt);
+      handleNewInstruction(I);
+      return I;
+    }
+
+    // Convert source pointers to integers, which can be bitcast.
+    if (StoredValTy->isPointerTy()) {
+      StoredValTy = DL->getIntPtrType(StoredValTy->getContext());
+      Instruction *I = new PtrToIntInst(StoredVal, StoredValTy, "", InsertPt);
+      StoredVal = I;
+      handleNewInstruction(I);
+    }
+
+    Type *TypeToCastTo = LoadedTy;
+    if (TypeToCastTo->isPointerTy())
+      TypeToCastTo = DL->getIntPtrType(StoredValTy->getContext());
+
+    if (StoredValTy != TypeToCastTo) {
+      Instruction *I = new BitCastInst(StoredVal, TypeToCastTo, "", InsertPt);
+      StoredVal = I;
+      handleNewInstruction(I);
+    }
+
+    // Cast to pointer if the load needs a pointer type.
+    if (LoadedTy->isPointerTy()) {
+      Instruction *I = new IntToPtrInst(StoredVal, LoadedTy, "", InsertPt);
+      StoredVal = I;
+      handleNewInstruction(I);
+    }
+    return StoredVal;
+  }
+
+  // If the loaded value is smaller than the available value, then we can
+  // extract out a piece from it.  If the available value is too small, then we
+  // can't do anything.
+  assert(StoreSize >= LoadSize && "CanCoerceMustAliasedValueToLoad fail");
+
+  // Convert source pointers to integers, which can be manipulated.
+  if (StoredValTy->isPointerTy()) {
+    StoredValTy = DL->getIntPtrType(StoredValTy->getContext());
+    Instruction *I = new PtrToIntInst(StoredVal, StoredValTy, "", InsertPt);
+    StoredVal = I;
+    handleNewInstruction(I);
+  }
+
+  // Convert vectors and fp to integer, which can be manipulated.
+  if (!StoredValTy->isIntegerTy()) {
+    StoredValTy = IntegerType::get(StoredValTy->getContext(), StoreSize);
+    Instruction *I = new BitCastInst(StoredVal, StoredValTy, "", InsertPt);
+    StoredVal = I;
+    handleNewInstruction(I);
+  }
+
+  // If this is a big-endian system, we need to shift the value down to the low
+  // bits so that a truncate will work.
+  if (DL->isBigEndian()) {
+    Constant *Val =
+        ConstantInt::get(StoredVal->getType(), StoreSize - LoadSize);
+    StoredVal = BinaryOperator::CreateLShr(StoredVal, Val, "tmp", InsertPt);
+    if (Instruction *I = dyn_cast<Instruction>(StoredVal))
+      handleNewInstruction(I);
+  }
+
+  // Truncate the integer to the right size now.
+  Type *NewIntTy = IntegerType::get(StoredValTy->getContext(), LoadSize);
+  Instruction *I = new TruncInst(StoredVal, NewIntTy, "trunc", InsertPt);
+  StoredVal = I;
+  handleNewInstruction(I);
+
+  if (LoadedTy == NewIntTy)
+    return StoredVal;
+
+  // If the result is a pointer, inttoptr.
+  if (LoadedTy->isPointerTy()) {
+    I = new IntToPtrInst(StoredVal, LoadedTy, "inttoptr", InsertPt);
+    handleNewInstruction(I);
+    return I;
+  }
+
+  // Otherwise, bitcast.
+  I = new BitCastInst(StoredVal, LoadedTy, "bitcast", InsertPt);
+  handleNewInstruction(I);
+  return I;
+}
+
+/// GetStoreValueForLoad - This function is called when we have a
+/// memdep query of a load that ends up being a clobbering store.  This means
+/// that the store provides bits used by the load but we the pointers don't
+/// mustalias.  Check this case to see if there is anything more we can do
+/// before we give up.
+Value *NewGVN::getStoreValueForLoad(Value *SrcVal, unsigned Offset,
+                                    Type *LoadTy, Instruction *InsertPt) {
+
+  LLVMContext &Ctx = SrcVal->getType()->getContext();
+
+  uint64_t StoreSize = (DL->getTypeSizeInBits(SrcVal->getType()) + 7) / 8;
+  uint64_t LoadSize = (DL->getTypeSizeInBits(LoadTy) + 7) / 8;
+
+  IRBuilder<> Builder(InsertPt->getParent(), InsertPt);
+
+  // Compute which bits of the stored value are being used by the load.  Convert
+  // to an integer type to start with.
+  if (SrcVal->getType()->isPointerTy()) {
+    SrcVal = Builder.CreatePtrToInt(SrcVal, DL->getIntPtrType(Ctx));
+    if (Instruction *I = dyn_cast<Instruction>(SrcVal))
+      handleNewInstruction(I);
+  }
+
+  if (!SrcVal->getType()->isIntegerTy()) {
+    SrcVal =
+        Builder.CreateBitCast(SrcVal, IntegerType::get(Ctx, StoreSize * 8));
+    if (Instruction *I = dyn_cast<Instruction>(SrcVal))
+      handleNewInstruction(I);
+  }
+  // Shift the bits to the least significant depending on endianness.
+  unsigned ShiftAmt;
+  if (DL->isLittleEndian())
+    ShiftAmt = Offset * 8;
+  else
+    ShiftAmt = (StoreSize - LoadSize - Offset) * 8;
+
+  if (ShiftAmt) {
+    SrcVal = Builder.CreateLShr(SrcVal, ShiftAmt);
+    if (Instruction *I = dyn_cast<Instruction>(SrcVal))
+      handleNewInstruction(I);
+  }
+  if (LoadSize != StoreSize) {
+    SrcVal = Builder.CreateTrunc(SrcVal, IntegerType::get(Ctx, LoadSize * 8));
+    if (Instruction *I = dyn_cast<Instruction>(SrcVal))
+      handleNewInstruction(I);
+  }
+  return coerceAvailableValueToLoadType(SrcVal, LoadTy, InsertPt);
+}
+
+/// GetLoadValueForLoad - This function is called when we have a
+/// memdep query of a load that ends up being a clobbering load.  This means
+/// that the load *may* provide bits used by the load but we can't be sure
+/// because the pointers don't mustalias.  Check this case to see if there is
+/// anything more we can do before we give up.
+Value *NewGVN::getLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
+                                   Type *LoadTy, Instruction *InsertPt) {
+  // If Offset+LoadTy exceeds the size of SrcVal, then we must be wanting to
+  // widen SrcVal out to a larger load.
+  unsigned SrcValSize = DL->getTypeStoreSize(SrcVal->getType());
+  unsigned LoadSize = DL->getTypeStoreSize(LoadTy);
+  if (Offset + LoadSize > SrcValSize) {
+    assert(SrcVal->isSimple() && "Cannot widen volatile/atomic load!");
+    assert(SrcVal->getType()->isIntegerTy() && "Can't widen non-integer load");
+    // If we have a load/load clobber an DepLI can be widened to cover this
+    // load, then we should widen it to the next power of 2 size big enough!
+    unsigned NewLoadSize = Offset + LoadSize;
+    if (!isPowerOf2_32(NewLoadSize))
+      NewLoadSize = NextPowerOf2(NewLoadSize);
+
+    Value *PtrVal = SrcVal->getPointerOperand();
+
+    // Insert the new load after the old load.  This ensures that subsequent
+    // memdep queries will find the new load.  We can't easily remove the old
+    // load completely because it is already in the value numbering table.
+    IRBuilder<> Builder(SrcVal->getParent(), ++BasicBlock::iterator(SrcVal));
+    Type *DestPTy = IntegerType::get(LoadTy->getContext(), NewLoadSize * 8);
+    DestPTy = PointerType::get(
+        DestPTy, cast<PointerType>(PtrVal->getType())->getAddressSpace());
+    Builder.SetCurrentDebugLocation(SrcVal->getDebugLoc());
+    PtrVal = Builder.CreateBitCast(PtrVal, DestPTy);
+    if (Instruction *I = dyn_cast<Instruction>(PtrVal))
+      handleNewInstruction(I);
+    LoadInst *NewLoad = Builder.CreateLoad(PtrVal);
+    NewLoad->takeName(SrcVal);
+    NewLoad->setAlignment(SrcVal->getAlignment());
+    handleNewInstruction(NewLoad);
+    DEBUG(dbgs() << "GVN WIDENED LOAD: " << *SrcVal << "\n");
+    DEBUG(dbgs() << "TO: " << *NewLoad << "\n");
+
+    // Replace uses of the original load with the wider load.  On a big endian
+    // system, we need to shift down to get the relevant bits.
+    Value *RV = NewLoad;
+    if (DL->isBigEndian()) {
+      RV = Builder.CreateLShr(
+          RV, NewLoadSize * 8 - SrcVal->getType()->getPrimitiveSizeInBits());
+      if (Instruction *I = dyn_cast<Instruction>(RV))
+        handleNewInstruction(I);
+    }
+
+    RV = Builder.CreateTrunc(RV, SrcVal->getType());
+    if (Instruction *I = dyn_cast<Instruction>(RV))
+      handleNewInstruction(I);
+
+    markUsersTouched(SrcVal);
+    assert(false && "Need to debug this");
+    SrcVal->replaceAllUsesWith(RV);
+
+    // We would like to use gvn.markInstructionForDeletion here, but we can't
+    // because the load is already memoized into the leader map table that GVN
+    // tracks.  It is potentially possible to remove the load from the table,
+    // but then there all of the operations based on it would need to be
+    // rehashed.  Just leave the dead load around.
+    // FIXME: This is no longer a problem
+    markInstructionForDeletion(SrcVal);
+    SrcVal = NewLoad;
+  }
+
+  return getStoreValueForLoad(SrcVal, Offset, LoadTy, InsertPt);
+}
+
+/// GetMemInstValueForLoad - This function is called when we have a
+/// memdep query of a load that ends up being a clobbering mem intrinsic.
+Value *NewGVN::getMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
+                                      Type *LoadTy, Instruction *InsertPt) {
+
+  LLVMContext &Ctx = LoadTy->getContext();
+  uint64_t LoadSize = DL->getTypeSizeInBits(LoadTy) / 8;
+
+  IRBuilder<> Builder(InsertPt->getParent(), InsertPt);
+
+  // We know that this method is only called when the mem transfer fully
+  // provides the bits for the load.
+  if (MemSetInst *MSI = dyn_cast<MemSetInst>(SrcInst)) {
+    // memset(P, 'x', 1234) -> splat('x'), even if x is a variable, and
+    // independently of what the offset is.
+    Value *Val = MSI->getValue();
+    if (LoadSize != 1) {
+      Val = Builder.CreateZExt(Val, IntegerType::get(Ctx, LoadSize * 8));
+      if (Instruction *I = dyn_cast<Instruction>(Val))
+        handleNewInstruction(I);
+    }
+
+    Value *OneElt = Val;
+
+    // Splat the value out to the right number of bits.
+    for (unsigned NumBytesSet = 1; NumBytesSet != LoadSize;) {
+      // If we can double the number of bytes set, do it.
+      if (NumBytesSet * 2 <= LoadSize) {
+        Value *ShVal = Builder.CreateShl(Val, NumBytesSet * 8);
+        if (Instruction *I = dyn_cast<Instruction>(ShVal))
+          handleNewInstruction(I);
+        Val = Builder.CreateOr(Val, ShVal);
+        if (Instruction *I = dyn_cast<Instruction>(Val))
+          handleNewInstruction(I);
+        NumBytesSet <<= 1;
+        continue;
+      }
+
+      // Otherwise insert one byte at a time.
+      Value *ShVal = Builder.CreateShl(Val, 1 * 8);
+      if (Instruction *I = dyn_cast<Instruction>(ShVal))
+        handleNewInstruction(I);
+
+      Val = Builder.CreateOr(OneElt, ShVal);
+      if (Instruction *I = dyn_cast<Instruction>(Val))
+        handleNewInstruction(I);
+
+      ++NumBytesSet;
+    }
+
+    return coerceAvailableValueToLoadType(Val, LoadTy, InsertPt);
+  }
+
+  // Otherwise, this is a memcpy/memmove from a constant global.
+  MemTransferInst *MTI = cast<MemTransferInst>(SrcInst);
+  Constant *Src = cast<Constant>(MTI->getSource());
+
+  // Otherwise, see if we can constant fold a load from the constant with the
+  // offset applied as appropriate.
+  Src = ConstantExpr::getBitCast(Src,
+                                 llvm::Type::getInt8PtrTy(Src->getContext()));
+  Constant *OffsetCst =
+      ConstantInt::get(Type::getInt64Ty(Src->getContext()), (unsigned)Offset);
+  Src = ConstantExpr::getGetElementPtr(Src, OffsetCst);
+  Src = ConstantExpr::getBitCast(Src, PointerType::getUnqual(LoadTy));
+  return ConstantFoldLoadFromConstPtr(Src, DL);
+}
+
+Value *NewGVN::coerceLoad(Value *V) {
+  assert(isa<LoadInst>(V) && "Trying to coerce something other than a load");
+  LoadInst *LI = cast<LoadInst>(V);
+  // This is an offset, source pair
+  const std::pair<unsigned, Value *> &Info = CoercionInfo.lookup(LI);
+
+  Value *Result;
+
+  if (StoreInst *DepSI = dyn_cast<StoreInst>(Info.second))
+    Result = getStoreValueForLoad(DepSI->getValueOperand(), Info.first,
+                                  LI->getType(), LI);
+  else if (LoadInst *DepLI = dyn_cast<LoadInst>(Info.second))
+    Result = getLoadValueForLoad(DepLI, Info.first, LI->getType(), LI);
+  else if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Info.second))
+    Result = getMemInstValueForLoad(DepMI, Info.first, LI->getType(), LI);
+  else
+    llvm_unreachable("Unknown coercion type");
+
+  assert(Result && "Should have been able to coerce");
+  DEBUG(dbgs() << "Coerced load " << *LI << " output is " << *Result << "\n");
+  return Result;
+}
+
 bool NewGVN::eliminateInstructions(Function &F) {
   // This is a non-standard eliminator. The normal way to eliminate is
   // to walk the dominator tree in order, keeping track of available
@@ -2152,8 +2521,8 @@ bool NewGVN::eliminateInstructions(Function &F) {
     } else {
       DEBUG(dbgs() << "Eliminating in congruence class " << CC->id << "\n");
       // If this is a singleton, with no equivalences, we can skip it
-      if (CC->members.size() != 1 || !CC->equivalences.empty()) {
-
+      if (CC->members.size() != 1 || !CC->equivalences.empty() ||
+          !CC->coercible_members.empty()) {
         // If it's a singleton with equivalences, just do equivalence
         // replacement and move on
         if (CC->members.size() == 1 && 0) {
@@ -2172,8 +2541,14 @@ bool NewGVN::eliminateInstructions(Function &F) {
         // Convert the members and equivalences to DFS ordered sets and
         // then merge them.
         std::vector<ValueDFS> DFSOrderedMembers;
-        convertDenseToDFSOrdered(CC->members, DFSOrderedMembers);
+        convertDenseToDFSOrdered(CC->members, DFSOrderedMembers, false);
         sort(DFSOrderedMembers.begin(), DFSOrderedMembers.end());
+
+        std::vector<ValueDFS> DFSOrderedCoercibleMembers;
+        convertDenseToDFSOrdered(CC->coercible_members,
+                                 DFSOrderedCoercibleMembers, true);
+        sort(DFSOrderedCoercibleMembers.begin(),
+             DFSOrderedCoercibleMembers.end());
 
         std::vector<ValueDFS> DFSOrderedEquivalences;
         // During value numbering, we already proceed as if the
@@ -2184,16 +2559,24 @@ bool NewGVN::eliminateInstructions(Function &F) {
         convertDenseToDFSOrdered(CC->equivalences, DFSOrderedEquivalences);
         sort(DFSOrderedEquivalences.begin(), DFSOrderedEquivalences.end());
 
+        std::vector<ValueDFS> TempSet;
         std::vector<ValueDFS> DFSOrderedSet;
         set_union(DFSOrderedMembers.begin(), DFSOrderedMembers.end(),
                   DFSOrderedEquivalences.begin(), DFSOrderedEquivalences.end(),
-                  std::inserter(DFSOrderedSet, DFSOrderedSet.begin()));
+                  std::back_inserter(TempSet));
+        set_union(TempSet.begin(), TempSet.end(),
+                  DFSOrderedCoercibleMembers.begin(),
+                  DFSOrderedCoercibleMembers.end(),
+                  std::back_inserter(DFSOrderedSet));
+
         for (auto &C : DFSOrderedSet) {
           int MemberDFSIn = C.DFSIn;
           int MemberDFSOut = C.DFSOut;
           Value *Member = C.Val;
           Use *MemberUse = C.U;
           bool EquivalenceOnly = C.Equivalence;
+          bool Coercible = C.Coercible;
+
           // We ignore void things because we can't get a value from
           // them.
           if (Member && Member->getType()->isVoidTy())
@@ -2236,6 +2619,8 @@ bool NewGVN::eliminateInstructions(Function &F) {
             // Push if we need to
             ShouldPush |= Member && EliminationStack.empty();
             if (ShouldPush) {
+              if (Coercible)
+                Member = coerceLoad(Member);
               EliminationStack.push_back(Member, MemberDFSIn, MemberDFSOut);
             }
           }
