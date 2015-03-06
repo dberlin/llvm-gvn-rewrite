@@ -241,24 +241,9 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA, struct MemoryQuery &Q) {
         // Check whether our memory location is modified by this instruction
         if (AA->getModRefInfo(DefMemoryInst, Q.Loc) & AliasAnalysis::Mod)
           break;
-      } else {
-        // We may have two calls
-        if (isa<CallInst>(DefMemoryInst) || isa<InvokeInst>(DefMemoryInst)) {
-          // Check if the two calls touch the same memory
-          if (AA->getModRefInfo(Q.Call, DefMemoryInst) & AliasAnalysis::Mod)
-            break;
-        } else {
-          // Otherwise, check if the call modifies or references the
-          // location this memory access defines.  The best we can say
-          // is that if the call references what this instruction
-          // defines, it must be clobbered by this location.
-          const AliasAnalysis::Location DefLoc = AA->getLocation(DefMemoryInst);
-          if (AA->getModRefInfo(Q.Call, DefLoc) != AliasAnalysis::NoModRef)
-            break;
-        }
-      }
+      } else if (AA->instructionClobbersCall(Q.Call, DefMemoryInst))
+        break;
     }
-
     MemoryAccess *NextAccess = cast<MemoryDef>(CurrAccess)->getDefiningAccess();
     // Walk from def to def
     CurrAccess = NextAccess;
@@ -777,8 +762,6 @@ void MemorySSA::dump(Function &F) {
 
 // Verify the domination properties of MemorySSA
 // This means that each definition should dominate all of its uses
-// Note that this should be done *after* the use/def chains are verified,
-// because it makes no sense to do if the uses aren't proved valid
 void MemorySSA::verifyDomination(Function &F) {
   for (auto &B : F) {
     // Phi nodes are attached to basic blocks
