@@ -2480,6 +2480,8 @@ Value *NewGVN::coerceLoad(Value *V) {
 
   Value *Result;
 
+  assert(DT->dominates(cast<Instruction>(Info.second), LI) &&
+         "Trying to replace a load with one that doesn't dominate it");
   if (StoreInst *DepSI = dyn_cast<StoreInst>(Info.second))
     Result = getStoreValueForLoad(DepSI->getValueOperand(), Info.first,
                                   LI->getType(), LI);
