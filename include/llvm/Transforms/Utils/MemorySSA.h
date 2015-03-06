@@ -165,10 +165,16 @@ public:
 };
 class MemoryPhi : public MemoryAccess {
 public:
-  MemoryPhi(BasicBlock *BB, unsigned int NumPreds)
-      : MemoryAccess(AccessPhi, BB) {
+  MemoryPhi(BasicBlock *BB, unsigned int NP)
+      : MemoryAccess(AccessPhi, BB), NumPreds(NP) {
     Args.reserve(NumPreds);
   }
+  // This is the number of actual predecessors
+  unsigned int getNumPreds() { return NumPreds; }
+  // This is the number of predecessors filled in right now
+  // During construction, we differentiate between this and NumPreds to know
+  // when the PHI
+  // node is fully constructed.
   unsigned int getNumIncomingValues() { return Args.size(); }
   void addIncoming(MemoryAccess *MA, BasicBlock *BB) {
     Args.push_back(std::make_pair(BB, MA));
@@ -183,6 +189,16 @@ public:
     Val.first = BB;
   }
   BasicBlock *getIncomingBlock(unsigned int v) { return Args[v].first; }
+
+  typedef SmallVector<std::pair<BasicBlock *, MemoryAccess *>, 8> ArgsType;
+  typedef ArgsType::const_iterator const_arg_iterator;
+
+  inline const_arg_iterator args_begin() const { return Args.begin(); }
+  inline const_arg_iterator args_end() const { return Args.end(); }
+  inline iterator_range<const_arg_iterator> args() const {
+    return iterator_range<const_arg_iterator>(args_begin(), args_end());
+  }
+
   static inline bool classof(const MemoryPhi *) { return true; }
   static inline bool classof(const MemoryAccess *MA) {
     return MA->getAccessType() == AccessPhi;
@@ -191,7 +207,8 @@ public:
   virtual void print(raw_ostream &OS, SlotInfoType &SlotInfo);
 
 private:
-  SmallVector<std::pair<BasicBlock *, MemoryAccess *>, 8> Args;
+  unsigned NumPreds;
+  ArgsType Args;
 };
 
 class MemorySSA : public FunctionPass {
@@ -269,6 +286,7 @@ private:
   void addUses(UseMap &Uses);
   void addUseToMap(UseMap &, MemoryAccess *, MemoryAccess *);
   void verifyDefUses(Function &F);
+  void verifyDomination(Function &F);
 
   struct RenamePassData {
     BasicBlock *BB;
