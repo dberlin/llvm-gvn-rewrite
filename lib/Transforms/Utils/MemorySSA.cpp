@@ -146,6 +146,13 @@ MemorySSA::getClobberingMemoryAccess(MemoryPhi *P, struct MemoryQuery &Q) {
   // eventually lead back to the same defining memory access
   MemoryAccess *Result = nullptr;
 
+#if OPTIMIZE_USES
+  // Don't try to walk past an incomplete phi node during construction
+  // This can only occur during construction, and only if we are optimizing
+  // uses.
+  if (P->getNumIncomingValues() != P->getNumPreds())
+    return std::make_pair(P, false);
+#endif
   // If we already got here once, and didn't get to an answer (if we
   // did, it would have been cached below), we must be stuck in
   // mutually recursive phi nodes.  In that case, the correct answer
@@ -740,6 +747,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
   addUses(Uses);
   DEBUG(dump(F));
   DEBUG(verifyDefUses(F));
+  DEBUG(verifyDomination(F));
 
   // Delete our access lists
   for (auto &D : PerBlockAccesses)
@@ -765,6 +773,62 @@ void MemorySSA::print(raw_ostream &OS, const Module *M) const {
 void MemorySSA::dump(Function &F) {
   MemorySSAAnnotatedWriter Writer(this);
   F.print(dbgs(), &Writer);
+}
+
+// Verify the domination properties of MemorySSA
+// This means that each definition should dominate all of its uses
+// Note that this should be done *after* the use/def chains are verified,
+// because it makes no sense to do if the uses aren't proved valid
+void MemorySSA::verifyDomination(Function &F) {
+  for (auto &B : F) {
+    // Phi nodes are attached to basic blocks
+    MemoryAccess *MA = getMemoryAccess(&B);
+    if (MA) {
+      MemoryPhi *MP = cast<MemoryPhi>(MA);
+      for (const auto &U : MP->uses()) {
+        BasicBlock *UseBlock;
+
+        // Phi operands are used on edges, we simulate the right domination by
+        // acting as if the use occurred at the end of the predecessor block.
+        if (MemoryPhi *P = dyn_cast<MemoryPhi>(U)) {
+          for (const auto &Arg : P->args()) {
+            if (Arg.second == MP) {
+              UseBlock = Arg.first;
+              break;
+            }
+          }
+        } else {
+          UseBlock = U->getBlock();
+        }
+
+        assert(DT->dominates(MP->getBlock(), UseBlock) &&
+               "Memory PHI does not dominate it's uses");
+      }
+    }
+    for (auto &I : B) {
+      MA = getMemoryAccess(&I);
+      if (MA) {
+        if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
+          for (const auto &U : MD->uses()) {
+            BasicBlock *UseBlock;
+            // Things are allowed to flow to phi nodes over their predecessor
+            // edge, so we ignore phi node domination for the moment
+            if (MemoryPhi *P = dyn_cast<MemoryPhi>(U)) {
+              for (const auto &Arg : P->args()) {
+                if (Arg.second == MD) {
+                  UseBlock = Arg.first;
+                  break;
+                }
+              }
+            } else {
+              UseBlock = U->getBlock();
+            }
+            assert(DT->dominates(MD->getBlock(), UseBlock) &&
+                   "Memory Def does not dominate it's uses");
+          }
+      }
+    }
+  }
 }
 
 void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
