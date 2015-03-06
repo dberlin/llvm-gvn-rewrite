@@ -879,7 +879,7 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
   MemoryAccess *DefiningAccess = MSSA->getClobberingMemoryAccess(I);
   // TODO: Fix this up later, need to rewrite equivalents of the get
   // clobbering values
-  if (DL && !MSSA->isLiveOnEntryDef(DefiningAccess))
+  if (DL && !MSSA->isLiveOnEntryDef(DefiningAccess)) {
     if (MemoryDef *MD = dyn_cast<MemoryDef>(DefiningAccess)) {
       Instruction *DefiningInst = MD->getMemoryInst();
       // If the defining instruction is not reachable, replace with
@@ -918,7 +918,6 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
           return createCoercibleLoadExpression(LI, DefiningAccess,
                                                (unsigned)Offset, DepMI, B);
       }
-
       // If this load really doesn't depend on anything, then we must be loading
       // an
       // undef value.  This can happen when loading for a fresh allocation with
@@ -940,6 +939,8 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
       else if (isCallocLikeFn(DefiningInst, TLI))
         return createConstantExpression(Constant::getNullValue(LI->getType()));
     }
+  }
+  
   Expression *E = createLoadExpression(LI, DefiningAccess, B);
   return E;
 }
@@ -2400,15 +2401,16 @@ Value *NewGVN::getMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
   // Otherwise, this is a memcpy/memmove from a constant global.
   MemTransferInst *MTI = cast<MemTransferInst>(SrcInst);
   Constant *Src = cast<Constant>(MTI->getSource());
+  unsigned AS = Src->getType()->getPointerAddressSpace();
 
   // Otherwise, see if we can constant fold a load from the constant with the
   // offset applied as appropriate.
   Src = ConstantExpr::getBitCast(Src,
-                                 llvm::Type::getInt8PtrTy(Src->getContext()));
+                                 llvm::Type::getInt8PtrTy(Src->getContext(), AS));
   Constant *OffsetCst =
       ConstantInt::get(Type::getInt64Ty(Src->getContext()), (unsigned)Offset);
   Src = ConstantExpr::getGetElementPtr(Src, OffsetCst);
-  Src = ConstantExpr::getBitCast(Src, PointerType::getUnqual(LoadTy));
+  Src = ConstantExpr::getBitCast(Src, PointerType::get(LoadTy, AS));
   return ConstantFoldLoadFromConstPtr(Src, DL);
 }
 
