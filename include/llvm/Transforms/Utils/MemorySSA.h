@@ -99,6 +99,10 @@ public:
 
   const_iterator use_begin() const { return UseList; }
   const_iterator use_end() const { return UseList + NumUses; }
+  iterator_range<const_iterator> uses() const {
+    return iterator_range<const_iterator>(use_begin(), use_end());
+  }
+  
 
 protected:
   friend class MemorySSA;
