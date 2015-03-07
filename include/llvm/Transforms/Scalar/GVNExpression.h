@@ -15,8 +15,13 @@
 #ifndef LLVM_TRANSFORMS_SCALAR_GVNEXPRESSION_H
 #define LLVM_TRANSFORMS_SCALAR_GVNEXPRESSION_H
 #include <algorithm>
+#include "llvm/ADT/Hashing.h"
+#include "llvm/IR/Constant.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Value.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/ArrayRecycler.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace llvm {
 class MemoryAccess;
