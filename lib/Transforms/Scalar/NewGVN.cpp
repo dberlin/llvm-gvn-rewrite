@@ -2602,34 +2602,18 @@ bool NewGVN::eliminateInstructions(Function &F) {
 
         // Convert the members and equivalences to DFS ordered sets and
         // then merge them.
-        std::vector<ValueDFS> DFSOrderedMembers;
-        convertDenseToDFSOrdered(CC->members, DFSOrderedMembers, false);
-        sort(DFSOrderedMembers.begin(), DFSOrderedMembers.end());
-
-        std::vector<ValueDFS> DFSOrderedCoercibleMembers;
+        std::vector<ValueDFS> DFSOrderedSet;
+        convertDenseToDFSOrdered(CC->members, DFSOrderedSet, false);
         convertDenseToDFSOrdered(CC->coercible_members,
-                                 DFSOrderedCoercibleMembers, true);
-        sort(DFSOrderedCoercibleMembers.begin(),
-             DFSOrderedCoercibleMembers.end());
-
-        std::vector<ValueDFS> DFSOrderedEquivalences;
+                                 DFSOrderedSet, true);
         // During value numbering, we already proceed as if the
         // equivalences have been propagated through, but this is the
         // only place we actually do elimination (so that other passes
         // know the same thing we do)
 
-        convertDenseToDFSOrdered(CC->equivalences, DFSOrderedEquivalences);
-        sort(DFSOrderedEquivalences.begin(), DFSOrderedEquivalences.end());
-
-        std::vector<ValueDFS> TempSet;
-        std::vector<ValueDFS> DFSOrderedSet;
-        set_union(DFSOrderedMembers.begin(), DFSOrderedMembers.end(),
-                  DFSOrderedEquivalences.begin(), DFSOrderedEquivalences.end(),
-                  std::back_inserter(TempSet));
-        set_union(TempSet.begin(), TempSet.end(),
-                  DFSOrderedCoercibleMembers.begin(),
-                  DFSOrderedCoercibleMembers.end(),
-                  std::back_inserter(DFSOrderedSet));
+        convertDenseToDFSOrdered(CC->equivalences, DFSOrderedSet);
+        // Sort the whole thing
+        sort(DFSOrderedSet.begin(), DFSOrderedSet.end());
 
         for (auto &C : DFSOrderedSet) {
           int MemberDFSIn = C.DFSIn;
