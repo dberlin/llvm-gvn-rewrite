@@ -312,9 +312,13 @@ public:
 
   virtual ~CoercibleLoadExpression() {}
   virtual bool equals(const Expression &Other) const {
-    if (!this->LoadExpression::equals(Other))
-      return false;
+    // Unlike normal loads, coercible loads are equal if they have the same src,
+    // offset, and type, because that is what we are going to pull the value
+    // from. The rest of the load arguments don't actually matter since we've
+    // already analyzed that they are "the same enough" for us to do coercion.
     const CoercibleLoadExpression &OE = cast<CoercibleLoadExpression>(Other);
+    if (ValueType != OE.ValueType)
+      return false;
     if (Src != OE.Src)
       return false;
     if (Offset != OE.Offset)
@@ -323,7 +327,7 @@ public:
     return true;
   }
   virtual hash_code getHashValue() const {
-    return hash_combine(this->LoadExpression::getHashValue(), Offset, Src);
+    return hash_combine(ValueType, Offset, Src);
   }
   virtual void printInternal(raw_ostream &OS, bool printEType) {
     if (printEType)

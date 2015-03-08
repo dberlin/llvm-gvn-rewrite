@@ -199,6 +199,10 @@ class NewGVN : public FunctionPass {
   SmallPtrSet<Instruction *, 8> InstructionsToErase;
   // This is a mapping from Load to (offset into source, coercion source)
   DenseMap<const Value *, std::pair<unsigned, Value *>> CoercionInfo;
+  // This is a mapping for loads that got widened, to the new load. This ensures
+  // we coerce from the new widened load, instead of the old one. Otherwise, we
+  // may try to widen the same old load multiple times.
+  DenseMap<const Value *, Value *> CoercionForwarding;
 
 public:
   static char ID; // Pass identification, replacement for typeid
@@ -1734,6 +1738,7 @@ void NewGVN::cleanupTables() {
   BlockInstRange.clear();
   TouchedInstructions.clear();
   CoercionInfo.clear();
+  CoercionForwarding.clear();
 }
 
 std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
@@ -1924,9 +1929,9 @@ struct NewGVN::ValueDFS {
     // DFS (1, 2)
     // Val 50
     // We want the second to be less than the first, but if we just go field
-    // by
-    // field, we will get to Val 0 < Val 50 and say the first is less than the
-    // second
+    // by field, we will get to Val 0 < Val 50 and say the first is less than
+    // the second. We only want it to be less than if the DFS orders are equal.
+    
 
     if (DFSIn < other.DFSIn)
       return true;
@@ -1939,17 +1944,12 @@ struct NewGVN::ValueDFS {
         else if (LocalNum == other.LocalNum) {
           if (!!Equivalence < !!other.Equivalence)
             return true;
-          else if (Equivalence == other.Equivalence) {
-            if (!!Coercible < !!other.Coercible)
-              return true;
-            else if (Coercible == other.Coercible) {
-              if (Val < other.Val)
-                return true;
-              else if (Val == other.Val)
-                if (U < other.U)
-                  return true;
-            }
-          }
+          if (!!Coercible < !!other.Coercible)
+            return true;
+          if (Val < other.Val)
+            return true;
+          if (U < other.U)
+            return true;
         }
       }
     }
@@ -2367,6 +2367,10 @@ Value *NewGVN::getLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     handleNewInstruction(NewLoad);
     DEBUG(dbgs() << "GVN WIDENED LOAD: " << *SrcVal << "\n");
     DEBUG(dbgs() << "TO: " << *NewLoad << "\n");
+    // This ensures we forward other coercions onto the new load, instead of the
+    // old one
+    CoercionForwarding[SrcVal] = NewLoad;
+    
 
     // Replace uses of the original load with the wider load.  On a big endian
     // system, we need to shift down to get the relevant bits.
@@ -2476,17 +2480,26 @@ Value *NewGVN::coerceLoad(Value *V) {
   LoadInst *LI = cast<LoadInst>(V);
   // This is an offset, source pair
   const std::pair<unsigned, Value *> &Info = CoercionInfo.lookup(LI);
-
   Value *Result;
-
-  assert(DT->dominates(cast<Instruction>(Info.second), LI) &&
+  Value *RealValue = Info.second;
+  // Walk all the coercion fowarding chains, in case this load has already been
+  // widened into another load
+  while (true) {
+    auto ForwardingResult = CoercionForwarding.find(RealValue);
+    if (ForwardingResult != CoercionForwarding.end())
+      RealValue = ForwardingResult->second;
+    else
+      break;
+  }
+  
+  assert(DT->dominates(cast<Instruction>(RealValue), LI) &&
          "Trying to replace a load with one that doesn't dominate it");
-  if (StoreInst *DepSI = dyn_cast<StoreInst>(Info.second))
+  if (StoreInst *DepSI = dyn_cast<StoreInst>(RealValue))
     Result = getStoreValueForLoad(DepSI->getValueOperand(), Info.first,
                                   LI->getType(), LI);
-  else if (LoadInst *DepLI = dyn_cast<LoadInst>(Info.second))
+  else if (LoadInst *DepLI = dyn_cast<LoadInst>(RealValue))
     Result = getLoadValueForLoad(DepLI, Info.first, LI->getType(), LI);
-  else if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Info.second))
+  else if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(RealValue))
     Result = getMemInstValueForLoad(DepMI, Info.first, LI->getType(), LI);
   else
     llvm_unreachable("Unknown coercion type");
