@@ -241,7 +241,7 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA, struct MemoryQuery &Q) {
         // Check whether our memory location is modified by this instruction
         if (AA->getModRefInfo(DefMemoryInst, Q.Loc) & AliasAnalysis::Mod)
           break;
-      } else if (AA->instructionClobbersCall(Q.Call, DefMemoryInst))
+      } else if (AA->instructionClobbersCall(DefMemoryInst, Q.Call))
         break;
     }
     MemoryAccess *NextAccess = cast<MemoryDef>(CurrAccess)->getDefiningAccess();
