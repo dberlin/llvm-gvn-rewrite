@@ -1931,7 +1931,6 @@ struct NewGVN::ValueDFS {
     // We want the second to be less than the first, but if we just go field
     // by field, we will get to Val 0 < Val 50 and say the first is less than
     // the second. We only want it to be less than if the DFS orders are equal.
-    
 
     if (DFSIn < other.DFSIn)
       return true;
@@ -2370,7 +2369,6 @@ Value *NewGVN::getLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     // This ensures we forward other coercions onto the new load, instead of the
     // old one
     CoercionForwarding[SrcVal] = NewLoad;
-    
 
     // Replace uses of the original load with the wider load.  On a big endian
     // system, we need to shift down to get the relevant bits.
@@ -2491,7 +2489,7 @@ Value *NewGVN::coerceLoad(Value *V) {
     else
       break;
   }
-  
+
   assert(DT->dominates(cast<Instruction>(RealValue), LI) &&
          "Trying to replace a load with one that doesn't dominate it");
   if (StoreInst *DepSI = dyn_cast<StoreInst>(RealValue))
@@ -2616,8 +2614,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
         // then merge them.
         std::vector<ValueDFS> DFSOrderedSet;
         convertDenseToDFSOrdered(CC->members, DFSOrderedSet, false);
-        convertDenseToDFSOrdered(CC->coercible_members,
-                                 DFSOrderedSet, true);
+        convertDenseToDFSOrdered(CC->coercible_members, DFSOrderedSet, true);
         // During value numbering, we already proceed as if the
         // equivalences have been propagated through, but this is the
         // only place we actually do elimination (so that other passes
