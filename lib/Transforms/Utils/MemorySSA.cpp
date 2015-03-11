@@ -86,6 +86,10 @@ public:
 }
 
 bool MemorySSA::doInitialization(Module &M) {
+  DumpMemorySSA =
+      M.getContext()
+          .template getOption<bool, MemorySSA, &MemorySSA::DumpMemorySSA>();
+
   VerifyMemorySSA =
       M.getContext()
           .template getOption<bool, MemorySSA, &MemorySSA::VerifyMemorySSA>();
@@ -93,6 +97,9 @@ bool MemorySSA::doInitialization(Module &M) {
 }
 
 void MemorySSA::registerOptions() {
+  OptionRegistry::registerOption<bool, MemorySSA, &MemorySSA::DumpMemorySSA>(
+      "dump-memoryssa", "Dump Memory SSA after building it", false);
+
   OptionRegistry::registerOption<bool, MemorySSA, &MemorySSA::VerifyMemorySSA>(
       "verify-memoryssa", "Run the Memory SSA verifier", false);
 }
@@ -683,7 +690,10 @@ void MemorySSA::buildMemorySSA(Function &F) {
 
   // Now convert our use lists into real uses
   addUses(Uses);
-  DEBUG(dump(F));
+  if (DumpMemorySSA) {
+    print(outs(), F.getParent());
+  }
+
   if (VerifyMemorySSA) {
     verifyDefUses(F);
     verifyDomination(F);
