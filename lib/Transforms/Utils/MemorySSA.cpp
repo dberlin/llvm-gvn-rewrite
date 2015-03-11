@@ -600,7 +600,6 @@ void MemorySSA::buildMemorySSA(Function &F) {
   // lists, and then throw it out once the use-def form is built.
   AccessMap PerBlockAccesses;
   SmallPtrSet<BasicBlock *, 32> DefiningBlocks;
-  SmallVector<BasicBlock *, 32> UsingBlocks;
 
   for (auto &B : F) {
     std::list<MemoryAccess *> *Accesses = nullptr;
@@ -625,8 +624,6 @@ void MemorySSA::buildMemorySSA(Function &F) {
       if (use && !def) {
         MemoryUse *MU = new (MemoryAccessAllocator) MemoryUse(nullptr, &I, &B);
         InstructionToMemoryAccess.insert(std::make_pair(&I, MU));
-        if (UsingBlocks.empty() || UsingBlocks.back() != &B)
-          UsingBlocks.push_back(&B);
         if (!Accesses) {
           Accesses = new std::list<MemoryAccess *>;
           PerBlockAccesses.insert(std::make_pair(&B, Accesses));
@@ -637,11 +634,6 @@ void MemorySSA::buildMemorySSA(Function &F) {
         MemoryDef *MD = new (MemoryAccessAllocator) MemoryDef(nullptr, &I, &B);
         InstructionToMemoryAccess.insert(std::make_pair(&I, MD));
         DefiningBlocks.insert(&B);
-        // Defs are uses, so we have to be in UsingBlocks as well in order to
-        // have correct phi insertion
-        if (UsingBlocks.empty() || UsingBlocks.back() != &B)
-          UsingBlocks.push_back(&B);
-
         if (!Accesses) {
           Accesses = new std::list<MemoryAccess *>;
           PerBlockAccesses.insert(std::make_pair(&B, Accesses));
