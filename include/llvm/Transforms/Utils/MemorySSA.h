@@ -234,11 +234,15 @@ public:
   ~MemorySSA();
   static char ID;
 
+  bool doInitialization(Module &M) override;
+
   bool runOnFunction(Function &) override;
 
   void releaseMemory() override;
 
   void getAnalysisUsage(AnalysisUsage &AU) const override;
+
+  static void registerOptions();
 
   // Memory SSA related stuff
   void buildMemorySSA(Function &F);
@@ -260,6 +264,7 @@ public:
   }
 
 private:
+  bool VerifyMemorySSA;
   void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use);
   typedef DenseMap<MemoryAccess *, std::list<MemoryAccess *> *> UseMap;
   struct MemoryQuery;
@@ -270,14 +275,9 @@ private:
   std::pair<MemoryAccess *, bool>
   getClobberingMemoryAccess(MemoryAccess *, struct MemoryQuery &);
 
-  void computeLiveInBlocks(const AccessMap &BlockAccesses,
-                           const SmallPtrSetImpl<BasicBlock *> &DefBlocks,
-                           const SmallVector<BasicBlock *, 32> &UseBlocks,
-                           SmallPtrSetImpl<BasicBlock *> &LiveInBlocks);
   void
   determineInsertionPoint(Function &F, AccessMap &BlockAccesses,
-                          const SmallPtrSetImpl<BasicBlock *> &DefiningBlocks,
-                          const SmallVector<BasicBlock *, 32> &UsingBlocks);
+                          const SmallPtrSetImpl<BasicBlock *> &DefiningBlocks);
   void computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels);
   void computeBBNumbers(Function &F,
                         DenseMap<BasicBlock *, unsigned> &BBNumbers);

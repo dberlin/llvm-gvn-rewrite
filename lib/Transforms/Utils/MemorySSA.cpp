@@ -40,7 +40,8 @@ using namespace llvm;
 STATISTIC(NumClobberCacheLookups, "Number of Memory SSA version cache lookups");
 STATISTIC(NumClobberCacheHits, "Number of Memory SSA version cache hits");
 
-INITIALIZE_PASS_BEGIN(MemorySSA, "memoryssa", "Memory SSA", false, true)
+INITIALIZE_PASS_WITH_OPTIONS_BEGIN(MemorySSA, "memoryssa", "Memory SSA", false,
+                                   true)
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(MemorySSA, "memoryssa", "Memory SSA", false, true);
@@ -82,6 +83,18 @@ public:
     }
   }
 };
+}
+
+bool MemorySSA::doInitialization(Module &M) {
+  VerifyMemorySSA =
+      M.getContext()
+          .template getOption<bool, MemorySSA, &MemorySSA::VerifyMemorySSA>();
+  return false;
+}
+
+void MemorySSA::registerOptions() {
+  OptionRegistry::registerOption<bool, MemorySSA, &MemorySSA::VerifyMemorySSA>(
+      "verify-memoryssa", "Run the Memory SSA verifier", false);
 }
 
 struct MemorySSA::MemoryQuery {
@@ -294,66 +307,6 @@ MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
   return FinalAccess;
 }
 
-// This is the same as PromoteMemoryToRegister's Access.  The goal is
-// to compute blocks in which a memory-access is Live-In.
-
-void MemorySSA::computeLiveInBlocks(
-    const AccessMap &BlockAccesses,
-    const SmallPtrSetImpl<BasicBlock *> &DefBlocks,
-    const SmallVector<BasicBlock *, 32> &UseBlocks,
-    SmallPtrSetImpl<BasicBlock *> &LiveInBlocks) {
-
-  // To determine liveness, we must iterate through the predecessors of blocks
-  // where the def is live.  Blocks are added to the worklist if we need to
-  // check their predecessors.  Start with all the using blocks.
-  SmallVector<BasicBlock *, 64> LiveInBlockWorklist(UseBlocks.begin(),
-                                                    UseBlocks.end());
-  // If any of the using blocks is also a definition block, check to see if the
-  // definition occurs before or after the use.  If it happens before the use,
-  // the value isn't really live-in.
-  for (unsigned i = 0, e = LiveInBlockWorklist.size(); i != e; ++i) {
-    BasicBlock *BB = LiveInBlockWorklist[i];
-    if (!DefBlocks.count(BB))
-      continue;
-
-    // Okay, this is a block that both uses and defines the value.  If the first
-    // reference to the alloca is a def (store), then we know it isn't
-    // live-in.
-    auto AccessList = BlockAccesses.lookup(BB);
-
-    if (AccessList && isa<MemoryDef>(AccessList->front())) {
-      LiveInBlockWorklist[i] = LiveInBlockWorklist.back();
-      LiveInBlockWorklist.pop_back();
-      --i, --e;
-    }
-  }
-
-  // Now that we have a set of blocks where the phi is live-in, recursively add
-  // their predecessors until we find the full region the value is live.
-  while (!LiveInBlockWorklist.empty()) {
-    BasicBlock *BB = LiveInBlockWorklist.pop_back_val();
-
-    // The block really is live in here, insert it into the set.  If already in
-    // the set, then it has already been processed.
-    if (!LiveInBlocks.insert(BB).second)
-      continue;
-
-    // Since the value is live into BB, it is either defined in a predecessor or
-    // live into it to.  Add the preds to the worklist unless they are a
-    // defining block.
-    for (pred_iterator PI = pred_begin(BB), E = pred_end(BB); PI != E; ++PI) {
-      BasicBlock *P = *PI;
-
-      // The value is not live into a predecessor if it defines the value.
-      if (DefBlocks.count(P))
-        continue;
-
-      // Otherwise it is, add to the worklist.
-      LiveInBlockWorklist.push_back(P);
-    }
-  }
-}
-
 // We need a unique numbering for each BB.
 
 void MemorySSA::computeBBNumbers(Function &F,
@@ -369,8 +322,7 @@ void MemorySSA::computeBBNumbers(Function &F,
 
 void MemorySSA::determineInsertionPoint(
     Function &F, AccessMap &BlockAccesses,
-    const SmallPtrSetImpl<BasicBlock *> &DefBlocks,
-    const SmallVector<BasicBlock *, 32> &UsingBlocks) {
+    const SmallPtrSetImpl<BasicBlock *> &DefBlocks) {
   // Compute dominator levels and BB numbers
   DenseMap<DomTreeNode *, unsigned> DomLevels;
   computeDomLevels(DomLevels);
@@ -378,9 +330,6 @@ void MemorySSA::determineInsertionPoint(
   DenseMap<BasicBlock *, unsigned> BBNumbers;
   computeBBNumbers(F, BBNumbers);
 
-  SmallPtrSet<BasicBlock *, 32> LiveInBlocks;
-
-  computeLiveInBlocks(BlockAccesses, DefBlocks, UsingBlocks, LiveInBlocks);
   // Use a priority queue keyed on dominator tree level so that inserted nodes
   // are handled from the bottom of the dominator tree upwards.
   typedef std::pair<DomTreeNode *, unsigned> DomTreeNodePair;
@@ -430,8 +379,6 @@ void MemorySSA::determineInsertionPoint(
           continue;
 
         BasicBlock *SuccBB = SuccNode->getBlock();
-        if (!LiveInBlocks.count(SuccBB))
-          continue;
 
         DFBlocks.push_back(std::make_pair(BBNumbers[SuccBB], SuccBB));
         if (!DefBlocks.count(SuccBB))
@@ -671,7 +618,8 @@ void MemorySSA::buildMemorySSA(Function &F) {
       if (use && !def) {
         MemoryUse *MU = new (MemoryAccessAllocator) MemoryUse(nullptr, &I, &B);
         InstructionToMemoryAccess.insert(std::make_pair(&I, MU));
-        UsingBlocks.push_back(&B);
+        if (UsingBlocks.empty() || UsingBlocks.back() != &B)
+          UsingBlocks.push_back(&B);
         if (!Accesses) {
           Accesses = new std::list<MemoryAccess *>;
           PerBlockAccesses.insert(std::make_pair(&B, Accesses));
@@ -682,6 +630,11 @@ void MemorySSA::buildMemorySSA(Function &F) {
         MemoryDef *MD = new (MemoryAccessAllocator) MemoryDef(nullptr, &I, &B);
         InstructionToMemoryAccess.insert(std::make_pair(&I, MD));
         DefiningBlocks.insert(&B);
+        // Defs are uses, so we have to be in UsingBlocks as well in order to
+        // have correct phi insertion
+        if (UsingBlocks.empty() || UsingBlocks.back() != &B)
+          UsingBlocks.push_back(&B);
+
         if (!Accesses) {
           Accesses = new std::list<MemoryAccess *>;
           PerBlockAccesses.insert(std::make_pair(&B, Accesses));
@@ -691,7 +644,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
     }
   }
   // Determine where our PHI's should go
-  determineInsertionPoint(F, PerBlockAccesses, DefiningBlocks, UsingBlocks);
+  determineInsertionPoint(F, PerBlockAccesses, DefiningBlocks);
 
   // We create an access to represent "live on entry", for things like
   // arguments or users of globals. We do not actually insert it in to
@@ -731,8 +684,10 @@ void MemorySSA::buildMemorySSA(Function &F) {
   // Now convert our use lists into real uses
   addUses(Uses);
   DEBUG(dump(F));
-  DEBUG(verifyDefUses(F));
-  DEBUG(verifyDomination(F));
+  if (VerifyMemorySSA) {
+    verifyDefUses(F);
+    verifyDomination(F);
+  }
 
   // Delete our access lists
   for (auto &D : PerBlockAccesses)
