@@ -102,8 +102,6 @@ struct CongruenceClass {
   static unsigned int nextCongruenceNum;
   unsigned int id;
   Value *leader;
-  // TODO: Do we actually need this? It's not clear what purpose it
-  // really serves
   Expression *expression;
   // Actual members of this class.  These are the things the same everywhere
   MemberSet members;
@@ -798,9 +796,16 @@ int NewGVN::analyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
 
   Value *DepPtr = DepLI->getPointerOperand();
   uint64_t DepSize = DL->getTypeSizeInBits(DepLI->getType());
-  int R = analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, DepSize);
-  if (R != -1)
-    return R;
+  int Offset = analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, DepSize);
+  
+  if (Offset != -1) {
+    // If the size is too large and we will have to widen, ensure we pass the
+    // widening rules below
+    unsigned SrcValSize = DL->getTypeStoreSize(DepLI->getType());
+    unsigned LoadSize = DL->getTypeStoreSize(LoadTy);
+    if (Offset + LoadSize <= SrcValSize)
+      return Offset;
+  }
 
   // If we have a load/load clobber an DepLI can be widened to cover this load,
   // then we should widen it!
@@ -931,10 +936,13 @@ Expression *NewGVN::performSymbolicLoadCoercion(LoadInst *LI,
 Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
                                                   BasicBlock *B) {
   LoadInst *LI = cast<LoadInst>(I);
+
+  // We really can't do anything with non-simple loads
   if (!LI->isSimple())
     return NULL;
+
   Value *LoadAddressLeader = lookupOperandLeader(LI->getPointerOperand(), B);
-  // Load of undef is
+  // Load of undef is undef
   if (isa<UndefValue>(LoadAddressLeader))
     return createConstantExpression(UndefValue::get(LI->getType()));
 
@@ -1261,6 +1269,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
     // scope.  As LHS always has at least one use that is not
     // dominated by Root, this will never do anything if LHS has only
     // one use.
+    // FIXME: I think this can be deleted now, bootstrap with an assert
     if (!LHS->hasOneUse() && 0) {
       unsigned NumReplacements = replaceAllDominatedUsesWith(LHS, RHS, Root);
       Changed |= NumReplacements > 0;
@@ -1344,6 +1353,8 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       // If we didn't find a congruence class, there is no equivalent
       // instruction already
       if (CC) {
+        // FIXME: I think this can be deleted now, need to bootstrap with an
+        // assert
         if (CC->members.size() == 1 && 0) {
           unsigned NumReplacements =
               replaceAllDominatedUsesWith(CC->leader, NotVal, Root);
@@ -1409,9 +1420,6 @@ void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
   assert(VClass && "Should have found a vclass");
   // Dead classes should have been eliminated from the mapping
   assert(!VClass->dead && "Found a dead class");
-
-  // TODO(dannyb): Double check algorithm where we are ignoring copy
-  // check of "if e is a SSA variable", as LLVM has no copies.
 
   CongruenceClass *EClass;
   // Expressions we can't symbolize are always in their own unique
@@ -1491,10 +1499,7 @@ void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
           VClass != InitialClass) {
         if (VClass->expression) {
           VClass->dead = true;
-          // TODO: I think this may be wrong.
-          // I think we should be keeping track of the expression for
-          // each instruction, not for each class, and erase the old
-          // expression for the instruction when the class dies.
+
           DEBUG(dbgs() << "Erasing expression " << *E << " from table\n");
 
           ExpressionToClass.erase(VClass->expression);
@@ -1552,7 +1557,6 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
       // not have use info, so you don't know which downstream
       // instructions were inferred based on them (though that could
       // be tracked)
-
       propagateChangeInEdge(To);
     }
   }
