@@ -264,6 +264,7 @@ public:
   }
 
 private:
+  bool DumpMemorySSA;
   bool VerifyMemorySSA;
   void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use);
   typedef DenseMap<MemoryAccess *, std::list<MemoryAccess *> *> UseMap;
