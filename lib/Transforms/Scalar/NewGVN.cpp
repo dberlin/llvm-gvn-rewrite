@@ -797,7 +797,7 @@ int NewGVN::analyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
   Value *DepPtr = DepLI->getPointerOperand();
   uint64_t DepSize = DL->getTypeSizeInBits(DepLI->getType());
   int Offset = analyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, DepSize);
-  
+
   if (Offset != -1) {
     // If the size is too large and we will have to widen, ensure we pass the
     // widening rules below
