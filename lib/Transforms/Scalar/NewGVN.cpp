@@ -210,11 +210,6 @@ public:
 
   bool runOnFunction(Function &F) override;
 
-  const DataLayout *getDataLayout() const { return DL; }
-  DominatorTree *getDominatorTree() const { return DT; }
-  AliasAnalysis *getAliasAnalysis() const { return AA; }
-  MemoryDependenceAnalysis *getMemDep() const { return MD; }
-
 private:
   // This transformation requires dominator postdominator info
   void getAnalysisUsage(AnalysisUsage &AU) const override {
@@ -420,7 +415,7 @@ Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
   E->args_push_back(lookupOperandLeader(Arg1, B));
   E->args_push_back(lookupOperandLeader(Arg2, B));
 
-  Value *V = SimplifyBinOp(Opcode, E->Args[0], E->Args[1], DL, TLI, DT, AC);
+  Value *V = SimplifyBinOp(Opcode, E->Args[0], E->Args[1], *DL, TLI, DT, AC);
   if (Expression *simplifiedE = checkSimplificationResults(E, nullptr, V))
     return simplifiedE;
   return E;
@@ -512,7 +507,7 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
     if ((E->Args[0]->getType() == I->getOperand(0)->getType() &&
          E->Args[1]->getType() == I->getOperand(1)->getType())) {
       Value *V =
-          SimplifyCmpInst(Predicate, E->Args[0], E->Args[1], DL, TLI, DT, AC);
+          SimplifyCmpInst(Predicate, E->Args[0], E->Args[1], *DL, TLI, DT, AC);
       if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
         return simplifiedE;
     }
@@ -521,24 +516,24 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
     if (isa<Constant>(E->Args[0]) ||
         (E->Args[1]->getType() == I->getOperand(1)->getType() &&
          E->Args[2]->getType() == I->getOperand(2)->getType())) {
-      Value *V = SimplifySelectInst(E->Args[0], E->Args[1], E->Args[2], DL, TLI,
-                                    DT, AC);
+      Value *V = SimplifySelectInst(E->Args[0], E->Args[1], E->Args[2], *DL,
+                                    TLI, DT, AC);
       if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
         return simplifiedE;
     }
   } else if (I->isBinaryOp()) {
     Value *V =
-        SimplifyBinOp(E->getOpcode(), E->Args[0], E->Args[1], DL, TLI, DT, AC);
+        SimplifyBinOp(E->getOpcode(), E->Args[0], E->Args[1], *DL, TLI, DT, AC);
     if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
       return simplifiedE;
   } else if (BitCastInst *BI = dyn_cast<BitCastInst>(I)) {
-    Value *V = SimplifyInstruction(BI);
+    Value *V = SimplifyInstruction(BI, *DL, TLI, DT, AC);
     if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
       return simplifiedE;
   } else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
     if (GEP->getPointerOperandType() == E->Args[0]->getType()) {
-      Value *V = SimplifyGEPInst(ArrayRef<Value *>(E->Args, E->args_size()), DL,
-                                 TLI, DT, AC);
+      Value *V = SimplifyGEPInst(ArrayRef<Value *>(E->Args, E->args_size()),
+                                 *DL, TLI, DT, AC);
       if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
         return simplifiedE;
     }
@@ -555,7 +550,7 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
       C.emplace_back(cast<Constant>(Arg));
 
     Value *V =
-        ConstantFoldInstOperands(E->getOpcode(), E->getType(), C, DL, TLI);
+        ConstantFoldInstOperands(E->getOpcode(), E->getType(), C, *DL, TLI);
     if (V) {
       if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
         return simplifiedE;
@@ -731,8 +726,8 @@ int NewGVN::analyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
 
   int64_t StoreOffset = 0, LoadOffset = 0;
   Value *StoreBase =
-      GetPointerBaseWithConstantOffset(WritePtr, StoreOffset, DL);
-  Value *LoadBase = GetPointerBaseWithConstantOffset(LoadPtr, LoadOffset, DL);
+      GetPointerBaseWithConstantOffset(WritePtr, StoreOffset, *DL);
+  Value *LoadBase = GetPointerBaseWithConstantOffset(LoadPtr, LoadOffset, *DL);
   if (StoreBase != LoadBase)
     return -1;
 
@@ -811,11 +806,11 @@ int NewGVN::analyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
   // then we should widen it!
   int64_t LoadOffs = 0;
   const Value *LoadBase =
-      GetPointerBaseWithConstantOffset(LoadPtr, LoadOffs, DL);
+      GetPointerBaseWithConstantOffset(LoadPtr, LoadOffs, *DL);
   unsigned LoadSize = DL->getTypeStoreSize(LoadTy);
 
   unsigned Size = MemoryDependenceAnalysis::getLoadLoadClobberFullWidthSize(
-      LoadBase, LoadOffs, LoadSize, DepLI, *DL);
+      LoadBase, LoadOffs, LoadSize, DepLI);
   if (Size == 0)
     return -1;
 
@@ -845,7 +840,7 @@ int NewGVN::analyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
   if (!Src)
     return -1;
 
-  GlobalVariable *GV = dyn_cast<GlobalVariable>(GetUnderlyingObject(Src, DL));
+  GlobalVariable *GV = dyn_cast<GlobalVariable>(GetUnderlyingObject(Src, *DL));
   if (!GV || !GV->isConstant())
     return -1;
 
@@ -864,7 +859,7 @@ int NewGVN::analyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
       ConstantInt::get(Type::getInt64Ty(Src->getContext()), (unsigned)Offset);
   Src = ConstantExpr::getGetElementPtr(Src, OffsetCst);
   Src = ConstantExpr::getBitCast(Src, PointerType::get(LoadTy, AS));
-  if (ConstantFoldLoadFromConstPtr(Src, DL))
+  if (ConstantFoldLoadFromConstPtr(Src, *DL))
     return Offset;
   return -1;
 }
@@ -948,43 +943,41 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
 
   MemoryAccess *DefiningAccess = MSSA->getClobberingMemoryAccess(I);
 
-  if (DL) {
-    if (!MSSA->isLiveOnEntryDef(DefiningAccess)) {
-      if (MemoryDef *MD = dyn_cast<MemoryDef>(DefiningAccess)) {
-        Instruction *DefiningInst = MD->getMemoryInst();
-        // If the defining instruction is not reachable, replace with
-        // undef
-        if (!ReachableBlocks.count(DefiningInst->getParent()))
-          return createConstantExpression(UndefValue::get(LI->getType()));
-        Expression *CoercionResult =
-            performSymbolicLoadCoercion(LI, DefiningInst, DefiningAccess, B);
-        if (CoercionResult)
-          return CoercionResult;
-      }
-    } else {
-      BasicBlock *LoadBlock = LI->getParent();
-      MemoryAccess *LoadAccess = MSSA->getMemoryAccess(LI);
-      // Okay, so uh, we couldn't use the defining access to grab a value out of
-      // See if we can reuse any of it's uses by widening a load.
-      for (const MemoryAccess *MA : DefiningAccess->uses()) {
-        if (MA == LoadAccess)
-          continue;
-        if (const MemoryUse *MU = dyn_cast<MemoryUse>(MA)) {
-          Instruction *DefiningInst = MU->getMemoryInst();
-          if (LoadInst *DepLI = dyn_cast<LoadInst>(DefiningInst)) {
-            BasicBlock *DefiningBlock = DefiningInst->getParent();
-            if (!DT->dominates(DefiningBlock, LoadBlock))
-              continue;
-            // Make sure the dependent load comes before the load we are trying
-            // to coerce if they are in the same block
-            if (InstrDFS[DepLI] >= InstrDFS[LI])
-              continue;
-            int Offset = analyzeLoadFromClobberingLoad(
-                LI->getType(), LI->getPointerOperand(), DepLI);
-            if (Offset >= 0)
-              return createCoercibleLoadExpression(LI, DefiningAccess,
-                                                   (unsigned)Offset, DepLI, B);
-          }
+  if (!MSSA->isLiveOnEntryDef(DefiningAccess)) {
+    if (MemoryDef *MD = dyn_cast<MemoryDef>(DefiningAccess)) {
+      Instruction *DefiningInst = MD->getMemoryInst();
+      // If the defining instruction is not reachable, replace with
+      // undef
+      if (!ReachableBlocks.count(DefiningInst->getParent()))
+        return createConstantExpression(UndefValue::get(LI->getType()));
+      Expression *CoercionResult =
+          performSymbolicLoadCoercion(LI, DefiningInst, DefiningAccess, B);
+      if (CoercionResult)
+        return CoercionResult;
+    }
+  } else {
+    BasicBlock *LoadBlock = LI->getParent();
+    MemoryAccess *LoadAccess = MSSA->getMemoryAccess(LI);
+    // Okay, so uh, we couldn't use the defining access to grab a value out of
+    // See if we can reuse any of it's uses by widening a load.
+    for (const MemoryAccess *MA : DefiningAccess->uses()) {
+      if (MA == LoadAccess)
+        continue;
+      if (const MemoryUse *MU = dyn_cast<MemoryUse>(MA)) {
+        Instruction *DefiningInst = MU->getMemoryInst();
+        if (LoadInst *DepLI = dyn_cast<LoadInst>(DefiningInst)) {
+          BasicBlock *DefiningBlock = DefiningInst->getParent();
+          if (!DT->dominates(DefiningBlock, LoadBlock))
+            continue;
+          // Make sure the dependent load comes before the load we are trying
+          // to coerce if they are in the same block
+          if (InstrDFS[DepLI] >= InstrDFS[LI])
+            continue;
+          int Offset = analyzeLoadFromClobberingLoad(
+              LI->getType(), LI->getPointerOperand(), DepLI);
+          if (Offset >= 0)
+            return createCoercibleLoadExpression(LI, DefiningAccess,
+                                                 (unsigned)Offset, DepLI, B);
         }
       }
     }
@@ -2474,7 +2467,7 @@ Value *NewGVN::getMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
       ConstantInt::get(Type::getInt64Ty(Src->getContext()), (unsigned)Offset);
   Src = ConstantExpr::getGetElementPtr(Src, OffsetCst);
   Src = ConstantExpr::getBitCast(Src, PointerType::get(LoadTy, AS));
-  return ConstantFoldLoadFromConstPtr(Src, DL);
+  return ConstantFoldLoadFromConstPtr(Src, *DL);
 }
 
 Value *NewGVN::coerceLoad(Value *V) {
