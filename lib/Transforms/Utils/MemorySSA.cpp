@@ -118,9 +118,9 @@ struct MemorySSA::MemoryQuery {
 };
 
 void MemorySSA::doCacheInsert(MemoryAccess *M, MemoryAccess *Result,
-                              MemoryQuery &Q) {
+                              const MemoryQuery &Q) {
 
-  if (!Q.isCall)
+  if (Q.isCall)
     CachedClobberingCall.insert(std::make_pair(M, Result));
   else
     CachedClobberingAccess.insert(
@@ -128,7 +128,7 @@ void MemorySSA::doCacheInsert(MemoryAccess *M, MemoryAccess *Result,
 }
 
 MemoryAccess *MemorySSA::doCacheLookup(MemoryAccess *M,
-                                       const struct MemoryQuery &Q) {
+                                       const MemoryQuery &Q) {
 
   ++NumClobberCacheLookups;
   MemoryAccess *Result;

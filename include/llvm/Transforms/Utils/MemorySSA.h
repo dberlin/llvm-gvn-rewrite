@@ -269,8 +269,8 @@ private:
   void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use);
   typedef DenseMap<MemoryAccess *, std::list<MemoryAccess *> *> UseMap;
   struct MemoryQuery;
-  MemoryAccess *doCacheLookup(MemoryAccess *, const struct MemoryQuery &);
-  void doCacheInsert(MemoryAccess *, MemoryAccess *, struct MemoryQuery &);
+  MemoryAccess *doCacheLookup(MemoryAccess *, const MemoryQuery &);
+  void doCacheInsert(MemoryAccess *, MemoryAccess *, const MemoryQuery &);
   std::pair<MemoryAccess *, bool>
   getClobberingMemoryAccess(MemoryPhi *Phi, struct MemoryQuery &);
   std::pair<MemoryAccess *, bool>
