@@ -4,34 +4,39 @@ target datalayout = "e-m:o-i64:64-f80:128-n8:16:32:64-S128"
 ; Function Attrs: ssp uwtable
 define i32 @main() #0 {
 entry:
-; CHECK:  2 = MemoryDef(1)
-; 2 = MemoryDef(1)
+; CHECK:  1 = MemoryDef(0)
+; 1 = MemoryDef(0)
+; CHECK-NEXT:   %call = call noalias i8* @_Znwm(i64 4) #2
   %call = call noalias i8* @_Znwm(i64 4) #2
   %0 = bitcast i8* %call to i32*
-; CHECK:  3 = MemoryDef(2)
-; 3 = MemoryDef(2)
+; CHECK:  2 = MemoryDef(1)
+; 2 = MemoryDef(1)
+; CHECK-NEXT:   %call1 = call noalias i8* @_Znwm(i64 4) #2
   %call1 = call noalias i8* @_Znwm(i64 4) #2
   %1 = bitcast i8* %call1 to i32*
-; These stores should conflict
+; CHECK:  3 = MemoryDef(2)
+; 3 = MemoryDef(2)
+; CHECK-NEXT:   store i32 5, i32* %0, align 4
+  store i32 5, i32* %0, align 4
 ; CHECK:  4 = MemoryDef(3)
 ; 4 = MemoryDef(3)
-  store i32 5, i32* %0, align 4
-; CHECK:  5 = MemoryDef(4)
-; 5 = MemoryDef(4)
+; CHECK-NEXT:   store i32 7, i32* %1, align 4
   store i32 7, i32* %1, align 4
-; Because we optimize uses, these uses should not be of the last store, but of
-; the conflicting store for each one
 ; CHECK:  MemoryUse(4)
 ; MemoryUse(4)
+; CHECK-NEXT:   %2 = load i32, i32* %0, align 4
   %2 = load i32, i32* %0, align 4
-; CHECK:  MemoryUse(5)
-; MemoryUse(5)
+; CHECK:  MemoryUse(4)
+; MemoryUse(4)
+; CHECK-NEXT:   %3 = load i32, i32* %1, align 4
   %3 = load i32, i32* %1, align 4
 ; CHECK:  MemoryUse(4)
 ; MemoryUse(4)
+; CHECK-NEXT:   %4 = load i32, i32* %0, align 4
   %4 = load i32, i32* %0, align 4
-; CHECK:  MemoryUse(5)
-; MemoryUse(5)
+; CHECK:  MemoryUse(4)
+; MemoryUse(4)
+; CHECK-NEXT:   %5 = load i32, i32* %1, align 4
   %5 = load i32, i32* %1, align 4
   %add = add nsw i32 %3, %5
   ret i32 %add

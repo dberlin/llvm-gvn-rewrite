@@ -49,38 +49,29 @@ INITIALIZE_PASS_END(MemorySSA, "memoryssa", "Memory SSA", false, true);
 // This is a temporary (IE will be deleted once consensus is reached
 // in the review) flag to determine whether we should optimize uses
 // while building so they point to the nearest actual clobber
-#define OPTIMIZE_USES 1
+#define OPTIMIZE_USES 0
 
 namespace llvm {
 // An annotator class to print memory ssa information in comments
 class MemorySSAAnnotatedWriter : public AssemblyAnnotationWriter {
+  friend class MemorySSA;
   const MemorySSA *MSSA;
-  MemoryAccess::SlotInfoType SlotInfo;
 
 public:
-  MemorySSAAnnotatedWriter(const MemorySSA *M) : MSSA(M) {
-    // Always want the live on entry def to print out as the lowest number
-    SlotInfo.insert(M->getLiveOnEntryDef());
-  }
+  MemorySSAAnnotatedWriter(const MemorySSA *M) : MSSA(M) {}
 
   virtual void emitBasicBlockStartAnnot(const BasicBlock *BB,
                                         formatted_raw_ostream &OS) {
     MemoryAccess *MA = MSSA->getMemoryAccess(BB);
-    if (MA) {
-      OS << "; ";
-      MA->print(OS, SlotInfo);
-      OS << "\n";
-    }
+    if (MA)
+      OS << "; " << *MA << "\n";
   }
 
   virtual void emitInstructionAnnot(const Instruction *I,
                                     formatted_raw_ostream &OS) {
     MemoryAccess *MA = MSSA->getMemoryAccess(I);
-    if (MA) {
-      OS << "; ";
-      MA->print(OS, SlotInfo);
-      OS << "\n";
-    }
+    if (MA)
+      OS << "; " << *MA << "\n";
   }
 };
 }
@@ -114,11 +105,19 @@ struct MemorySSA::MemoryQuery {
   // isCall is false
   Instruction *Call;
   // Set of visited Instructions for this query
-  SmallPtrSet<MemoryAccess *, 32> Visited;
+  SmallPtrSet<const MemoryAccess *, 32> Visited;
+  // Set of visited call accesses for this query
+  // We separate this because we can always cache the result of calls if
+  // Q.iscall is true, because they have no location
+  SmallPtrSet<const MemoryAccess *, 32> VisitedCalls;
 };
 
-void MemorySSA::doCacheInsert(MemoryAccess *M, MemoryAccess *Result,
+void MemorySSA::doCacheInsert(const MemoryAccess *M, MemoryAccess *Result,
                               const MemoryQuery &Q) {
+
+  // DEBUG(dbgs() << F->getName() << " cache insert: " << Q.isCall << "\t"
+  //              << (uint64_t)M << "\t" << (uint64_t)Q.Loc.Ptr << "\t"
+  //              << (uint64_t)Result << "\n");
 
   if (Q.isCall)
     CachedClobberingCall.insert(std::make_pair(M, Result));
@@ -127,15 +126,19 @@ void MemorySSA::doCacheInsert(MemoryAccess *M, MemoryAccess *Result,
         std::make_pair(std::make_pair(M, Q.Loc), Result));
 }
 
-MemoryAccess *MemorySSA::doCacheLookup(MemoryAccess *M,
+MemoryAccess *MemorySSA::doCacheLookup(const MemoryAccess *M,
                                        const MemoryQuery &Q) {
 
   ++NumClobberCacheLookups;
   MemoryAccess *Result;
+
   if (Q.isCall)
-    Result = CachedClobberingCall.lookup(getMemoryAccess(Q.Call));
+    Result = CachedClobberingCall.lookup(M);
   else
     Result = CachedClobberingAccess.lookup(std::make_pair(M, Q.Loc));
+  // DEBUG(dbgs() << F->getName() << " cache lookup: " << Q.isCall << "\t"
+  //              << (uint64_t)M << "\t" << (uint64_t)Q.Loc.Ptr << "\t"
+  //              << (uint64_t)Result << "\n");
 
   if (Result) {
     ++NumClobberCacheHits;
@@ -252,23 +255,27 @@ MemorySSA::getClobberingMemoryAccess(MemoryAccess *MA, struct MemoryQuery &Q) {
       // While we can do lookups, we can't sanely do inserts here unless we
       // were to track every thing we saw along the way, since we don't
       // know where we will stop.
-      // Note: There is no point in doing lookups for calls at this
-      // stage. If we knew a better result for the initial call, we
-      // would have found it in the function that calls this one.
+      if (auto CacheResult = doCacheLookup(CurrAccess, Q))
+        return std::make_pair(CacheResult, false);
       if (!Q.isCall) {
-        if (auto CacheResult = doCacheLookup(CurrAccess, Q))
-          return std::make_pair(CacheResult, false);
         // Check whether our memory location is modified by this instruction
         if (AA->getModRefInfo(DefMemoryInst, Q.Loc) & AliasAnalysis::Mod)
           break;
-      } else if (AA->instructionClobbersCall(DefMemoryInst, Q.Call))
-        break;
+      } else {
+        // If this is a call, try lookup and then mark it for caching
+        if (ImmutableCallSite(DefMemoryInst)) {
+          Q.VisitedCalls.insert(MD);
+        }
+        if (AA->instructionClobbersCall(DefMemoryInst, Q.Call))
+          break;
+      }
     }
     MemoryAccess *NextAccess = cast<MemoryDef>(CurrAccess)->getDefiningAccess();
     // Walk from def to def
     CurrAccess = NextAccess;
   }
   doCacheInsert(MA, CurrAccess, Q);
+  doCacheInsert(CurrAccess, CurrAccess, Q);
   return std::make_pair(CurrAccess, false);
 }
 
@@ -300,16 +307,20 @@ MemoryAccess *MemorySSA::getClobberingMemoryAccess(Instruction *I) {
   auto CacheResult = doCacheLookup(StartingAccess, Q);
   if (CacheResult)
     return CacheResult;
+
   SmallPtrSet<MemoryAccess *, 32> Visited;
   MemoryAccess *FinalAccess =
       getClobberingMemoryAccess(StartingAccess, Q).first;
   doCacheInsert(StartingAccess, FinalAccess, Q);
-  DEBUG(dbgs() << "Starting Memory SSA clobber for " << (uintptr_t)I << " is ");
-  DEBUG(dbgs() << (uintptr_t)StartingAccess);
-  DEBUG(dbgs() << "\n");
-  DEBUG(dbgs() << "Final Memory SSA clobber for " << (uintptr_t)I << " is ");
-  DEBUG(dbgs() << (uintptr_t)FinalAccess);
-  DEBUG(dbgs() << "\n");
+  if (Q.isCall) {
+    for (const auto &C : Q.VisitedCalls)
+      doCacheInsert(C, FinalAccess, Q);
+  }
+
+  DEBUG(dbgs() << "Starting Memory SSA clobber for " << *I << " is ");
+  DEBUG(dbgs() << *StartingAccess << "\n");
+  DEBUG(dbgs() << "Final Memory SSA clobber for " << *I << " is ");
+  DEBUG(dbgs() << *FinalAccess << "\n");
 
   return FinalAccess;
 }
@@ -409,7 +420,7 @@ void MemorySSA::determineInsertionPoint(
       BlockAccesses.insert(std::make_pair(BB, Accesses));
     }
     MemoryPhi *Phi = new (MemoryAccessAllocator)
-        MemoryPhi(BB, std::distance(pred_begin(BB), pred_end(BB)));
+        MemoryPhi(BB, std::distance(pred_begin(BB), pred_end(BB)), nextID++);
     InstructionToMemoryAccess.insert(std::make_pair(BB, Phi));
     // Phi goes first
     Accesses->push_front(Phi);
@@ -586,6 +597,7 @@ void MemorySSA::addUses(UseMap &Uses) {
 }
 
 bool MemorySSA::runOnFunction(Function &F) {
+  nextID = 0;
   this->F = &F;
   AA = &getAnalysis<AliasAnalysis>();
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
@@ -594,6 +606,13 @@ bool MemorySSA::runOnFunction(Function &F) {
 }
 
 void MemorySSA::buildMemorySSA(Function &F) {
+  // We create an access to represent "live on entry", for things like
+  // arguments or users of globals. We do not actually insert it in to
+  // the IR.
+  BasicBlock &StartingPoint = F.getEntryBlock();
+  LiveOnEntryDef = new (MemoryAccessAllocator)
+      MemoryDef(nullptr, nullptr, &StartingPoint, nextID++);
+
   // We temporarily maintain lists of memory accesses per-block,
   // trading time for memory. We could just look up the memory access
   // for every possible instruction in the stream.  Instead, we build
@@ -631,7 +650,8 @@ void MemorySSA::buildMemorySSA(Function &F) {
         Accesses->push_back(MU);
       }
       if (def) {
-        MemoryDef *MD = new (MemoryAccessAllocator) MemoryDef(nullptr, &I, &B);
+        MemoryDef *MD =
+            new (MemoryAccessAllocator) MemoryDef(nullptr, &I, &B, nextID++);
         InstructionToMemoryAccess.insert(std::make_pair(&I, MD));
         DefiningBlocks.insert(&B);
         if (!Accesses) {
@@ -644,13 +664,6 @@ void MemorySSA::buildMemorySSA(Function &F) {
   }
   // Determine where our PHI's should go
   determineInsertionPoint(F, PerBlockAccesses, DefiningBlocks);
-
-  // We create an access to represent "live on entry", for things like
-  // arguments or users of globals. We do not actually insert it in to
-  // the IR.
-  BasicBlock &StartingPoint = F.getEntryBlock();
-  LiveOnEntryDef =
-      new (MemoryAccessAllocator) MemoryDef(nullptr, nullptr, &StartingPoint);
 
   // Now do regular SSA renaming
   SmallPtrSet<BasicBlock *, 16> Visited;
@@ -683,7 +696,7 @@ void MemorySSA::buildMemorySSA(Function &F) {
   // Now convert our use lists into real uses
   addUses(Uses);
   if (DumpMemorySSA) {
-    print(outs(), F.getParent());
+    print(errs(), F.getParent());
   }
 
   if (VerifyMemorySSA) {
@@ -818,15 +831,16 @@ MemoryAccess *MemorySSA::getMemoryAccess(const Value *I) const {
   return InstructionToMemoryAccess.lookup(I);
 }
 
-void MemoryDef::print(raw_ostream &OS, SlotInfoType &SlotInfo) {
+void MemoryDef::print(raw_ostream &OS) {
   MemoryAccess *UO = getDefiningAccess();
-  OS << SlotInfo.insert(this) << " = "
+
+  OS << getID() << " = "
      << "MemoryDef(";
-  OS << SlotInfo.insert(UO) << ")";
+  OS << UO->getID() << ")";
 }
 
-void MemoryPhi::print(raw_ostream &OS, SlotInfoType &SlotInfo) {
-  OS << SlotInfo.insert(this) << " = "
+void MemoryPhi::print(raw_ostream &OS) {
+  OS << getID() << " = "
      << "MemoryPhi(";
   for (unsigned int i = 0, e = getNumIncomingValues(); i != e; ++i) {
     BasicBlock *BB = getIncomingBlock(i);
@@ -839,7 +853,7 @@ void MemoryPhi::print(raw_ostream &OS, SlotInfoType &SlotInfo) {
     OS << ",";
     assert((isa<MemoryDef>(MA) || isa<MemoryPhi>(MA)) &&
            "Phi node should have referred to def or another phi");
-    OS << SlotInfo.insert(MA);
+    OS << MA->getID();
     OS << "}";
     if (i + 1 < e)
       OS << ",";
@@ -847,9 +861,9 @@ void MemoryPhi::print(raw_ostream &OS, SlotInfoType &SlotInfo) {
   OS << ")";
 }
 
-void MemoryUse::print(raw_ostream &OS, SlotInfoType &SlotInfo) {
+void MemoryUse::print(raw_ostream &OS) {
   MemoryAccess *UO = getDefiningAccess();
   OS << "MemoryUse(";
-  OS << SlotInfo.insert(UO);
+  OS << UO->getID();
   OS << ")";
 }

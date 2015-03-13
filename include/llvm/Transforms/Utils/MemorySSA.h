@@ -89,8 +89,8 @@ public:
   virtual ~MemoryAccess() {}
   BasicBlock *getBlock() const { return Block; }
 
-  typedef UniqueVector<const MemoryAccess *> SlotInfoType;
-  virtual void print(raw_ostream &OS, SlotInfoType &SlotInfo) {}
+  virtual void print(raw_ostream &OS) {}
+
   typedef MemoryAccess **iterator;
   typedef MemoryAccess **const const_iterator;
 
@@ -102,6 +102,8 @@ public:
   iterator_range<const_iterator> uses() const {
     return iterator_range<const_iterator>(use_begin(), use_end());
   }
+
+  virtual unsigned int getID() const { return 0; }
 
 protected:
   friend class MemorySSA;
@@ -119,6 +121,11 @@ private:
   MemoryAccess **UseList;
 };
 
+static inline raw_ostream &operator<<(raw_ostream &OS, MemoryAccess &MA) {
+  MA.print(OS);
+  return OS;
+}
+
 class MemoryUse : public MemoryAccess {
 public:
   MemoryUse(MemoryAccess *DMA, Instruction *MI, BasicBlock *BB)
@@ -133,7 +140,7 @@ public:
   static inline bool classof(const MemoryAccess *MA) {
     return MA->getAccessType() == AccessUse;
   }
-  virtual void print(raw_ostream &OS, SlotInfoType &SlotInfo);
+  virtual void print(raw_ostream &OS);
 
 protected:
   MemoryUse(MemoryAccess *DMA, enum AccessType AT, Instruction *MI,
@@ -148,8 +155,8 @@ private:
 // All defs also have a use
 class MemoryDef : public MemoryUse {
 public:
-  MemoryDef(MemoryAccess *DMA, Instruction *MI, BasicBlock *BB)
-      : MemoryUse(DMA, AccessDef, MI, BB) {}
+  MemoryDef(MemoryAccess *DMA, Instruction *MI, BasicBlock *BB, unsigned Ver)
+      : MemoryUse(DMA, AccessDef, MI, BB), ID(Ver) {}
 
   static inline bool classof(const MemoryDef *) { return true; }
   static inline bool classof(const MemoryUse *MA) {
@@ -159,14 +166,25 @@ public:
   static inline bool classof(const MemoryAccess *MA) {
     return MA->getAccessType() == AccessDef;
   }
-  virtual void print(raw_ostream &OS, SlotInfoType &SlotInfo);
+  virtual void print(raw_ostream &OS);
   typedef MemoryAccess **iterator;
   typedef const MemoryAccess **const_iterator;
+
+protected:
+  friend class MemorySSA;
+  // For debugging only. This gets used to give memory accesses pretty numbers
+  // when printing them out
+
+  virtual unsigned int getID() const { return ID; }
+
+private:
+  const unsigned int ID;
 };
+
 class MemoryPhi : public MemoryAccess {
 public:
-  MemoryPhi(BasicBlock *BB, unsigned int NP)
-      : MemoryAccess(AccessPhi, BB), NumPreds(NP) {
+  MemoryPhi(BasicBlock *BB, unsigned int NP, unsigned int Ver)
+      : MemoryAccess(AccessPhi, BB), ID(Ver), NumPreds(NP) {
     Args.reserve(NumPreds);
   }
   // This is the number of actual predecessors
@@ -204,9 +222,18 @@ public:
     return MA->getAccessType() == AccessPhi;
   }
 
-  virtual void print(raw_ostream &OS, SlotInfoType &SlotInfo);
+  virtual void print(raw_ostream &OS);
+
+protected:
+  friend class MemorySSA;
+
+  // For debugging only. This gets used to give memory accesses pretty numbers
+  // when printing them out
+  unsigned int getID() const { return ID; }
 
 private:
+  // For debugging only
+  const unsigned ID;
   unsigned NumPreds;
   ArgsType Args;
 };
@@ -221,13 +248,15 @@ private:
 
   // Memory SSA mappings
   DenseMap<const Value *, MemoryAccess *> InstructionToMemoryAccess;
-  DenseMap<std::pair<MemoryAccess *, AliasAnalysis::Location>, MemoryAccess *>
-      CachedClobberingAccess;
-  DenseMap<MemoryAccess *, MemoryAccess *> CachedClobberingCall;
+  DenseMap<std::pair<const MemoryAccess *, AliasAnalysis::Location>,
+           MemoryAccess *> CachedClobberingAccess;
+  DenseMap<const MemoryAccess *, MemoryAccess *> CachedClobberingCall;
+  UniqueVector<const MemoryAccess *> AccessToId;
 
   // Memory SSA building info
   typedef DenseMap<BasicBlock *, std::list<MemoryAccess *> *> AccessMap;
   MemoryAccess *LiveOnEntryDef;
+  unsigned int nextID;
 
 public:
   MemorySSA();
@@ -263,14 +292,18 @@ public:
     return LiveOnEntryDef;
   }
 
+protected:
+  // Used by memory ssa annotator and dumpers
+  friend class MemorySSAAnnotatedWriter;
+
 private:
   bool DumpMemorySSA;
   bool VerifyMemorySSA;
   void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use);
   typedef DenseMap<MemoryAccess *, std::list<MemoryAccess *> *> UseMap;
   struct MemoryQuery;
-  MemoryAccess *doCacheLookup(MemoryAccess *, const MemoryQuery &);
-  void doCacheInsert(MemoryAccess *, MemoryAccess *, const MemoryQuery &);
+  MemoryAccess *doCacheLookup(const MemoryAccess *, const MemoryQuery &);
+  void doCacheInsert(const MemoryAccess *, MemoryAccess *, const MemoryQuery &);
   std::pair<MemoryAccess *, bool>
   getClobberingMemoryAccess(MemoryPhi *Phi, struct MemoryQuery &);
   std::pair<MemoryAccess *, bool>
