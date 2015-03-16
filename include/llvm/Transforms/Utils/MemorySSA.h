@@ -238,13 +238,13 @@ private:
   ArgsType Args;
 };
 
-class MemorySSA : public FunctionPass {
+class MemorySSA {
 
 private:
   AliasAnalysis *AA;
   DominatorTree *DT;
   BumpPtrAllocator MemoryAccessAllocator;
-  Function *F;
+  Function &F;
 
   // Memory SSA mappings
   DenseMap<const Value *, MemoryAccess *> InstructionToMemoryAccess;
@@ -257,24 +257,13 @@ private:
   typedef DenseMap<BasicBlock *, std::list<MemoryAccess *> *> AccessMap;
   MemoryAccess *LiveOnEntryDef;
   unsigned int nextID;
+  bool builtAlready;
 
 public:
-  MemorySSA();
+  MemorySSA(Function &);
   ~MemorySSA();
-  static char ID;
-
-  bool doInitialization(Module &M) override;
-
-  bool runOnFunction(Function &) override;
-
-  void releaseMemory() override;
-
-  void getAnalysisUsage(AnalysisUsage &AU) const override;
-
-  static void registerOptions();
-
   // Memory SSA related stuff
-  void buildMemorySSA(Function &F);
+  void buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT);
   // Given a memory defining/using/clobbering instruction, give you
   // the nearest dominating clobbering Memory Access (by skipping non-aliasing
   // def links)
@@ -283,7 +272,7 @@ public:
   // MemorySSA access associaed with it
   MemoryAccess *getMemoryAccess(const Value *I) const;
   void dump(Function &F);
-  void print(raw_ostream &OS, const Module *M) const override;
+  void print(raw_ostream &OS) const;
   inline bool isLiveOnEntryDef(const MemoryAccess *MA) const {
     return MA == LiveOnEntryDef;
   }
@@ -293,12 +282,13 @@ public:
   }
 
 protected:
-  // Used by memory ssa annotator and dumpers
+  // Used by memory ssa annotater, dumpers, and wrapper pass
   friend class MemorySSAAnnotatedWriter;
+  friend class MemorySSAWrapperPass;
+  void verifyDefUses(Function &F);
+  void verifyDomination(Function &F);
 
 private:
-  bool DumpMemorySSA;
-  bool VerifyMemorySSA;
   void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use);
   typedef DenseMap<MemoryAccess *, std::list<MemoryAccess *> *> UseMap;
   struct MemoryQuery;
@@ -319,8 +309,6 @@ private:
                                     UseMap &Uses);
   void addUses(UseMap &Uses);
   void addUseToMap(UseMap &, MemoryAccess *, MemoryAccess *);
-  void verifyDefUses(Function &F);
-  void verifyDomination(Function &F);
 
   struct RenamePassData {
     BasicBlock *BB;
@@ -343,5 +331,45 @@ private:
                   std::vector<RenamePassData> &Worklist,
                   SmallPtrSet<BasicBlock *, 16> &Visited, UseMap &Uses);
 };
+
+// This pass does eager building of MemorySSA. It is used by the tests to be
+// able to build and dump Memory SSA. It should not really be used in normal
+// usage, you should use MemorySSALazyPass instead.
+
+
+class MemorySSAWrapperPass : public FunctionPass {
+public:
+  MemorySSAWrapperPass();
+
+  static char ID;
+  bool doInitialization(Module &M) override;
+  bool runOnFunction(Function &) override;
+  void releaseMemory() override;
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+  static void registerOptions();
+  MemorySSA &getMSSA() { return *MSSA; }
+
+private:
+  bool DumpMemorySSA;
+  bool VerifyMemorySSA;
+
+  MemorySSA *MSSA;
+};
+
+class MemorySSALazy : public FunctionPass {
+public:
+  MemorySSALazy();
+
+  static char ID;
+  bool runOnFunction(Function &) override;
+  void releaseMemory() override;
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+  static void registerOptions();
+  MemorySSA &getMSSA() { return *MSSA; }
+
+private:
+  MemorySSA *MSSA;
+};
+
 }
 #endif
