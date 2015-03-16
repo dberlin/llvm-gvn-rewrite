@@ -70,6 +70,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/UniqueVector.h"
 #include "llvm/Support/Allocator.h"
+#include "llvm/Pass.h"
 #include <list>
 namespace llvm {
 
@@ -238,6 +239,7 @@ private:
   ArgsType Args;
 };
 
+class MemorySSAWalker;
 class MemorySSA {
 
 private:
@@ -248,9 +250,6 @@ private:
 
   // Memory SSA mappings
   DenseMap<const Value *, MemoryAccess *> InstructionToMemoryAccess;
-  DenseMap<std::pair<const MemoryAccess *, AliasAnalysis::Location>,
-           MemoryAccess *> CachedClobberingAccess;
-  DenseMap<const MemoryAccess *, MemoryAccess *> CachedClobberingCall;
   UniqueVector<const MemoryAccess *> AccessToId;
 
   // Memory SSA building info
@@ -263,16 +262,14 @@ public:
   MemorySSA(Function &);
   ~MemorySSA();
   // Memory SSA related stuff
-  void buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT);
-  // Given a memory defining/using/clobbering instruction, give you
-  // the nearest dominating clobbering Memory Access (by skipping non-aliasing
-  // def links)
-  MemoryAccess *getClobberingMemoryAccess(Instruction *);
+  void buildMemorySSA(AliasAnalysis *, DominatorTree *, MemorySSAWalker *);
   // Given a memory using/clobbering/etc instruction, get the
-  // MemorySSA access associaed with it
-  MemoryAccess *getMemoryAccess(const Value *I) const;
-  void dump(Function &F);
-  void print(raw_ostream &OS) const;
+  // MemorySSA access associaed with it.  If you hand it a basic block
+  // it will give you the memory phi node that exists for that block,
+  // if there is one.
+  MemoryAccess *getMemoryAccess(const Value *) const;
+  void dump(Function &);
+  void print(raw_ostream &) const;
   inline bool isLiveOnEntryDef(const MemoryAccess *MA) const {
     return MA == LiveOnEntryDef;
   }
@@ -289,15 +286,8 @@ protected:
   void verifyDomination(Function &F);
 
 private:
-  void verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use);
+  void verifyUseInDefs(MemoryAccess *, MemoryAccess *);
   typedef DenseMap<MemoryAccess *, std::list<MemoryAccess *> *> UseMap;
-  struct MemoryQuery;
-  MemoryAccess *doCacheLookup(const MemoryAccess *, const MemoryQuery &);
-  void doCacheInsert(const MemoryAccess *, MemoryAccess *, const MemoryQuery &);
-  std::pair<MemoryAccess *, bool>
-  getClobberingMemoryAccess(MemoryPhi *Phi, struct MemoryQuery &);
-  std::pair<MemoryAccess *, bool>
-  getClobberingMemoryAccess(MemoryAccess *, struct MemoryQuery &);
 
   void
   determineInsertionPoint(Function &F, AccessMap &BlockAccesses,
@@ -329,13 +319,13 @@ private:
   void renamePass(BasicBlock *BB, BasicBlock *Pred, MemoryAccess *IncomingVal,
                   AccessMap &BlockAccesses,
                   std::vector<RenamePassData> &Worklist,
-                  SmallPtrSet<BasicBlock *, 16> &Visited, UseMap &Uses);
+                  SmallPtrSet<BasicBlock *, 16> &Visited, UseMap &Uses,
+                  MemorySSAWalker *);
 };
 
 // This pass does eager building of MemorySSA. It is used by the tests to be
 // able to build and dump Memory SSA. It should not really be used in normal
 // usage, you should use MemorySSALazyPass instead.
-
 
 class MemorySSAWrapperPass : public FunctionPass {
 public:
@@ -354,6 +344,7 @@ private:
   bool VerifyMemorySSA;
 
   MemorySSA *MSSA;
+  MemorySSAWalker *Walker;
 };
 
 class MemorySSALazy : public FunctionPass {
@@ -363,13 +354,59 @@ public:
   static char ID;
   bool runOnFunction(Function &) override;
   void releaseMemory() override;
-  void getAnalysisUsage(AnalysisUsage &AU) const override;
-  static void registerOptions();
   MemorySSA &getMSSA() { return *MSSA; }
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.setPreservesAll();
+  }
 
 private:
   MemorySSA *MSSA;
 };
 
+class MemorySSAWalker {
+public:
+  MemorySSAWalker(MemorySSA *);
+  virtual ~MemorySSAWalker() {}
+  // Given a memory defining/using/clobbering instruction, calling this will
+  // give you the nearest dominating clobbering Memory Access (by skipping
+  // non-aliasing def links).
+
+  virtual MemoryAccess *getClobberingMemoryAccess(Instruction *) = 0;
+
+protected:
+  MemorySSA *MSSA;
+};
+
+// This walker does no alias queries, or anything else. It simply returns the
+// links as they were constructed by the builder
+class DoNothingMemorySSAWalker final : public MemorySSAWalker {
+public:
+  MemoryAccess *getClobberingMemoryAccess(Instruction *) override;
+};
+
+// This walker does real AA walks, and caching of lookups.
+class CachingMemorySSAWalker final : public MemorySSAWalker {
+public:
+  CachingMemorySSAWalker(MemorySSA *, AliasAnalysis *);
+  virtual ~CachingMemorySSAWalker();
+  MemoryAccess *getClobberingMemoryAccess(Instruction *) override;
+
+protected:
+  struct MemoryQuery;
+  MemoryAccess *doCacheLookup(const MemoryAccess *, const MemoryQuery &);
+  void doCacheInsert(const MemoryAccess *, MemoryAccess *, const MemoryQuery &);
+
+private:
+  std::pair<MemoryAccess *, bool>
+  getClobberingMemoryAccess(MemoryPhi *Phi, struct MemoryQuery &);
+  std::pair<MemoryAccess *, bool>
+  getClobberingMemoryAccess(MemoryAccess *, struct MemoryQuery &);
+
+  DenseMap<std::pair<const MemoryAccess *, AliasAnalysis::Location>,
+           MemoryAccess *> CachedClobberingAccess;
+  DenseMap<const MemoryAccess *, MemoryAccess *> CachedClobberingCall;
+  AliasAnalysis *AA;
+};
 }
+
 #endif
