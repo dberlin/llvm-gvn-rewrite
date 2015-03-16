@@ -217,7 +217,7 @@ private:
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<TargetLibraryInfoWrapperPass>();
     AU.addRequired<MemoryDependenceAnalysis>();
-    AU.addRequired<MemorySSA>();
+    AU.addRequired<MemorySSALazy>();
     AU.addRequired<AliasAnalysis>();
 
     AU.addPreserved<DominatorTreeWrapperPass>();
@@ -1765,8 +1765,10 @@ bool NewGVN::runOnFunction(Function &F) {
   AC = &getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
   TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
   AA = &getAnalysis<AliasAnalysis>();
-  MSSA = &getAnalysis<MemorySSA>();
+  MSSA = &getAnalysis<MemorySSALazy>().getMSSA();
 
+  MSSA->buildMemorySSA(AA, DT);
+  
   unsigned int ICount = 0;
   // Count number of instructions for sizing of hash tables, and come
   // up with a global dfs numbering for instructions
