@@ -133,6 +133,7 @@ class NewGVN : public FunctionPass {
   AssumptionCache *AC;
   AliasAnalysis *AA;
   MemorySSA *MSSA;
+  MemorySSAWalker *MSSAWalker;
   BumpPtrAllocator ExpressionAllocator;
   ArrayRecycler<Value *> ArgRecycler;
 
@@ -868,7 +869,7 @@ Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
                                                    BasicBlock *B) {
   StoreInst *SI = cast<StoreInst>(I);
   Expression *E =
-      createStoreExpression(SI, MSSA->getClobberingMemoryAccess(SI), B);
+      createStoreExpression(SI, MSSAWalker->getClobberingMemoryAccess(SI), B);
   return E;
 }
 
@@ -941,7 +942,7 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
   if (isa<UndefValue>(LoadAddressLeader))
     return createConstantExpression(UndefValue::get(LI->getType()));
 
-  MemoryAccess *DefiningAccess = MSSA->getClobberingMemoryAccess(I);
+  MemoryAccess *DefiningAccess = MSSAWalker->getClobberingMemoryAccess(I);
 
   if (!MSSA->isLiveOnEntryDef(DefiningAccess)) {
     if (MemoryDef *MD = dyn_cast<MemoryDef>(DefiningAccess)) {
@@ -995,7 +996,8 @@ Expression *NewGVN::performSymbolicCallEvaluation(Instruction *I,
   if (AA->doesNotAccessMemory(CI))
     return createCallExpression(CI, nullptr, B);
   else if (AA->onlyReadsMemory(CI))
-    return createCallExpression(CI, MSSA->getClobberingMemoryAccess(CI), B);
+    return createCallExpression(CI, MSSAWalker->getClobberingMemoryAccess(CI),
+                                B);
   else
     return nullptr;
 }
@@ -1766,9 +1768,9 @@ bool NewGVN::runOnFunction(Function &F) {
   TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
   AA = &getAnalysis<AliasAnalysis>();
   MSSA = &getAnalysis<MemorySSALazy>().getMSSA();
+  MSSAWalker = new CachingMemorySSAWalker(MSSA, AA);
+  MSSA->buildMemorySSA(AA, DT, MSSAWalker);
 
-  MSSA->buildMemorySSA(AA, DT);
-  
   unsigned int ICount = 0;
   // Count number of instructions for sizing of hash tables, and come
   // up with a global dfs numbering for instructions
