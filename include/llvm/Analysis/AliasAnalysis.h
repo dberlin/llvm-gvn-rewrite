@@ -145,7 +145,7 @@ public:
   Location getLocation(const AtomicRMWInst *RMWI);
   static Location getLocationForSource(const MemTransferInst *MTI);
   static Location getLocationForDest(const MemIntrinsic *MI);
-  Location getLocation(Instruction *Inst) {
+  Location getLocation(const Instruction *Inst) {
     if (auto *I = dyn_cast<LoadInst>(Inst))
       return getLocation(I);
     else if (auto *I = dyn_cast<StoreInst>(Inst))

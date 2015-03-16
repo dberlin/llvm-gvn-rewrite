@@ -50,11 +50,6 @@ INITIALIZE_PASS_END(MemorySSAWrapperPass, "memoryssa", "Memory SSA", true,
 
 INITIALIZE_PASS(MemorySSALazy, "memoryssalazy", "Memory SSA", true, true);
 
-// This is a temporary (IE will be deleted once consensus is reached
-// in the review) flag to determine whether we should optimize uses
-// while building so they point to the nearest actual clobber
-#define OPTIMIZE_USES 1
-
 namespace llvm {
 // An annotator class to print memory ssa information in comments
 class MemorySSAAnnotatedWriter : public AssemblyAnnotationWriter {
@@ -687,7 +682,7 @@ struct CachingMemorySSAWalker::MemoryQuery {
   AliasAnalysis::Location Loc;
   // This is the call we were querying about. This will be null if
   // isCall is false
-  Instruction *Call;
+  const Instruction *Call;
   // Set of visited Instructions for this query
   SmallPtrSet<const MemoryAccess *, 32> Visited;
   // Set of visited call accesses for this query
@@ -755,13 +750,12 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryPhi *P,
   // eventually lead back to the same defining memory access
   MemoryAccess *Result = nullptr;
 
-#if OPTIMIZE_USES
   // Don't try to walk past an incomplete phi node during construction
-  // This can only occur during construction, and only if we are optimizing
-  // uses.
+  // This can only occur during construction.
+
   if (P->getNumIncomingValues() != P->getNumPreds())
     return std::make_pair(P, false);
-#endif
+
   // If we already got here once, and didn't get to an answer (if we
   // did, it would have been cached below), we must be stuck in
   // mutually recursive phi nodes.  In that case, the correct answer
@@ -870,7 +864,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryAccess *MA,
 // the memory access that actually clobbers this one, skipping non-aliasing
 // ones along the way
 MemoryAccess *
-CachingMemorySSAWalker::getClobberingMemoryAccess(Instruction *I) {
+CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   MemoryAccess *StartingAccess = MSSA->getMemoryAccess(I);
   struct MemoryQuery Q;
 
@@ -911,4 +905,13 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(Instruction *I) {
   DEBUG(dbgs() << *FinalAccess << "\n");
 
   return FinalAccess;
+}
+
+MemoryAccess *
+DoNothingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
+  MemoryAccess *MA = MSSA->getMemoryAccess(I);
+  if (isa<MemoryDef>(MA) || isa<MemoryPhi>(MA))
+    return MA;
+  MemoryUse *MU = cast<MemoryUse>(MA);
+  return MU->getDefiningAccess();
 }
