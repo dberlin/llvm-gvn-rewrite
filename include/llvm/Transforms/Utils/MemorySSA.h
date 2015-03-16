@@ -371,7 +371,7 @@ public:
   // give you the nearest dominating clobbering Memory Access (by skipping
   // non-aliasing def links).
 
-  virtual MemoryAccess *getClobberingMemoryAccess(Instruction *) = 0;
+  virtual MemoryAccess *getClobberingMemoryAccess(const Instruction *) = 0;
 
 protected:
   MemorySSA *MSSA;
@@ -381,7 +381,7 @@ protected:
 // links as they were constructed by the builder
 class DoNothingMemorySSAWalker final : public MemorySSAWalker {
 public:
-  MemoryAccess *getClobberingMemoryAccess(Instruction *) override;
+  MemoryAccess *getClobberingMemoryAccess(const Instruction *) override;
 };
 
 // This walker does real AA walks, and caching of lookups.
@@ -389,7 +389,7 @@ class CachingMemorySSAWalker final : public MemorySSAWalker {
 public:
   CachingMemorySSAWalker(MemorySSA *, AliasAnalysis *);
   virtual ~CachingMemorySSAWalker();
-  MemoryAccess *getClobberingMemoryAccess(Instruction *) override;
+  MemoryAccess *getClobberingMemoryAccess(const Instruction *) override;
 
 protected:
   struct MemoryQuery;
