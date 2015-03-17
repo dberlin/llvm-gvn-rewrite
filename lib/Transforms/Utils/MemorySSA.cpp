@@ -328,7 +328,6 @@ void MemorySSA::addUses(UseMap &Uses) {
 
 void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
                                MemorySSAWalker *Walker) {
-
   // We don't allow updating at the moment
   // But we can't assert since the dumper does eager buildingas
   assert(!builtAlready && "We don't support updating memory ssa at this time");
@@ -685,20 +684,16 @@ struct CachingMemorySSAWalker::MemoryQuery {
   const Instruction *Call;
   // Set of visited Instructions for this query
   SmallPtrSet<const MemoryAccess *, 32> Visited;
-  // Set of visited call accesses for this query
-  // We separate this because we can always cache the result of calls if
-  // Q.iscall is true, because they have no location
+  // Set of visited call accesses for this query This is separated out because
+  // you can always cache and lookup the result of call queries (IE when isCall
+  // == true) for every call in the chain. The calls have no AA location
+  // associated with them with them, and thus, no context dependence.
   SmallPtrSet<const MemoryAccess *, 32> VisitedCalls;
 };
 
 void CachingMemorySSAWalker::doCacheInsert(const MemoryAccess *M,
                                            MemoryAccess *Result,
                                            const MemoryQuery &Q) {
-
-  // DEBUG(dbgs() << F->getName() << " cache insert: " << Q.isCall << "\t"
-  //              << (uint64_t)M << "\t" << (uint64_t)Q.Loc.Ptr << "\t"
-  //              << (uint64_t)Result << "\n");
-
   if (Q.isCall)
     CachedClobberingCall.insert(std::make_pair(M, Result));
   else
@@ -716,9 +711,6 @@ MemoryAccess *CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
     Result = CachedClobberingCall.lookup(M);
   else
     Result = CachedClobberingAccess.lookup(std::make_pair(M, Q.Loc));
-  // DEBUG(dbgs() << F->getName() << " cache lookup: " << Q.isCall << "\t"
-  //              << (uint64_t)M << "\t" << (uint64_t)Q.Loc.Ptr << "\t"
-  //              << (uint64_t)Result << "\n");
 
   if (Result) {
     ++NumClobberCacheHits;
@@ -843,7 +835,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryAccess *MA,
         if (AA->getModRefInfo(DefMemoryInst, Q.Loc) & AliasAnalysis::Mod)
           break;
       } else {
-        // If this is a call, try lookup and then mark it for caching
+        // If this is a call, try then mark it for caching
         if (ImmutableCallSite(DefMemoryInst)) {
           Q.VisitedCalls.insert(MD);
         }
