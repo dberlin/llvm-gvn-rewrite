@@ -559,7 +559,11 @@ void MemoryDef::print(raw_ostream &OS) {
 
   OS << getID() << " = "
      << "MemoryDef(";
-  OS << UO->getID() << ")";
+  if (UO)
+    OS << UO->getID();
+  else
+    OS << "liveOnEntry";
+  OS << ")";
 }
 
 void MemoryPhi::print(raw_ostream &OS) {
