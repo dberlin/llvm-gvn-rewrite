@@ -4,8 +4,8 @@ target datalayout = "e-m:o-i64:64-f80:128-n8:16:32:64-S128"
 ; Function Attrs: ssp uwtable
 define i32 @main() #0 {
 entry:
-; CHECK:  1 = MemoryDef(0)
-; 1 = MemoryDef(0)
+; CHECK:  1 = MemoryDef(liveOnEntry)
+; 1 = MemoryDef(liveOnEntry)
 ; CHECK-NEXT:   %call = call noalias i8* @_Znwm(i64 4) #2
   %call = call noalias i8* @_Znwm(i64 4) #2
   %0 = bitcast i8* %call to i32*

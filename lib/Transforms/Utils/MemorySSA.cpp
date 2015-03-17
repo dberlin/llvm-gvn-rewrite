@@ -559,7 +559,7 @@ void MemoryDef::print(raw_ostream &OS) {
 
   OS << getID() << " = "
      << "MemoryDef(";
-  if (UO)
+  if (UO && UO->getID() != 0)
     OS << UO->getID();
   else
     OS << "liveOnEntry";
@@ -580,7 +580,10 @@ void MemoryPhi::print(raw_ostream &OS) {
     OS << ",";
     assert((isa<MemoryDef>(MA) || isa<MemoryPhi>(MA)) &&
            "Phi node should have referred to def or another phi");
-    OS << MA->getID();
+    if (MA->getID() != 0)
+      OS << MA->getID();
+    else
+      OS << "liveOnEntry";
     OS << "}";
     if (i + 1 < e)
       OS << ",";
