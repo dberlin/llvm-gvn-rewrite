@@ -11,8 +11,8 @@ define hidden void @quux() align 2 {
   br label %bb26
 
 bb26:                                             ; preds = %bb77, %0
-; CHECK:  2 = MemoryPhi({%0,0},{bb77,3})
-; 2 = MemoryPhi({%0,0},{bb77,3})
+; CHECK:  2 = MemoryPhi({%0,liveOnEntry},{bb77,3})
+; 2 = MemoryPhi({%0,liveOnEntry},{bb77,3})
 ; CHECK-NEXT:   br i1 undef, label %bb68, label %bb77
   br i1 undef, label %bb68, label %bb77
 
