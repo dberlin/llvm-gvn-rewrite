@@ -185,15 +185,19 @@ class NewGVN : public FunctionPass {
   // individual and ranges, as well as "find next element" This
   // enables us to use it as a worklist with essentially 0 cost.
   BitVector TouchedInstructions;
-  DenseMap<const BasicBlock *, std::pair<unsigned int, unsigned int>>
-      BlockInstRange;
-  DenseSet<const BasicBlock *> UniquePredecessorBlocks;
-  DenseMap<const Instruction *, unsigned int> ProcessedCount;
-  DenseMap<const BasicBlock *, unsigned int> ProcessedBlockCount;
+  // We mark which instructions were affected by an equivalence, so we only have
+  // to revisit those instructions when an edge change occurs
+  BitVector InvolvedInEquivalence;
+  DenseMap<const BasicBlock *, std::pair<unsigned, unsigned>> BlockInstRange;
+  DenseMap<const DomTreeNode *, std::pair<unsigned, unsigned>>
+      DominatedInstRange;
+  DenseSet<const BasicBlock *> ConfluenceBlocks;
+  DenseMap<const Instruction *, unsigned> ProcessedCount;
+  DenseMap<const BasicBlock *, unsigned> ProcessedBlockCount;
   CongruenceClass *InitialClass;
   std::vector<CongruenceClass *> CongruenceClasses;
   DenseMap<BasicBlock *, std::pair<int, int>> DFSBBMap;
-  DenseMap<const Instruction *, unsigned int> InstrDFS;
+  DenseMap<const Instruction *, unsigned> InstrDFS;
   std::vector<Instruction *> DFSToInstr;
   SmallPtrSet<Instruction *, 8> InstructionsToErase;
   // This is a mapping from Load to (offset into source, coercion source)
@@ -231,8 +235,8 @@ private:
                                      BasicBlock *);
   bool setBasicExpressionInfo(Instruction *, BasicExpression *, BasicBlock *);
   PHIExpression *createPHIExpression(Instruction *);
-  VariableExpression *createVariableExpression(Value *);
-  ConstantExpression *createConstantExpression(Constant *);
+  VariableExpression *createVariableExpression(Value *, bool);
+  ConstantExpression *createConstantExpression(Constant *, bool);
   Expression *createVariableOrConstant(Value *V, BasicBlock *B);
   StoreExpression *createStoreExpression(StoreInst *, MemoryAccess *,
                                          BasicBlock *);
@@ -280,7 +284,7 @@ private:
   int analyzeLoadFromClobberingMemInst(Type *, Value *, MemIntrinsic *);
   int analyzeLoadFromClobberingWrite(Type *, Value *, Value *, uint64_t);
   // Congruence finding
-  Value *lookupOperandLeader(Value *, BasicBlock *) const;
+  std::pair<Value *, bool> lookupOperandLeader(Value *, BasicBlock *) const;
   Value *findDominatingEquivalent(CongruenceClass *, BasicBlock *) const;
   void performCongruenceFinding(Value *, Expression *);
   // Predicate and reachability handling
@@ -289,6 +293,8 @@ private:
   void propagateChangeInEdge(BasicBlock *);
   bool propagateEquality(Value *, Value *, BasicBlock *);
   Value *findConditionEquivalence(Value *, BasicBlock *) const;
+  std::pair<unsigned, unsigned>
+  calculateDominatedInstRange(const DomTreeNode *);
 
   // Instruction replacement
   unsigned replaceAllDominatedUsesWith(Value *, Value *, BasicBlock *);
@@ -344,6 +350,7 @@ PHIExpression *NewGVN::createPHIExpression(Instruction *I) {
   E->allocateArgs(ArgRecycler, ExpressionAllocator);
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
+  bool UsedEquiv = false;
   for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i) {
     BasicBlock *B = PN->getIncomingBlock(i);
     if (!ReachableBlocks.count(B)) {
@@ -352,12 +359,14 @@ PHIExpression *NewGVN::createPHIExpression(Instruction *I) {
       continue;
     }
     if (I->getOperand(i) != I) {
-      Value *Operand = lookupOperandLeader(I->getOperand(i), B);
-      E->args_push_back(Operand);
+      auto Operand = lookupOperandLeader(I->getOperand(i), B);
+      E->args_push_back(Operand.first);
+      UsedEquiv |= Operand.second;
     } else {
       E->args_push_back(I->getOperand(i));
     }
   }
+  E->setUsedEquivalence(UsedEquiv);
   return E;
 }
 
@@ -367,18 +376,22 @@ PHIExpression *NewGVN::createPHIExpression(Instruction *I) {
 bool NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
                                     BasicBlock *B) {
   bool AllConstant = true;
+  bool UsedEquiv = false;
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
   E->allocateArgs(ArgRecycler, ExpressionAllocator);
 
   for (auto &O : I->operands()) {
-    Value *Operand = lookupOperandLeader(O, B);
-    if (!isa<Constant>(Operand))
+    auto Operand = lookupOperandLeader(O, B);
+    UsedEquiv |= Operand.second;
+    if (!isa<Constant>(Operand.first))
       AllConstant = false;
-    E->args_push_back(Operand);
+    E->args_push_back(Operand.first);
   }
+  E->setUsedEquivalence(UsedEquiv);
   return AllConstant;
 }
+
 // This is a special function only used by equality propagation, it
 // should not be called elsewhere
 BasicExpression *NewGVN::createCmpExpression(unsigned Opcode, Type *Type,
@@ -386,13 +399,17 @@ BasicExpression *NewGVN::createCmpExpression(unsigned Opcode, Type *Type,
                                              Value *LHS, Value *RHS,
                                              BasicBlock *B) {
   BasicExpression *E = new (ExpressionAllocator) BasicExpression(2);
+  bool UsedEquiv = false;
   E->allocateArgs(ArgRecycler, ExpressionAllocator);
   E->setType(Type);
   E->setOpcode((Opcode << 8) | Predicate);
-  LHS = lookupOperandLeader(LHS, B);
-  E->args_push_back(LHS);
-  RHS = lookupOperandLeader(RHS, B);
-  E->args_push_back(RHS);
+  auto Result = lookupOperandLeader(LHS, B);
+  UsedEquiv |= Result.second;
+  E->args_push_back(Result.first);
+  Result = lookupOperandLeader(RHS, B);
+  UsedEquiv |= Result.second;
+  E->args_push_back(Result.first);
+  E->setUsedEquivalence(UsedEquiv);
   return E;
 }
 
@@ -412,9 +429,14 @@ Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
     if (Arg1 > Arg2)
       std::swap(Arg1, Arg2);
   }
+  bool UsedEquiv = false;
+  auto BinaryLeader = lookupOperandLeader(Arg1, B);
+  UsedEquiv |= BinaryLeader.second;
+  E->args_push_back(BinaryLeader.first);
 
-  E->args_push_back(lookupOperandLeader(Arg1, B));
-  E->args_push_back(lookupOperandLeader(Arg2, B));
+  BinaryLeader = lookupOperandLeader(Arg2, B);
+  UsedEquiv |= BinaryLeader.second;
+  E->args_push_back(BinaryLeader.first);
 
   Value *V = SimplifyBinOp(Opcode, E->Args[0], E->Args[1], *DL, TLI, DT, AC);
   if (Expression *simplifiedE = checkSimplificationResults(E, nullptr, V))
@@ -443,7 +465,7 @@ Expression *NewGVN::checkSimplificationResults(Expression *E, Instruction *I,
 
     cast<BasicExpression>(E)->deallocateArgs(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
-    return createConstantExpression(C);
+    return createConstantExpression(C, E->usedEquivalence());
   }
   CongruenceClass *CC = ValueToClass.lookup(V);
   if (CC && CC->expression) {
@@ -593,23 +615,27 @@ NewGVN::createAggregateValueExpression(Instruction *I, BasicBlock *B) {
   llvm_unreachable("Unhandled type of aggregate value operation");
 }
 
-VariableExpression *NewGVN::createVariableExpression(Value *V) {
+VariableExpression *NewGVN::createVariableExpression(Value *V,
+                                                     bool UsedEquivalence) {
   VariableExpression *E = new (ExpressionAllocator) VariableExpression(V);
   E->setOpcode(V->getValueID());
+  E->setUsedEquivalence(UsedEquivalence);
   E = cast<VariableExpression>(uniquifyExpression(E));
   return E;
 }
 
 Expression *NewGVN::createVariableOrConstant(Value *V, BasicBlock *B) {
-  Value *LeaderVal = lookupOperandLeader(V, B);
-  if (Constant *C = dyn_cast<Constant>(LeaderVal))
-    return createConstantExpression(C);
-  return createVariableExpression(LeaderVal);
+  auto Leader = lookupOperandLeader(V, B);
+  if (Constant *C = dyn_cast<Constant>(Leader.first))
+    return createConstantExpression(C, Leader.second);
+  return createVariableExpression(Leader.first, Leader.second);
 }
 
-ConstantExpression *NewGVN::createConstantExpression(Constant *C) {
+ConstantExpression *NewGVN::createConstantExpression(Constant *C,
+                                                     bool UsedEquivalence) {
   ConstantExpression *E = new (ExpressionAllocator) ConstantExpression(C);
   E->setOpcode(C->getValueID());
+  E->setUsedEquivalence(UsedEquivalence);
   E = cast<ConstantExpression>(uniquifyExpression(E));
   return E;
 }
@@ -643,19 +669,21 @@ Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC,
 
 // lookupOperandLeader -- See if we have a congruence class and leader
 // for this operand, and if so, return it. Otherwise, return the
-// original operand
-Value *NewGVN::lookupOperandLeader(Value *V, BasicBlock *B) const {
+// original operand.  The second part of the return value is true if a
+// dominating equivalence is being returned.
+std::pair<Value *, bool> NewGVN::lookupOperandLeader(Value *V,
+                                                     BasicBlock *B) const {
   CongruenceClass *CC = ValueToClass.lookup(V);
   if (CC && (CC != InitialClass)) {
     Value *Equivalence = findDominatingEquivalent(CC, B);
     if (Equivalence) {
       DEBUG(dbgs() << "Found equivalence " << *Equivalence << " for value "
                    << *V << " in block " << getBlockName(B) << "\n");
-      return Equivalence;
+      return std::make_pair(Equivalence, true);
     }
-    return CC->leader;
+    return std::make_pair(CC->leader, false);
   }
-  return V;
+  return std::make_pair(V, false);
 }
 
 LoadExpression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *DA,
@@ -666,8 +694,10 @@ LoadExpression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *DA,
   E->setType(LI->getType());
   // Give store and loads same opcode so they value number together
   E->setOpcode(0);
-  Value *Operand = lookupOperandLeader(LI->getPointerOperand(), B);
-  E->args_push_back(Operand);
+  auto Operand = lookupOperandLeader(LI->getPointerOperand(), B);
+  E->args_push_back(Operand.first);
+  E->setUsedEquivalence(Operand.second);
+
   // TODO: Value number heap versions. We may be able to discover
   // things alias analysis can't on it's own (IE that a store and a
   // load have the same value, and thus, it isn't clobbering the load)
@@ -685,8 +715,9 @@ CoercibleLoadExpression *NewGVN::createCoercibleLoadExpression(LoadInst *LI,
   E->setType(LI->getType());
   // Give store and loads same opcode so they value number together
   E->setOpcode(0);
-  Value *Operand = lookupOperandLeader(LI->getPointerOperand(), B);
-  E->args_push_back(Operand);
+  auto Operand = lookupOperandLeader(LI->getPointerOperand(), B);
+  E->args_push_back(Operand.first);
+  E->setUsedEquivalence(Operand.second);
   // TODO: Value number heap versions. We may be able to discover
   // things alias analysis can't on it's own (IE that a store and a
   // load have the same value, and thus, it isn't clobbering the load)
@@ -701,8 +732,9 @@ StoreExpression *NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *DA,
   E->setType(SI->getType());
   // Give store and loads same opcode so they value number together
   E->setOpcode(0);
-  Value *Operand = lookupOperandLeader(SI->getPointerOperand(), B);
-  E->args_push_back(Operand);
+  auto Operand = lookupOperandLeader(SI->getPointerOperand(), B);
+  E->args_push_back(Operand.first);
+  E->setUsedEquivalence(Operand.second);
   // TODO: Value number heap versions. We may be able to discover
   // things alias analysis can't on it's own (IE that a store and a
   // load have the same value, and thus, it isn't clobbering the load)
@@ -879,9 +911,10 @@ Expression *NewGVN::performSymbolicLoadCoercion(LoadInst *LI,
                                                 BasicBlock *B) {
   Type *LoadType = LI->getType();
   if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
-    Value *LoadAddressLeader = lookupOperandLeader(LI->getPointerOperand(), B);
+    Value *LoadAddressLeader =
+        lookupOperandLeader(LI->getPointerOperand(), B).first;
     Value *StoreAddressLeader =
-        lookupOperandLeader(DepSI->getPointerOperand(), B);
+        lookupOperandLeader(DepSI->getPointerOperand(), B).first;
     Value *StoreVal = DepSI->getValueOperand();
     if (StoreVal->getType() == LoadType &&
         LoadAddressLeader == StoreAddressLeader) {
@@ -912,18 +945,18 @@ Expression *NewGVN::performSymbolicLoadCoercion(LoadInst *LI,
   // no
   // intervening stores, for example.
   else if (isa<AllocaInst>(DepInst) || isMallocLikeFn(DepInst, TLI))
-    return createConstantExpression(UndefValue::get(LoadType));
+    return createConstantExpression(UndefValue::get(LoadType), false);
 
   // If this load occurs either right after a lifetime begin,
   // then the loaded value is undefined.
   else if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(DepInst)) {
     if (II->getIntrinsicID() == Intrinsic::lifetime_start)
-      return createConstantExpression(UndefValue::get(LoadType));
+      return createConstantExpression(UndefValue::get(LoadType), false);
   }
   // If this load follows a calloc (which zero initializes memory),
   // then the loaded value is zero
   else if (isCallocLikeFn(DepInst, TLI)) {
-    return createConstantExpression(Constant::getNullValue(LoadType));
+    return createConstantExpression(Constant::getNullValue(LoadType), false);
   }
 
   return nullptr;
@@ -937,10 +970,11 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
   if (!LI->isSimple())
     return NULL;
 
-  Value *LoadAddressLeader = lookupOperandLeader(LI->getPointerOperand(), B);
+  Value *LoadAddressLeader =
+      lookupOperandLeader(LI->getPointerOperand(), B).first;
   // Load of undef is undef
   if (isa<UndefValue>(LoadAddressLeader))
-    return createConstantExpression(UndefValue::get(LI->getType()));
+    return createConstantExpression(UndefValue::get(LI->getType()), false);
 
   MemoryAccess *DefiningAccess = MSSAWalker->getClobberingMemoryAccess(I);
 
@@ -950,7 +984,7 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
       // If the defining instruction is not reachable, replace with
       // undef
       if (!ReachableBlocks.count(DefiningInst->getParent()))
-        return createConstantExpression(UndefValue::get(LI->getType()));
+        return createConstantExpression(UndefValue::get(LI->getType()), false);
       Expression *CoercionResult =
           performSymbolicLoadCoercion(LI, DefiningInst, DefiningAccess, B);
       if (CoercionResult)
@@ -1013,7 +1047,7 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
                  << "\n");
     E->deallocateArgs(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
-    return createConstantExpression(UndefValue::get(I->getType()));
+    return createConstantExpression(UndefValue::get(I->getType()), false);
   }
 
   Value *AllSameValue = E->Args[0];
@@ -1045,8 +1079,8 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
     E->deallocateArgs(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
     if (Constant *C = dyn_cast<Constant>(AllSameValue))
-      return createConstantExpression(C);
-    return createVariableExpression(AllSameValue);
+      return createConstantExpression(C, E->usedEquivalence());
+    return createVariableExpression(AllSameValue, E->usedEquivalence());
   }
   return E;
 }
@@ -1097,9 +1131,9 @@ Expression *NewGVN::performSymbolicAggrValueEvaluation(Instruction *I,
 Expression *NewGVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
   Expression *E = NULL;
   if (Constant *C = dyn_cast<Constant>(V))
-    E = createConstantExpression(C);
+    E = createConstantExpression(C, false);
   else if (isa<Argument>(V) || isa<GlobalVariable>(V)) {
-    E = createVariableExpression(V);
+    E = createVariableExpression(V, false);
   } else {
     // TODO: memory intrinsics
     Instruction *I = cast<Instruction>(V);
@@ -1545,13 +1579,6 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
         ++BI;
       }
       // Propagate the change downstream.
-      // TODO: I don't see how it's necessary to mark random
-      // downstream instructions as suddenly touched.  They should get
-      // propagated to in the normal course of business.  If we had
-      // predicates, this would make sense, since the predicates do
-      // not have use info, so you don't know which downstream
-      // instructions were inferred based on them (though that could
-      // be tracked)
       propagateChangeInEdge(To);
     }
   }
@@ -1561,9 +1588,9 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
 // switch, cmp, or whatever) and a block, see if we know some constant
 // value for it already
 Value *NewGVN::findConditionEquivalence(Value *Cond, BasicBlock *B) const {
-  Value *Result = lookupOperandLeader(Cond, B);
-  if (isa<Constant>(Result))
-    return Result;
+  auto Result = lookupOperandLeader(Cond, B);
+  if (isa<Constant>(Result.first))
+    return Result.first;
 
   return nullptr;
 }
@@ -1586,8 +1613,9 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
       } else if (isa<ConstantInt>(Cond)) {
         CondEvaluated = Cond;
       }
+    } else {
+      InvolvedInEquivalence.set(InstrDFS[TI]);
     }
-
     ConstantInt *CI;
     BasicBlock *TrueSucc = BR->getSuccessor(0);
     BasicBlock *FalseSucc = BR->getSuccessor(1);
@@ -1620,6 +1648,7 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
     Value *CondEvaluated = findConditionEquivalence(SwitchCond, B);
     // See if we were able to turn this switch statement into a constant
     if (CondEvaluated && isa<ConstantInt>(CondEvaluated)) {
+      InvolvedInEquivalence.set(InstrDFS[TI]);
       ConstantInt *CondVal = cast<ConstantInt>(CondEvaluated);
       // We should be able to get case value for this
       auto CaseVal = SI->findCaseValue(CondVal);
@@ -1649,41 +1678,79 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
   }
 }
 
-/// propagateChangeInEdge - Propagate a change in edge reachability
-// When we discover a new edge to an existing reachable block, that
-// can affect the value of blocks containing phi nodes downstream.
-// These blocks/instructions need to be marked for re-processing.
-//
-// However, it can *only* impact blocks that contain phi nodes, as
-// those are the only values that would be carried from multiple
-// incoming edges at once.
-//
-void NewGVN::propagateChangeInEdge(BasicBlock *Dest) {
-  // The algorithm states that you only need to touch blocks that are
-  // confluence nodes.  I also can't see why you would need to touch
-  // any instructions that aren't PHI nodes.  Because we don't use
-  // predicates right now, they are the ones whose value could have
-  // changed as a result of a new edge becoming live, and any changes
-  // to their value should propagate appropriately through the rest of
-  // the block.
-  DomTreeNode *DTN = DT->getNode(Dest);
-  // TODO(dannyb): This differs slightly from the published algorithm,
-  // verify it. The published algorithm touches all instructions, we
-  // only touch the phi nodes.  This is because there should be no
-  // other values that can *directly* change as a result of edge
-  // reachability. If the phi node ends up changing congruence classes,
-  // the users will be marked as touched anyway.  If we moved to using
-  // value inferencing, there are cases we may need to touch more than
-  // phi nodes.
-  for (auto D : depth_first(DTN)) {
-    BasicBlock *B = D->getBlock();
-    if (!UniquePredecessorBlocks.count(B)) {
-      for (auto &I : *B) {
-        if (!isa<PHINode>(&I))
+// Figure out and cache the dominated instruction range for this block. We do
+// this by doing a depth first search, and figuring out the min and the max of
+// the dominated instruction range.
+// On the way up, we cache the ranges for all the child blocks.
+
+std::pair<unsigned, unsigned>
+NewGVN::calculateDominatedInstRange(const DomTreeNode *DTN) {
+  SmallVector<std::pair<const DomTreeNode *, DomTreeNode::const_iterator>, 32>
+      WorkStack;
+  WorkStack.push_back(std::make_pair(DTN, DTN->begin()));
+  unsigned MaxSeen = 0;
+  while (!WorkStack.empty()) {
+    const auto &Back = WorkStack.back();
+    const DomTreeNode *Node = Back.first;
+    const auto ChildIt = Back.second;
+    auto Result = BlockInstRange.lookup(Node->getBlock());
+    MaxSeen = std::max(MaxSeen, Result.second);
+    // If we visited all of the children of this node, "recurse" back up the
+    // stack setting the ranges
+    if (ChildIt == Node->end()) {
+      auto Result = BlockInstRange.lookup(Node->getBlock());
+      DominatedInstRange[DTN] = std::make_pair(Result.first, MaxSeen);
+      WorkStack.pop_back();
+      if (WorkStack.empty())
+        return std::make_pair(Result.first, MaxSeen);
+    } else {
+      while (true) {
+        // Otherwise, recursively visit this child.
+        const DomTreeNode *Child = *ChildIt;
+        ++WorkStack.back().second;
+        const auto &LookupResult = DominatedInstRange.find(Child);
+        if (LookupResult == DominatedInstRange.end()) {
+          WorkStack.push_back(std::make_pair(Child, Child->begin()));
           break;
-        TouchedInstructions.set(InstrDFS[&I]);
+        } else {
+          // We already have calculated this subtree
+          MaxSeen = std::max(MaxSeen, LookupResult->second.second);
+        }
       }
     }
+  }
+  llvm_unreachable("Should have returned a value already");
+}
+
+/// propagateChangeInEdge - Propagate a change in edge reachability
+// When we discover a new edge to an existing reachable block, that
+// can affect the value of instructions that used equivalences.
+//
+void NewGVN::propagateChangeInEdge(BasicBlock *Dest) {
+  // Unlike, the published algorithm, we don't touch blocks because we aren't
+  // recomputing predicates.
+  // Instead, we touch all the instructions we dominate that were used in an
+  // equivalence, in case they changed.
+  // We incrementally compute the dominated instruction ranges, because doing it
+  // up front requires a DFS walk of the dominator tree that is a complete waste
+  // of time if no equivalences ever get seen.
+  // Note that we expect phi nodes in the Dest block will have already been
+  // touched by our caller.
+  DomTreeNode *DTN = DT->getNode(Dest);
+
+  const auto &DominatedRange = DominatedInstRange.find(DTN);
+  std::pair<unsigned, unsigned> Result;
+  if (DominatedRange == DominatedInstRange.end()) {
+    Result = calculateDominatedInstRange(DTN);
+  } else
+    Result = DominatedRange->second;
+
+  // Touch all the downstream dominated instructions that used equivalences.
+  for (int InstrNum = InvolvedInEquivalence.find_next(Result.first - 1);
+       InstrNum != -1 && (Result.second - InstrNum > 0);
+       InstrNum = InvolvedInEquivalence.find_next(InstrNum)) {
+    // TODO: We could do confluence block checks here.
+    TouchedInstructions.set(InstrNum);
   }
 }
 
@@ -1732,26 +1799,28 @@ void NewGVN::cleanupTables() {
   DFSBBMap.clear();
   InstrDFS.clear();
   InstructionsToErase.clear();
-  UniquePredecessorBlocks.clear();
+  ConfluenceBlocks.clear();
   DFSToInstr.clear();
   BlockInstRange.clear();
   TouchedInstructions.clear();
+  InvolvedInEquivalence.clear();
   CoercionInfo.clear();
   CoercionForwarding.clear();
+  DominatedInstRange.clear();
 }
 
 std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
                                                        unsigned Start) {
-  unsigned int Count = Start;
+  unsigned int End = Start;
   for (auto &I : *B) {
-    InstrDFS[&I] = Count++;
+    InstrDFS[&I] = End++;
     DFSToInstr.emplace_back(&I);
   }
-  // All of the range functions taken half-open ranges (open on the
-  // end side), we adjust endcount by 1 here so that we can use
-  // standard looking loops to deal with the range, but note that
-  // the end here is *1 past the real end*
-  return std::make_pair(Start, Count);
+  // All of the range functions taken half-open ranges (open on the end side).
+  // So we do not subtract one from count, because at this point it is one
+  // greater than the last instruction.
+
+  return std::make_pair(Start, End);
 }
 
 /// runOnFunction - This is the main transformation entry point for a
@@ -1771,11 +1840,12 @@ bool NewGVN::runOnFunction(Function &F) {
   MSSAWalker = new CachingMemorySSAWalker(MSSA, AA);
   MSSA->buildMemorySSA(AA, DT, MSSAWalker);
 
-  unsigned int ICount = 0;
+  unsigned ICount = 0;
   // Count number of instructions for sizing of hash tables, and come
   // up with a global dfs numbering for instructions
-  ReversePostOrderTraversal<Function *> rpoT(&F);
-  for (auto &B : rpoT) {
+
+  for (auto DTN : depth_first(DT->getRootNode())) {
+    BasicBlock *B = DTN->getBlock();
     const auto &BlockRange = assignDFSNumbers(B, ICount);
     BlockInstRange.insert(std::make_pair(B, BlockRange));
     ICount += BlockRange.second - BlockRange.first;
@@ -1790,11 +1860,12 @@ bool NewGVN::runOnFunction(Function &F) {
       const auto &BlockRange = assignDFSNumbers(&B, ICount);
       BlockInstRange.insert(std::make_pair(&B, BlockRange));
       ICount += BlockRange.second - BlockRange.first;
-    } else if (B.getUniquePredecessor())
-      UniquePredecessorBlocks.insert(&B);
+    } else if (B.getUniquePredecessor() == nullptr)
+      ConfluenceBlocks.insert(&B);
   }
 
   TouchedInstructions.resize(ICount + 1);
+  InvolvedInEquivalence.resize(ICount + 1);
 
   // Ensure we don't end up resizing the expressionToClass map, as
   // that can be quite expensive. At most, we have one expression per
@@ -1865,6 +1936,8 @@ bool NewGVN::runOnFunction(Function &F) {
 #endif
       if (!I->isTerminator()) {
         Expression *Symbolized = performSymbolicEvaluation(I, CurrBlock);
+        if (Symbolized && Symbolized->usedEquivalence())
+          InvolvedInEquivalence.set(InstrDFS[I]);
         performCongruenceFinding(I, Symbolized);
       } else {
         processOutgoingEdges(dyn_cast<TerminatorInst>(I), CurrBlock);
