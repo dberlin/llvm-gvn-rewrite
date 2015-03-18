@@ -51,6 +51,7 @@ private:
 protected:
   ExpressionType EType;
   unsigned int Opcode;
+  bool UsedEquivalence;
 
 public:
   unsigned int getOpcode() const { return Opcode; }
@@ -61,9 +62,10 @@ public:
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const Expression *) { return true; }
 
-  Expression(unsigned int o = ~2U) : EType(ExpressionTypeBase), Opcode(o) {}
+  Expression(unsigned int o = ~2U)
+      : EType(ExpressionTypeBase), Opcode(o), UsedEquivalence(false) {}
   Expression(ExpressionType etype, unsigned int o = ~2U)
-      : EType(etype), Opcode(o) {}
+      : EType(etype), Opcode(o), UsedEquivalence(false) {}
 
   virtual ~Expression() {}
 
@@ -76,14 +78,19 @@ public:
       return false;
     return equals(Other);
   }
+  bool usedEquivalence() const { return UsedEquivalence; }
+  void setUsedEquivalence(bool V) { UsedEquivalence = V; }
 
   virtual bool equals(const Expression &other) const { return true; }
 
-  virtual hash_code getHashValue() const { return hash_combine(EType, Opcode); }
+  virtual hash_code getHashValue() const {
+    return hash_combine(EType, Opcode, UsedEquivalence);
+  }
   virtual void printInternal(raw_ostream &OS, bool printEType) {
     if (printEType)
       OS << "etype = " << EType << ",";
     OS << "opcode = " << Opcode << ", ";
+    OS << "UsedEquivalence = " << UsedEquivalence << ", ";
   }
 
   void print(raw_ostream &OS) {
