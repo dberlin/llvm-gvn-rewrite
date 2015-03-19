@@ -15,7 +15,6 @@
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
-#include "llvm/ADT/UniqueVector.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/IR/AssemblyAnnotationWriter.h"
@@ -28,7 +27,6 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PatternMatch.h"
-#include "llvm/Support/Allocator.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FormattedStream.h"
@@ -169,8 +167,9 @@ void MemorySSA::determineInsertionPoint(
       Accesses = new std::list<MemoryAccess *>;
       BlockAccesses.insert(std::make_pair(BB, Accesses));
     }
-    MemoryPhi *Phi = new (MemoryAccessAllocator)
-        MemoryPhi(BB, std::distance(pred_begin(BB), pred_end(BB)), nextID++);
+    MemoryPhi *Phi = new MemoryPhi(
+        BB, std::distance(pred_begin(BB), pred_end(BB)), nextID++);
+    AllAccesses.push_back(Phi);
     InstructionToMemoryAccess.insert(std::make_pair(BB, Phi));
     // Phi goes first
     Accesses->push_front(Phi);
@@ -183,7 +182,7 @@ void MemorySSA::determineInsertionPoint(
 void MemorySSA::renamePass(BasicBlock *BB, BasicBlock *Pred,
                            MemoryAccess *IncomingVal, AccessMap &BlockAccesses,
                            std::vector<RenamePassData> &Worklist,
-                           SmallPtrSet<BasicBlock *, 16> &Visited, UseMap &Uses,
+                           SmallPtrSet<BasicBlock *, 16> &Visited,
                            MemorySSAWalker *Walker) {
 NextIteration:
   auto Accesses = BlockAccesses.lookup(BB);
@@ -195,7 +194,6 @@ NextIteration:
     assert(NumEdges && "Must be at least one edge from Pred to BB!");
     for (unsigned i = 0; i != NumEdges; ++i)
       Phi->addIncoming(IncomingVal, Pred);
-    addUseToMap(Uses, IncomingVal, Phi);
 
     IncomingVal = Phi;
   }
@@ -215,7 +213,6 @@ NextIteration:
         MU->setDefiningAccess(IncomingVal);
         auto RealVal = Walker->getClobberingMemoryAccess(MU->getMemoryInst());
         MU->setDefiningAccess(RealVal);
-        addUseToMap(Uses, RealVal, MU);
       } else if (MemoryDef *MD = dyn_cast<MemoryDef>(L)) {
         MD->setDefiningAccess(IncomingVal);
         auto RealVal = Walker->getClobberingMemoryAccess(MD->getMemoryInst());
@@ -223,7 +220,6 @@ NextIteration:
           RealVal = IncomingVal;
 
         MD->setDefiningAccess(RealVal);
-        addUseToMap(Uses, RealVal, MD);
         IncomingVal = MD;
       }
     }
@@ -268,7 +264,7 @@ void MemorySSA::computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels) {
 // unreachable blocks, and marking all other unreachable
 // memoryaccesses as being uses of the live on entry definition
 void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
-                                             BasicBlock *BB, UseMap &Uses) {
+                                             BasicBlock *BB) {
   assert(!DT->isReachableFromEntry(BB) &&
          "Reachable block found while handling unreachable blocks");
 
@@ -285,10 +281,8 @@ void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
       Accesses->erase(AI);
     } else if (MemoryUse *U = dyn_cast<MemoryUse>(*AI)) {
       U->setDefiningAccess(LiveOnEntryDef);
-      addUseToMap(Uses, LiveOnEntryDef, U);
     } else if (MemoryDef *D = dyn_cast<MemoryDef>(*AI)) {
       D->setDefiningAccess(LiveOnEntryDef);
-      addUseToMap(Uses, LiveOnEntryDef, D);
     }
     AI = Next;
   }
@@ -299,31 +293,9 @@ MemorySSA::MemorySSA(Function &Func)
 
 MemorySSA::~MemorySSA() {
   InstructionToMemoryAccess.clear();
-  MemoryAccessAllocator.Reset();
-}
-
-void MemorySSA::addUseToMap(UseMap &Uses, MemoryAccess *User,
-                            MemoryAccess *Use) {
-  std::list<MemoryAccess *> *UseList;
-  UseList = Uses.lookup(User);
-  if (!UseList) {
-    UseList = new std::list<MemoryAccess *>;
-    Uses.insert(std::make_pair(User, UseList));
-  }
-
-  UseList->push_back(Use);
-}
-
-// Build the actual use lists out of the use map
-void MemorySSA::addUses(UseMap &Uses) {
-  for (auto &D : Uses) {
-    std::list<MemoryAccess *> *UseList = D.second;
-    MemoryAccess *User = D.first;
-    User->UseList =
-        MemoryAccessAllocator.Allocate<MemoryAccess *>(UseList->size());
-    for (auto &U : *UseList)
-      User->addUse(U);
-  }
+  for (auto MA : AllAccesses)
+    delete MA;
+  AllAccesses.clear();
 }
 
 void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
@@ -339,8 +311,8 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
   // arguments or users of globals. We do not actually insert it in to
   // the IR.
   BasicBlock &StartingPoint = F.getEntryBlock();
-  LiveOnEntryDef = new (MemoryAccessAllocator)
-      MemoryDef(nullptr, nullptr, &StartingPoint, nextID++);
+  LiveOnEntryDef = new MemoryDef(nullptr, nullptr, &StartingPoint, nextID++);
+  AllAccesses.push_back(LiveOnEntryDef);
 
   // We temporarily maintain lists of memory accesses per-block,
   // trading time for memory. We could just look up the memory access
@@ -370,7 +342,8 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
 
       // Defs are already uses, so use && def == def
       if (use && !def) {
-        MemoryUse *MU = new (MemoryAccessAllocator) MemoryUse(nullptr, &I, &B);
+        MemoryUse *MU = new MemoryUse(nullptr, &I, &B);
+        AllAccesses.push_back(MU);
         InstructionToMemoryAccess.insert(std::make_pair(&I, MU));
         if (!Accesses) {
           Accesses = new std::list<MemoryAccess *>;
@@ -379,8 +352,8 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
         Accesses->push_back(MU);
       }
       if (def) {
-        MemoryDef *MD =
-            new (MemoryAccessAllocator) MemoryDef(nullptr, &I, &B, nextID++);
+        MemoryDef *MD = new MemoryDef(nullptr, &I, &B, nextID++);
+        AllAccesses.push_back(MD);
         InstructionToMemoryAccess.insert(std::make_pair(&I, MD));
         DefiningBlocks.insert(&B);
         if (!Accesses) {
@@ -397,13 +370,6 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
   // Now do regular SSA renaming
   SmallPtrSet<BasicBlock *, 16> Visited;
 
-  // Uses are allocated and built once for a memory access, then are
-  // immutable. In order to count how many we need for a given memory
-  // access, we first add all the uses to lists in a densemap, then
-  // later we will convert it into an array and place it in the right
-  // place
-  UseMap Uses;
-
   std::vector<RenamePassData> RenamePassWorklist;
   RenamePassWorklist.push_back({F.begin(), nullptr, LiveOnEntryDef});
   do {
@@ -411,7 +377,7 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
     RPD.swap(RenamePassWorklist.back());
     RenamePassWorklist.pop_back();
     renamePass(RPD.BB, RPD.Pred, RPD.MA, PerBlockAccesses, RenamePassWorklist,
-               Visited, Uses, Walker);
+               Visited, Walker);
   } while (!RenamePassWorklist.empty());
 
   // At this point, we may have unreachable blocks with unreachable accesses
@@ -419,27 +385,13 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
   if (Visited.size() != F.size()) {
     for (auto &B : F)
       if (!Visited.count(&B))
-        markUnreachableAsLiveOnEntry(PerBlockAccesses, &B, Uses);
+        markUnreachableAsLiveOnEntry(PerBlockAccesses, &B);
   }
-
-  // Now convert our use lists into real uses
-  addUses(Uses);
 
   // Delete our access lists
   for (auto &D : PerBlockAccesses)
     delete D.second;
 
-  // Densemap does not like when you delete or change the value during
-  // iteration.
-  std::vector<std::list<MemoryAccess *> *> UseListsToDelete;
-  for (auto &D : Uses)
-    UseListsToDelete.push_back(D.second);
-
-  Uses.clear();
-  for (unsigned i = 0, e = UseListsToDelete.size(); i != e; ++i) {
-    delete UseListsToDelete[i];
-    UseListsToDelete[i] = nullptr;
-  }
   builtAlready = true;
 }
 
@@ -514,8 +466,7 @@ void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
            "Null def but use not point to live on entry def");
     return;
   }
-  assert(std::find(Def->use_begin(), Def->use_end(), Use) != Def->use_end() &&
-         "Did not find use in def's use list");
+  assert(!Def->findUse(Use) && "Did not find use in def's use list");
 }
 
 // Verify the immediate use information, by walking all the memory
