@@ -1004,15 +1004,25 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
           BasicBlock *DefiningBlock = DefiningInst->getParent();
           if (!DT->dominates(DefiningBlock, LoadBlock))
             continue;
+
           // Make sure the dependent load comes before the load we are trying
           // to coerce if they are in the same block
           if (InstrDFS[DepLI] >= InstrDFS[LI])
             continue;
-          int Offset = analyzeLoadFromClobberingLoad(
-              LI->getType(), LI->getPointerOperand(), DepLI);
-          if (Offset >= 0)
-            return createCoercibleLoadExpression(LI, DefiningAccess,
-                                                 (unsigned)Offset, DepLI, B);
+
+          // Now, first make sure they really aren't identical loads, and if
+          // they aren't see if the dominating one can be coerced.
+          // We don't want to mark identical loads coercible, since coercible
+          // loads don't value number with normal loads.
+          if (LI->getType() != DepLI->getType() ||
+              (lookupOperandLeader(DepLI->getPointerOperand(), B).first !=
+               LoadAddressLeader)) {
+            int Offset = analyzeLoadFromClobberingLoad(
+                LI->getType(), LI->getPointerOperand(), DepLI);
+            if (Offset >= 0)
+              return createCoercibleLoadExpression(LI, DefiningAccess,
+                                                   (unsigned)Offset, DepLI, B);
+          }
         }
       }
     }
