@@ -1344,7 +1344,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
     // then also propagate the equality A == B.  When propagating a
     // comparison such as "(A >= B)" == "true", replace all instances
     // of "A < B" with "false".
-    if (ICmpInst *Cmp = dyn_cast<ICmpInst>(LHS)) {
+    if (CmpInst *Cmp = dyn_cast<ICmpInst>(LHS)) {
       Value *Op0 = Cmp->getOperand(0), *Op1 = Cmp->getOperand(1);
 
       // If "A == B" is known true, or "A != B" is known false, then replace
@@ -1930,6 +1930,8 @@ bool NewGVN::runOnFunction(Function &F) {
       DEBUG(dbgs() << "Processing instruction " << *I << "\n");
       if (I->use_empty() && !I->getType()->isVoidTy()) {
         DEBUG(dbgs() << "Skipping unused instruction\n");
+        if (isInstructionTriviallyDead(I, TLI))
+          markInstructionForDeletion(I);
         continue;
       }
 
@@ -2377,11 +2379,11 @@ Value *NewGVN::getStoreValueForLoad(Value *SrcVal, unsigned Offset,
 
   IRBuilder<> Builder(InsertPt->getParent(), InsertPt);
 
-  // Compute which bits of the stored value are being used by the load.
-  // Convert
+  // Compute which bits of the stored value are being used by the load.  Convert
   // to an integer type to start with.
-  if (SrcVal->getType()->isPointerTy()) {
-    SrcVal = Builder.CreatePtrToInt(SrcVal, DL->getIntPtrType(Ctx));
+  if (SrcVal->getType()->getScalarType()->isPointerTy()) {
+    SrcVal =
+        Builder.CreatePtrToInt(SrcVal, DL->getIntPtrType(SrcVal->getType()));
     if (Instruction *I = dyn_cast<Instruction>(SrcVal))
       handleNewInstruction(I);
   }
@@ -2785,7 +2787,12 @@ bool NewGVN::eliminateInstructions(Function &F) {
           if (Instruction *Original = dyn_cast<Instruction>(Result))
             patchReplacementInstruction(Original, MemberUse->getUser());
           assert(isa<Instruction>(MemberUse->getUser()));
+          Value *OldVal = MemberUse->get();
           MemberUse->set(Result);
+          // If we are out of uses for this old instruction, get rid of it
+          if (Instruction *OldInst = dyn_cast<Instruction>(OldVal))
+            if (isInstructionTriviallyDead(OldInst, TLI))
+              markInstructionForDeletion(OldInst);
         }
       }
     }
