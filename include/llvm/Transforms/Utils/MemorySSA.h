@@ -68,8 +68,6 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/UniqueVector.h"
-#include "llvm/Support/Allocator.h"
 #include "llvm/Pass.h"
 #include <list>
 namespace llvm {
@@ -92,14 +90,18 @@ public:
 
   virtual void print(raw_ostream &OS) {}
 
-  typedef MemoryAccess **iterator;
-  typedef MemoryAccess **const const_iterator;
+  typedef SmallPtrSet<MemoryAccess *, 8> UseListType;
+  typedef UseListType::iterator iterator;
+  typedef UseListType::const_iterator const_iterator;
 
-  // The use list is immutable because it is allocated in a
-  // BumpPtrAllocator
+  iterator use_begin() { return Uses.begin(); }
+  iterator use_end() { return Uses.end(); }
+  iterator_range<iterator> uses() {
+    return iterator_range<iterator>(use_begin(), use_end());
+  }
 
-  const_iterator use_begin() const { return UseList; }
-  const_iterator use_end() const { return UseList + NumUses; }
+  const_iterator use_begin() const { return Uses.begin(); }
+  const_iterator use_end() const { return Uses.end(); }
   iterator_range<const_iterator> uses() const {
     return iterator_range<const_iterator>(use_begin(), use_end());
   }
@@ -108,18 +110,22 @@ public:
 
 protected:
   friend class MemorySSA;
+  friend class MemoryUse;
+  friend class MemoryPhi;
+  
   // We automatically allocate the right amount of space
-  void addUse(MemoryAccess *Use) { UseList[NumUses++] = Use; }
-  MemoryAccess(AccessType AT, BasicBlock *BB)
-      : AccessType(AT), Block(BB), NumUses(0), UseList(nullptr) {}
+  void addUse(MemoryAccess *Use) { Uses.insert(Use); }
+  void removeUse(MemoryAccess *Use) { Uses.erase(Use); }
+  bool findUse(MemoryAccess *Use) { return Uses.count(Use); }
+
+  MemoryAccess(AccessType AT, BasicBlock *BB) : AccessType(AT), Block(BB) {}
 
 private:
   MemoryAccess(const MemoryAccess &);
   void operator=(const MemoryAccess &);
   AccessType AccessType;
   BasicBlock *Block;
-  unsigned int NumUses;
-  MemoryAccess **UseList;
+  UseListType Uses;
 };
 
 static inline raw_ostream &operator<<(raw_ostream &OS, MemoryAccess &MA) {
@@ -133,7 +139,13 @@ public:
       : MemoryUse(DMA, AccessUse, MI, BB) {}
 
   MemoryAccess *getDefiningAccess() const { return DefiningAccess; }
-  void setDefiningAccess(MemoryAccess *DMA) { DefiningAccess = DMA; }
+  void setDefiningAccess(MemoryAccess *DMA) {
+    if (DefiningAccess != DMA) {
+      if (DefiningAccess) DefiningAccess->removeUse(this);
+      if (DMA) DMA->addUse(this);
+    }
+    DefiningAccess = DMA;
+  }
   Instruction *getMemoryInst() const { return MemoryInst; }
   void setMemoryInst(Instruction *MI) { MemoryInst = MI; }
 
@@ -197,6 +209,7 @@ public:
   unsigned int getNumIncomingValues() { return Args.size(); }
   void addIncoming(MemoryAccess *MA, BasicBlock *BB) {
     Args.push_back(std::make_pair(BB, MA));
+    MA->addUse(this);
   }
   void setIncomingValue(unsigned int v, MemoryAccess *MA) {
     std::pair<BasicBlock *, MemoryAccess *> &Val = Args[v];
@@ -250,13 +263,13 @@ private:
 
   // Memory SSA mappings
   DenseMap<const Value *, MemoryAccess *> InstructionToMemoryAccess;
-  UniqueVector<const MemoryAccess *> AccessToId;
 
   // Memory SSA building info
   typedef DenseMap<BasicBlock *, std::list<MemoryAccess *> *> AccessMap;
   MemoryAccess *LiveOnEntryDef;
   unsigned int nextID;
   bool builtAlready;
+  std::vector<MemoryAccess *> AllAccesses;
 
 public:
   MemorySSA(Function &);
@@ -287,7 +300,6 @@ protected:
 
 private:
   void verifyUseInDefs(MemoryAccess *, MemoryAccess *);
-  typedef DenseMap<MemoryAccess *, std::list<MemoryAccess *> *> UseMap;
 
   void
   determineInsertionPoint(Function &F, AccessMap &BlockAccesses,
@@ -295,10 +307,7 @@ private:
   void computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels);
   void computeBBNumbers(Function &F,
                         DenseMap<BasicBlock *, unsigned> &BBNumbers);
-  void markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses, BasicBlock *BB,
-                                    UseMap &Uses);
-  void addUses(UseMap &Uses);
-  void addUseToMap(UseMap &, MemoryAccess *, MemoryAccess *);
+  void markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses, BasicBlock *BB);
 
   struct RenamePassData {
     BasicBlock *BB;
@@ -319,8 +328,7 @@ private:
   void renamePass(BasicBlock *BB, BasicBlock *Pred, MemoryAccess *IncomingVal,
                   AccessMap &BlockAccesses,
                   std::vector<RenamePassData> &Worklist,
-                  SmallPtrSet<BasicBlock *, 16> &Visited, UseMap &Uses,
-                  MemorySSAWalker *);
+                  SmallPtrSet<BasicBlock *, 16> &Visited, MemorySSAWalker *);
 };
 
 // This pass does eager building of MemorySSA. It is used by the tests to be
