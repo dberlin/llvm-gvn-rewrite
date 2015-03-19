@@ -111,7 +111,7 @@ struct CongruenceClass {
   // in particular, we can eliminate one in favor of a dominating one.
   MemberSet coercible_members;
 
-  typedef DenseSet<std::pair<Value *, BasicBlock *>> EquivalenceSet;
+  typedef std::list<std::pair<Value *, BasicBlock *>> EquivalenceSet;
 
   // Noted equivalences.  These are things that are equivalence to
   // this class over certain paths.  This could be replaced with
@@ -172,9 +172,9 @@ class NewGVN : public FunctionPass {
   // occurring as often.
   ExpressionClassMap MemoryExpressionToClass;
   DenseSet<Expression *, ComparingExpressionInfo> UniquedExpressions;
-  DenseSet<Value *> ChangedValues;
-  DenseSet<std::pair<BasicBlock *, BasicBlock *>> ReachableEdges;
-  DenseSet<const BasicBlock *> ReachableBlocks;
+  SmallPtrSet<Value *, 8> ChangedValues;
+  SmallSet<std::pair<BasicBlock *, BasicBlock *>, 8> ReachableEdges;
+  SmallPtrSet<const BasicBlock *, 8> ReachableBlocks;
   // This is a bitvector because, on larger functions, we may have
   // thousands of touched instructions at once (entire blocks,
   // instructions with hundreds of uses, etc).  Even with optimization
@@ -191,7 +191,7 @@ class NewGVN : public FunctionPass {
   DenseMap<const BasicBlock *, std::pair<unsigned, unsigned>> BlockInstRange;
   DenseMap<const DomTreeNode *, std::pair<unsigned, unsigned>>
       DominatedInstRange;
-  DenseSet<const BasicBlock *> ConfluenceBlocks;
+  SmallPtrSet<const BasicBlock *, 16> ConfluenceBlocks;
   DenseMap<const Instruction *, unsigned> ProcessedCount;
   DenseMap<const BasicBlock *, unsigned> ProcessedBlockCount;
   CongruenceClass *InitialClass;
@@ -1292,7 +1292,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
     // 'RHS' within the scope Root.
     CongruenceClass *CC = ValueToClass[LHS];
     assert(CC && "Should have found a congruence class");
-    CC->equivalences.insert(std::make_pair(RHS, Root));
+    CC->equivalences.push_back(std::make_pair(RHS, Root));
 
     // Replace all occurrences of 'LHS' with 'RHS' everywhere in the
     // scope.  As LHS always has at least one use that is not
@@ -1393,7 +1393,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
         // Ensure that any instruction in scope that gets the "A < B"
         // value number is replaced with false.
 
-        CC->equivalences.insert(std::make_pair(NotVal, Root));
+        CC->equivalences.push_back(std::make_pair(NotVal, Root));
       }
       // TODO: Equality propagation - do equivalent of this
       // The problem in our world is that if nothing has this value
