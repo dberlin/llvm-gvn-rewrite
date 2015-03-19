@@ -112,8 +112,7 @@ protected:
   friend class MemorySSA;
   friend class MemoryUse;
   friend class MemoryPhi;
-  
-  // We automatically allocate the right amount of space
+
   void addUse(MemoryAccess *Use) { Uses.insert(Use); }
   void removeUse(MemoryAccess *Use) { Uses.erase(Use); }
   bool findUse(MemoryAccess *Use) { return Uses.count(Use); }
@@ -141,8 +140,10 @@ public:
   MemoryAccess *getDefiningAccess() const { return DefiningAccess; }
   void setDefiningAccess(MemoryAccess *DMA) {
     if (DefiningAccess != DMA) {
-      if (DefiningAccess) DefiningAccess->removeUse(this);
-      if (DMA) DMA->addUse(this);
+      if (DefiningAccess)
+        DefiningAccess->removeUse(this);
+      if (DMA)
+        DMA->addUse(this);
     }
     DefiningAccess = DMA;
   }
@@ -213,7 +214,24 @@ public:
   }
   void setIncomingValue(unsigned int v, MemoryAccess *MA) {
     std::pair<BasicBlock *, MemoryAccess *> &Val = Args[v];
-    Val.second = MA;
+    // So, if we are making a change, and it's not from null, we have to search
+    // the arg list to make sure our old doesn't exist elsewhere, or else we
+    // will remove a use when we shouldn't
+    if (Val.second != MA) {
+      if (Val.second) {
+        bool existsElsewhere = false;
+        for (unsigned i = 0, e = NumPreds; i != e; ++i) {
+          if (i == v)
+            continue;
+          if (Args[i].second == Val.second)
+            existsElsewhere = true;
+        }
+        if (!existsElsewhere)
+          Val.second->removeUse(this);
+      }
+      MA->addUse(this);
+      Val.second = MA;
+    }
   }
   MemoryAccess *getIncomingValue(unsigned int v) { return Args[v].second; }
   void setIncomingBlock(unsigned int v, BasicBlock *BB) {
