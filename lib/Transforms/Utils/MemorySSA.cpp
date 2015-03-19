@@ -73,16 +73,6 @@ public:
 };
 }
 
-// We need a unique numbering for each BB.
-
-void MemorySSA::computeBBNumbers(Function &F,
-                                 DenseMap<BasicBlock *, unsigned> &BBNumbers) {
-  // Assign unique ids to basic blocks
-  unsigned ID = 0;
-  for (auto &I : F)
-    BBNumbers[&I] = ID++;
-}
-
 // This is the same algorithm as PromoteMemoryToRegister's phi
 // placement algorithm.
 
@@ -92,9 +82,6 @@ void MemorySSA::determineInsertionPoint(
   // Compute dominator levels and BB numbers
   DenseMap<DomTreeNode *, unsigned> DomLevels;
   computeDomLevels(DomLevels);
-
-  DenseMap<BasicBlock *, unsigned> BBNumbers;
-  computeBBNumbers(F, BBNumbers);
 
   // Use a priority queue keyed on dominator tree level so that inserted nodes
   // are handled from the bottom of the dominator tree upwards.
@@ -108,7 +95,7 @@ void MemorySSA::determineInsertionPoint(
       PQ.push(std::make_pair(Node, DomLevels[Node]));
   }
 
-  SmallVector<std::pair<unsigned, BasicBlock *>, 32> DFBlocks;
+  SmallVector<BasicBlock *, 32> DFBlocks;
   SmallPtrSet<DomTreeNode *, 32> Visited;
   SmallVector<DomTreeNode *, 32> Worklist;
   while (!PQ.empty()) {
@@ -146,7 +133,7 @@ void MemorySSA::determineInsertionPoint(
 
         BasicBlock *SuccBB = SuccNode->getBlock();
 
-        DFBlocks.push_back(std::make_pair(BBNumbers[SuccBB], SuccBB));
+        DFBlocks.push_back(SuccBB);
         if (!DefBlocks.count(SuccBB))
           PQ.push(std::make_pair(SuccNode, SuccLevel));
       }
@@ -157,11 +144,8 @@ void MemorySSA::determineInsertionPoint(
     }
   }
 
-  if (DFBlocks.size() > 1)
-    std::sort(DFBlocks.begin(), DFBlocks.end());
-  for (unsigned i = 0, e = DFBlocks.size(); i != e; ++i) {
+  for (auto &BB : DFBlocks) {
     // Insert phi node
-    BasicBlock *BB = DFBlocks[i].second;
     auto Accesses = BlockAccesses.lookup(BB);
     if (!Accesses) {
       Accesses = new std::list<MemoryAccess *>;
