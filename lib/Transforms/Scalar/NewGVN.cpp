@@ -173,7 +173,7 @@ class NewGVN : public FunctionPass {
   ExpressionClassMap MemoryExpressionToClass;
   DenseSet<Expression *, ComparingExpressionInfo> UniquedExpressions;
   SmallPtrSet<Value *, 8> ChangedValues;
-  SmallSet<std::pair<BasicBlock *, BasicBlock *>, 8> ReachableEdges;
+  DenseSet<std::pair<BasicBlock *, BasicBlock *>> ReachableEdges;
   SmallPtrSet<const BasicBlock *, 8> ReachableBlocks;
   // This is a bitvector because, on larger functions, we may have
   // thousands of touched instructions at once (entire blocks,
@@ -1692,7 +1692,7 @@ NewGVN::calculateDominatedInstRange(const DomTreeNode *DTN) {
   while (!WorkStack.empty()) {
     const auto &Back = WorkStack.back();
     const DomTreeNode *Node = Back.first;
-    const auto ChildIt = Back.second;
+    auto ChildIt = Back.second;
     auto Result = BlockInstRange.lookup(Node->getBlock());
     MaxSeen = std::max(MaxSeen, Result.second);
     // If we visited all of the children of this node, "recurse" back up the
@@ -1704,7 +1704,7 @@ NewGVN::calculateDominatedInstRange(const DomTreeNode *DTN) {
       if (WorkStack.empty())
         return std::make_pair(Result.first, MaxSeen);
     } else {
-      while (true) {
+      while (ChildIt != Node->end()) {
         // Otherwise, recursively visit this child.
         const DomTreeNode *Child = *ChildIt;
         ++WorkStack.back().second;
@@ -1715,6 +1715,7 @@ NewGVN::calculateDominatedInstRange(const DomTreeNode *DTN) {
         } else {
           // We already have calculated this subtree
           MaxSeen = std::max(MaxSeen, LookupResult->second.second);
+          ++ChildIt;
         }
       }
     }
