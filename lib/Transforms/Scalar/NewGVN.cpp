@@ -165,6 +165,7 @@ class NewGVN : public FunctionPass {
       return *LHS == *RHS;
     }
   };
+
   struct expression_equal_to {
     bool operator()(const Expression *A, const Expression *B) const {
       if (A == B)
@@ -1554,10 +1555,14 @@ void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
       }
 
       // See if we have any pending equivalences for this class.
-      auto Pending = PendingEquivalences.equal_range(E);
-      for (auto PI = Pending.first, PE = Pending.second; PI != PE; ++PI)
-        EClass->equivalences.emplace_back(PI->second);
-      PendingEquivalences.erase(Pending.first, Pending.second);
+      // We should only end up with pending equivalences for comparison
+      // instructions.
+      if (E && isa<CmpInst>(V)) {
+        auto Pending = PendingEquivalences.equal_range(E);
+        for (auto PI = Pending.first, PE = Pending.second; PI != PE; ++PI)
+          EClass->equivalences.emplace_back(PI->second);
+        PendingEquivalences.erase(Pending.first, Pending.second);
+      }
 
       ValueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
