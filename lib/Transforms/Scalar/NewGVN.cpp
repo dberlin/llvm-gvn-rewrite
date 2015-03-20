@@ -23,9 +23,10 @@
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/PostOrderIterator.h"
-#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/CFG.h"
@@ -55,6 +56,8 @@
 #include "llvm/Transforms/Utils/MemorySSA.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
 #include <vector>
+#include <unordered_map>
+
 using namespace llvm;
 using namespace PatternMatch;
 using namespace llvm::GVNExpression;
@@ -153,7 +156,7 @@ class NewGVN : public FunctionPass {
     static unsigned getHashValue(const Expression *V) {
       return static_cast<unsigned>(V->getHashValue());
     }
-    static bool isEqual(Expression *LHS, const Expression *RHS) {
+    static bool isEqual(const Expression *LHS, const Expression *RHS) {
       if (LHS == RHS)
         return true;
       if (LHS == getTombstoneKey() || RHS == getTombstoneKey() ||
@@ -162,15 +165,28 @@ class NewGVN : public FunctionPass {
       return *LHS == *RHS;
     }
   };
+  struct expression_equal_to {
+    bool operator()(const Expression *A, const Expression *B) const {
+      if (A == B)
+        return true;
+      return *A == *B;
+    }
+  };
+  struct hash_expression {
+    size_t operator()(const Expression *A) const { return A->getHashValue(); }
+  };
+
+  std::unordered_multimap<Expression *, std::pair<Value *, BasicBlock *>,
+                          hash_expression,
+                          expression_equal_to> PendingEquivalences;
 
   typedef DenseMap<Expression *, CongruenceClass *, ComparingExpressionInfo>
       ExpressionClassMap;
-
   ExpressionClassMap ExpressionToClass;
-
   // We separate out the memory expressions to keep hashtable resizes from
   // occurring as often.
   ExpressionClassMap MemoryExpressionToClass;
+
   DenseSet<Expression *, ComparingExpressionInfo> UniquedExpressions;
   SmallPtrSet<Value *, 8> ChangedValues;
   DenseSet<std::pair<BasicBlock *, BasicBlock *>> ReachableEdges;
@@ -1302,7 +1318,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
     // 'RHS' within the scope Root.
     CongruenceClass *CC = ValueToClass[LHS];
     assert(CC && "Should have found a congruence class");
-    CC->equivalences.push_back(std::make_pair(RHS, Root));
+    CC->equivalences.emplace_back(RHS, Root);
 
     // Replace all occurrences of 'LHS' with 'RHS' everywhere in the
     // scope.  As LHS always has at least one use that is not
@@ -1386,8 +1402,8 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
       // split out of the class.
 
       CongruenceClass *CC = ExpressionToClass.lookup(E);
-      E->deallocateArgs(ArgRecycler);
-      ExpressionAllocator.Deallocate(E);
+      // E->deallocateArgs(ArgRecycler);
+      // ExpressionAllocator.Deallocate(E);
 
       // If we didn't find a congruence class, there is no equivalent
       // instruction already
@@ -1403,8 +1419,13 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS, BasicBlock *Root) {
         // Ensure that any instruction in scope that gets the "A < B"
         // value number is replaced with false.
 
-        CC->equivalences.push_back(std::make_pair(NotVal, Root));
+        CC->equivalences.emplace_back(NotVal, Root);
+      } else {
+        // Put this in pending equivalences so if an expression shows up, we'll
+        // add the equivalence
+        PendingEquivalences.emplace(E, std::make_pair(NotVal, Root));
       }
+
       // TODO: Equality propagation - do equivalent of this
       // The problem in our world is that if nothing has this value
       // and this expression never appears, we would end up with a
@@ -1531,6 +1552,12 @@ void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
         VClass->members.erase(V);
         EClass->members.insert(V);
       }
+
+      // See if we have any pending equivalences for this class.
+      auto Pending = PendingEquivalences.equal_range(E);
+      for (auto PI = Pending.first, PE = Pending.second; PI != PE; ++PI)
+        EClass->equivalences.emplace_back(PI->second);
+      PendingEquivalences.erase(Pending.first, Pending.second);
 
       ValueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
@@ -1697,7 +1724,7 @@ std::pair<unsigned, unsigned>
 NewGVN::calculateDominatedInstRange(const DomTreeNode *DTN) {
   SmallVector<std::pair<const DomTreeNode *, DomTreeNode::const_iterator>, 32>
       WorkStack;
-  WorkStack.push_back(std::make_pair(DTN, DTN->begin()));
+  WorkStack.emplace_back(DTN, DTN->begin());
   unsigned MaxSeen = 0;
   while (!WorkStack.empty()) {
     const auto &Back = WorkStack.back();
@@ -1720,7 +1747,7 @@ NewGVN::calculateDominatedInstRange(const DomTreeNode *DTN) {
         ++WorkStack.back().second;
         const auto &LookupResult = DominatedInstRange.find(Child);
         if (LookupResult == DominatedInstRange.end()) {
-          WorkStack.push_back(std::make_pair(Child, Child->begin()));
+          WorkStack.emplace_back(Child, Child->begin());
           break;
         } else {
           // We already have calculated this subtree
@@ -2067,7 +2094,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
     else
       llvm_unreachable("Should have been an instruction");
 
-    DFSOrderedSet.push_back(VD);
+    DFSOrderedSet.emplace_back(VD);
     // Now add the users
     for (auto &U : D->uses()) {
       if (Instruction *I = dyn_cast<Instruction>(U.getUser())) {
@@ -2090,7 +2117,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
         VD.DFSOut = DFSPair.second;
         VD.U = &U;
         VD.Val = nullptr;
-        DFSOrderedSet.push_back(VD);
+        DFSOrderedSet.emplace_back(VD);
       }
     }
   }
@@ -2117,7 +2144,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &Dense,
       VD.LocalNum = -1;
 
     VD.Val = D.first;
-    DFSOrderedSet.push_back(VD);
+    DFSOrderedSet.emplace_back(VD);
   }
 }
 static void patchReplacementInstruction(Instruction *I, Value *Repl) {
