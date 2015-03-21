@@ -1554,8 +1554,7 @@ void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
     if (isa<StoreExpression>(E) || isa<LoadExpression>(E))
       lookupMap = &MemoryExpressionToClass;
 
-    auto lookupResult =
-        lookupMap->insert(std::make_pair(E, (CongruenceClass *)NULL));
+    auto lookupResult = lookupMap->insert({E, nullptr});
 
     // If it's not in the value table, create a new congruence class
     if (lookupResult.second) {
@@ -1651,7 +1650,7 @@ void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
 // instructions for processing
 void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
   // Check if the Edge was reachable before
-  if (ReachableEdges.insert(std::make_pair(From, To)).second) {
+  if (ReachableEdges.insert({From, To}).second) {
     // If this block wasn't reachable before, all instructions are touched
     if (ReachableBlocks.insert(To).second) {
       DEBUG(dbgs() << "Block " << getBlockName(To) << " marked reachable\n");
@@ -1788,7 +1787,7 @@ NewGVN::calculateDominatedInstRange(const DomTreeNode *DTN) {
     // stack setting the ranges
     if (ChildIt == Node->end()) {
       auto Result = BlockInstRange.lookup(Node->getBlock());
-      DominatedInstRange[DTN] = std::make_pair(Result.first, MaxSeen);
+      DominatedInstRange[DTN] = {Result.first, MaxSeen};
       WorkStack.pop_back();
       if (WorkStack.empty())
         return std::make_pair(Result.first, MaxSeen);
@@ -1937,7 +1936,7 @@ bool NewGVN::runOnFunction(Function &F) {
   for (auto DTN : depth_first(DT->getRootNode())) {
     BasicBlock *B = DTN->getBlock();
     const auto &BlockRange = assignDFSNumbers(B, ICount);
-    BlockInstRange.insert(std::make_pair(B, BlockRange));
+    BlockInstRange.insert({B, BlockRange});
     ICount += BlockRange.second - BlockRange.first;
   }
 
@@ -1948,7 +1947,7 @@ bool NewGVN::runOnFunction(Function &F) {
     // Assign numbers to unreachable blocks
     if (&B != &F.getEntryBlock() && pred_empty(&B)) {
       const auto &BlockRange = assignDFSNumbers(&B, ICount);
-      BlockInstRange.insert(std::make_pair(&B, BlockRange));
+      BlockInstRange.insert({&B, BlockRange});
       ICount += BlockRange.second - BlockRange.first;
     } else if (B.getUniquePredecessor() == nullptr)
       ConfluenceBlocks.insert(&B);
@@ -1994,7 +1993,7 @@ bool NewGVN::runOnFunction(Function &F) {
         }
         // #ifndef NDEBUG
         if (ProcessedBlockCount.count(CurrBlock) == 0) {
-          ProcessedBlockCount.insert(std::make_pair(CurrBlock, 1));
+          ProcessedBlockCount.insert({CurrBlock, 1});
         } else {
           ProcessedBlockCount[CurrBlock] += 1;
           assert(ProcessedBlockCount[CurrBlock] < 100 &&
@@ -2019,7 +2018,7 @@ bool NewGVN::runOnFunction(Function &F) {
 
 #ifndef NDEBUG
       if (ProcessedCount.count(I) == 0) {
-        ProcessedCount.insert(std::make_pair(I, 1));
+        ProcessedCount.insert({I, 1});
       } else {
         ProcessedCount[I] += 1;
         assert(ProcessedCount[I] < 100 &&
@@ -2712,7 +2711,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
     DomTreeNode *DTN = DT->getNode(&B);
     if (!DTN)
       continue;
-    DFSBBMap[&B] = std::make_pair(DTN->getDFSNumIn(), DTN->getDFSNumOut());
+    DFSBBMap[&B] = {DTN->getDFSNumIn(), DTN->getDFSNumOut()};
   }
 
   for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
@@ -2813,7 +2812,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
                          << EliminationStack.dfs_back().second << ")\n");
           }
           //          if (Member && isa<Constant>(Member))
-            assert(isa<Constant>(CC->leader) || EquivalenceOnly);
+          assert(isa<Constant>(CC->leader) || EquivalenceOnly);
 
           DEBUG(dbgs() << "Current DFS numbers are (" << MemberDFSIn << ","
                        << MemberDFSOut << ")\n");
@@ -2882,36 +2881,3 @@ bool NewGVN::eliminateInstructions(Function &F) {
 
   return true;
 }
-
-
-class ControlEquivalence 
-{
-public:
-  ControlEquivalence(Function &Func) : F(Func), DFSNumber(0), ClassNumber(1),
-                                       NodeData(F.size()) 
-  {
-  }
-private:
-  struct ControlNodeData {
-    // Equivalence class number assigned to node.
-    size_t ClassNumber;
-    // Pre-order DFS number assigned to node.
-    size_t DFSNumber;
-    // Indicates node has already been visited.
-    bool Visited;
-    // Indicates node is on DFS stack during walk.
-    bool OnStack;
-    // Indicates node participates in DFS walk.
-    bool Participates;
-     // List of brackets per node.
-    BracketList Blist;   
-  };
-
-
-  Function &F;
-  unsigned DFSNumber;
-  unsigned ClassNumber;
-  DenseMap<BasicBlock *, ControlNodeData> NodeData;
-};
-
-  
