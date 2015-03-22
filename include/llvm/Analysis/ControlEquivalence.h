@@ -14,6 +14,7 @@
 #define LLVM_ANALYSIS_CONTROLEQUIVALENCE_H
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Function.h"
 #include "llvm/Pass.h"
@@ -35,7 +36,7 @@ class BasicBlock;
 // numbers in the algorithm from figure 4 have been added [line:x].
 class ControlEquivalence : public FunctionPass {
 public:
-  ControlEquivalence() : FunctionPass(ID) {
+  ControlEquivalence() : FunctionPass(ID), Computed(false) {
     initializeControlEquivalencePass(*PassRegistry::getPassRegistry());
   }
   static char ID;
@@ -52,10 +53,13 @@ public:
   // print - Show contents in human readable format...
   void print(raw_ostream &O, const Module * = nullptr) const override;
 
+  unsigned getClassNumber(BasicBlock *BB) {
+    assert(Computed && "Trying to get equivalence classes before computation");
+    return BlockData[BB].ClassNumber;
+  }
+
 private:
   typedef enum { PredDirection, SuccDirection } DFSDirection;
-  struct Bracket;
-  typedef std::list<Bracket> BracketList;
 
   struct Bracket {
     // Direction in which this bracket was added.
@@ -69,6 +73,91 @@ private:
     // Block that this bracket points to.
     const BasicBlock *To;
   };
+  typedef std::list<Bracket> BracketList;
+  typedef SmallVector<const BasicBlock *, 4> FakeEdgeListType;
+
+  // We use combined iterators to allow fake and real edges to be next to each
+  // other. We do not expect these will work for anything but our use.
+  template <class RealType, class FakeType>
+  class const_combined_iterator
+      : public std::iterator<std::forward_iterator_tag, const BasicBlock,
+                             ptrdiff_t, const BasicBlock *,
+                             const BasicBlock *> {
+    typedef std::iterator<std::forward_iterator_tag, const BasicBlock *,
+                          ptrdiff_t, const BasicBlock *,
+                          const BasicBlock *> super;
+
+  public:
+    typedef typename super::pointer pointer;
+    typedef typename super::reference reference;
+
+    // We need to know when we hit the end, so we have to have the end
+    // iterator too
+    inline const_combined_iterator(RealType Begin, RealType End,
+                                   FakeType FBegin, FakeType FEnd)
+        : Real(Begin), RealEnd(End), Fake(FBegin), FakeEnd(FEnd) {}
+    inline bool operator==(const_combined_iterator &x) const {
+      return Real == x.Real && Fake == x.Fake;
+    }
+    inline bool operator!=(const_combined_iterator &x) const {
+      return !operator==(x);
+    }
+    inline reference operator*() const {
+      if (Real != RealEnd)
+        return *Real;
+      if (Fake != FakeEnd)
+        return *Fake;
+      llvm_unreachable("Tried to access past the end of our iterator");
+    }
+    inline pointer *operator->() const { return &operator*(); }
+
+    inline const_combined_iterator &operator++() {
+      if (Real != RealEnd) {
+        ++Real;
+        return *this;
+      }
+      if (Fake != FakeEnd) {
+        ++Fake;
+        return *this;
+      }
+      llvm_unreachable("Fell off the end of the iterator");
+    }
+
+  private:
+    RealType Real;
+    RealType RealEnd;
+    FakeType Fake;
+    FakeType FakeEnd;
+  };
+
+  typedef const_combined_iterator<const_pred_iterator,
+                                  FakeEdgeListType::const_iterator>
+      const_combined_pred_iterator;
+  typedef const_combined_iterator<succ_const_iterator,
+                                  FakeEdgeListType::const_iterator>
+      const_combined_succ_iterator;
+  inline const_combined_pred_iterator
+  combined_pred_begin(const BasicBlock *B, const FakeEdgeListType &EL) {
+    return const_combined_pred_iterator(pred_begin(B), pred_end(B), EL.begin(),
+                                        EL.end());
+  }
+
+  inline const_combined_pred_iterator
+  combined_pred_end(const BasicBlock *B, const FakeEdgeListType &EL) {
+    return const_combined_pred_iterator(pred_end(B), pred_end(B), EL.end(),
+                                        EL.end());
+  }
+  inline const_combined_succ_iterator
+  combined_succ_begin(const BasicBlock *B, const FakeEdgeListType &EL) {
+    return const_combined_succ_iterator(succ_begin(B), succ_end(B), EL.begin(),
+                                        EL.end());
+  }
+
+  inline const_combined_succ_iterator
+  combined_succ_end(const BasicBlock *B, const FakeEdgeListType &EL) {
+    return const_combined_succ_iterator(succ_end(B), succ_end(B), EL.end(),
+                                        EL.end());
+  }
 
   struct BlockCEData {
     // Equivalence class number assigned to Block.
@@ -83,23 +172,27 @@ private:
     bool Participates;
     // List of brackets per Block.
     BracketList BList;
-    // Iterator that points to us in the current bracket list, to make delete
-    // O(1).
-    // std::list iterators only invalidate the iterator you erase.
-    BracketList::iterator BListPointer;
+    // List of fake successor edges, if any
+    FakeEdgeListType FakeSuccEdges;
+    // List of fake predecessor edges, if any
+    FakeEdgeListType FakePredEdges;
 
     BlockCEData()
         : ClassNumber(0), DFSNumber(0), Visited(false), OnStack(false),
-          Participates(false) {}
+          Participates(true), BList() {}
+    ~BlockCEData() {}
   };
-
   struct DFSStackEntry {
     // Direction currently used in DFS walk.
     DFSDirection Direction;
     // Iterator used for "pred" direction.
-    const_pred_iterator Pred;
+    const_combined_pred_iterator Pred;
+    // Iterator end for "pred" direction
+    const_combined_pred_iterator PredEnd;
     // Iterator used for "succ" direction.
-    succ_const_iterator Succ;
+    const_combined_succ_iterator Succ;
+    // Iterator end for "succ" direction.
+    const_combined_succ_iterator SuccEnd;
     // Parent Block of entry during DFS walk.
     const BasicBlock *ParentBlock;
     // Basic Block that this stack entry belongs to
@@ -107,16 +200,13 @@ private:
   };
   // The stack is used during the undirected DFS walk.
   typedef std::stack<DFSStackEntry> DFSStack;
-  typedef SmallVectorImpl<const BasicBlock *> BlockVector;
-  void collectExits(Function &, BlockVector &);
-  void runUndirectedDFS(const BlockVector &);
-  void determineParticipation(const BlockVector &);
+  void runUndirectedDFS(const BasicBlock *);
 
   // Called at pre-visit during DFS walk.
   void visitPre(const BasicBlock *);
 
   // Called at mid-visit during DFS walk.
-  void visitMid(const BasicBlock *, DFSDirection, const BlockVector &);
+  void visitMid(const BasicBlock *, DFSDirection);
 
   // Called at post-visit during DFS walk.
   void visitPost(const BasicBlock *, const BasicBlock *, DFSDirection);
@@ -127,7 +217,9 @@ private:
   void popDFS(DFSStack &, const BasicBlock *);
   unsigned DFSNumber;
   unsigned ClassNumber;
-  DenseMap<const BasicBlock *, BlockCEData> BlockData;
+  SmallDenseMap<const BasicBlock *, BlockCEData, 8> BlockData;
+  bool Computed;
+  const BasicBlock *FakeEnd;
 };
 }
 
