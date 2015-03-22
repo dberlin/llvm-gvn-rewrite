@@ -36,8 +36,8 @@ bool ControlEquivalence::runOnFunction(Function &F) {
   // component. We make a fake end, connect exit blocks to it, and then connect
   // the fake end and the real start (since we only have one of those).
   FakeEnd = BasicBlock::Create(F.getContext(), "FakeEnd");
-  BlockData[FakeEnd].FakeSuccEdges.push_back(&F.getEntryBlock());
-  BlockData[&F.getEntryBlock()].FakePredEdges.push_back(FakeEnd);
+  BlockData[FakeEnd].FakeSucc = &F.getEntryBlock();
+  BlockData[&F.getEntryBlock()].FakePred = FakeEnd;
   //  BlockData.resize(F.size());
   for (auto &B : F) {
     BlockCEData &Info = BlockData[&B];
@@ -47,11 +47,20 @@ bool ControlEquivalence::runOnFunction(Function &F) {
     }
     // If there are no successors, we need to connect it to the exit block
     if (succ_empty(&B)) {
-      // Connect leaves to fake end
-      Info.FakeSuccEdges.push_back(FakeEnd);
+      Info.FakeSucc = FakeEnd;
     }
   }
-  runUndirectedDFS(FakeEnd);
+  SmallPtrSet<const BasicBlock *, 8> Visited;
+  SmallVector<const BasicBlock *, 32> AllNodes;
+
+  // First do an undirected DFS, and get all the nodes in DFS preorder
+  runDFS(FakeEnd, Visited, AllNodes);
+  // Now go through all the nodes in DFS post order, and compute cycle
+  // equivalence
+  for (auto POI = AllNodes.rbegin(), POE = AllNodes.rend(); POI != POE; ++POI) {
+    cycleEquiv(*POI);
+  }
+
 #ifndef NDEBUG
   for (auto &B : F) {
     dbgs() << "Class number for block ";
@@ -71,206 +80,112 @@ void ControlEquivalence::releaseMemory() {
 // print - Show contents in human readable format...
 void ControlEquivalence::print(raw_ostream &O, const Module *M) const {}
 
-// Performs and undirected DFS walk of the CFG. Conceptually all nodes are
-// expanded, splitting "predecessors" and "successors" out into separate nodes.
-// During the
-// traversal, edges towards the representative type are preferred.
-//
-//   \ /        - Pre-visit: When N1 is visited in direction D the preferred
-//    x   N1      edge towards N is taken next, calling VisitPre(N).
-//    |         - Mid-visit: After all edges out of N2 in direction D have
-//    |   N       been visited, we switch the direction and start considering
-//    |           edges out of N1 now, and we call VisitMid(N).
-//    x   N2    - Post-visit: After all edges out of N1 in direction opposite
-//   / \          to D have been visited, we pop N and call VisitPost(N).
-//
-// This will yield a true spanning tree (without cross or forward edges) and
-// also discover proper back edges in both directions.
-void ControlEquivalence::runUndirectedDFS(const BasicBlock *ExitBlock) {
-  DFSStack Stack;
-  // Start out walking backwards
-  pushDFS(Stack, ExitBlock, nullptr, PredDirection);
+// Construct an undirected Depth First Spanning Tree, produce the list of nodes,
+// in preorder, in AllNodes.
+void ControlEquivalence::runDFS(const BasicBlock *BB,
+                                SmallPtrSetImpl<const BasicBlock *> &Visited,
+                                SmallVectorImpl<const BasicBlock *> &AllNodes) {
+  assert(!Visited.count(BB) && "We already visited this node");
+  BlockCEData &Info = BlockData[BB];
+  Info.DFSNumber = ++DFSNumber;
+  Visited.insert(BB);
+  AllNodes.emplace_back(BB);
 
-  while (!Stack.empty()) {
-    DFSStackEntry &Entry = Stack.top();
-    const BasicBlock *B = Entry.Block;
-
-    if (Entry.Direction == PredDirection) {
-
-      // First visit in pred direction, then swap directions, then visit in succ
-      // direction
-      // Pred direction
-      if (Entry.Pred != Entry.PredEnd) {
-        const BasicBlock *Pred = *Entry.Pred;
-        ++(Entry.Pred);
-        BlockCEData &PredData = BlockData.find(Pred)->second;
-        if (!PredData.Participates)
-          continue;
-        if (PredData.Visited)
-          continue;
-        // If it's on the stack, we've found a backedge, otherwise, push it
-        // and preorder-visit
-        if (PredData.OnStack) {
-          if (Pred != Entry.ParentBlock)
-            visitBackedge(B, Pred, PredDirection);
-        } else {
-          pushDFS(Stack, Pred, B, PredDirection);
-          visitPre(Pred);
-        }
-        continue;
-      }
-      // Swap directions to successors
-      if (Entry.Succ != Entry.SuccEnd) {
-        Entry.Direction = SuccDirection;
-        visitMid(B, PredDirection);
-        continue;
-      }
-    }
-
-    if (Entry.Direction == SuccDirection) {
-      if (Entry.Succ != Entry.SuccEnd) {
-        const BasicBlock *Succ = *Entry.Succ;
-        ++(Entry.Succ);
-        BlockCEData &SuccData = BlockData.find(Succ)->second;
-        if (!SuccData.Participates)
-          continue;
-        if (SuccData.Visited)
-          continue;
-        // If it's on the stack, we've found a backedge, otherwise, push it
-        // and preorder-visit
-        if (SuccData.OnStack) {
-          if (Succ != Entry.ParentBlock)
-            visitBackedge(B, Succ, SuccDirection);
-        } else {
-          pushDFS(Stack, Succ, B, SuccDirection);
-          visitPre(Succ);
-        }
-        continue;
-      }
-      // Swap directions to predecessors
-      if (Entry.Pred != Entry.PredEnd) {
-        Entry.Direction = PredDirection;
-        visitMid(B, SuccDirection);
-        continue;
-      }
-    }
-    // Pop block from stack when done with all preds and succs.
-    assert(Entry.Pred == Entry.PredEnd &&
-           "Did not finish predecessors before popping");
-    assert(Entry.Succ == Entry.SuccEnd &&
-           "Did not finish successors before popping");
-    popDFS(Stack, B);
-    visitPost(B, Entry.ParentBlock, Entry.Direction);
+  // We get preds, then succs, then fake preds, then fake succs
+  for (auto CCI = all_edges_begin(BB, Info.FakePred, Info.FakeSucc),
+            CCE = all_edges_end(BB);
+       CCI != CCE; ++CCI) {
+    // If we haven't visited, mark this as a child, and go on
+    if (!Visited.count(*CCI)) {
+      Info.Children.push_back(*CCI);
+      BlockData[*CCI].Parent = BB;
+      runDFS(*CCI, Visited, AllNodes);
+    } else if (*CCI != Info.Parent)
+      // We've hit something other than our parent
+      // node again so this must be a backedge
+      Info.Backedges.push_back(*CCI);
   }
 }
 
-void ControlEquivalence::pushDFS(DFSStack &Stack, const BasicBlock *B,
-                                 const BasicBlock *From,
-                                 DFSDirection Direction) {
-  auto BlockResult = BlockData.find(B);
-  assert(BlockResult != BlockData.end() && "Should have found block data");
+// The actual proof and understanding of this algorithm is a bit detailed, but
+// basically, we are computing compact bracket set for the edges in the graph,
+// based on the undirected DFS graph. Two nodes/edges in the graph are
+// control/cycle equivalent iff they have the same compact bracket set
+// This algorithm pretty directly corresponds to Figure 4 of the Cycle
+// Equivalence paper.
 
-  auto &BlockResultData = BlockResult->second;
-  assert(!BlockResultData.Visited && "Should not have been visited yet");
-  assert(BlockResultData.Participates &&
-         "Somehow visited a node that doesn't participate");
-
-  BlockResultData.OnStack = true;
-  Stack.push(DFSStackEntry{
-      Direction, combined_pred_begin(B, BlockResultData.FakePredEdges),
-      combined_pred_end(B, BlockResultData.FakePredEdges),
-      combined_succ_begin(B, BlockResultData.FakeSuccEdges),
-      combined_succ_end(B, BlockResultData.FakeSuccEdges), From, B});
-}
-void ControlEquivalence::popDFS(DFSStack &Stack, const BasicBlock *B) {
-  assert(Stack.top().Block == B && "Stack top is wrong");
-  auto BlockResult = BlockData.find(B);
-
-  assert(BlockResult != BlockData.end() && "Should have found block data");
-  auto &BlockResultData = BlockResult->second;
-  BlockResultData.OnStack = false;
-  BlockResultData.Visited = true;
-  Stack.pop();
-}
-
-void ControlEquivalence::visitPre(const BasicBlock *B) {
-  DEBUG(dbgs() << "pre-order visit of block ");
-  DEBUG(B->printAsOperand(dbgs()));
-  DEBUG(dbgs() << "\n");
-
-  BlockData[B].DFSNumber = ++DFSNumber;
-  DEBUG(dbgs() << "Assigned DFS Number " << BlockData[B].DFSNumber << "\n");
-}
-
-void ControlEquivalence::visitMid(const BasicBlock *B, DFSDirection Direction) {
-  DEBUG(dbgs() << "mid-order visit of block ");
-  DEBUG(B->printAsOperand(dbgs()));
-  DEBUG(dbgs() << "\n");
-  BlockCEData &Info = BlockData[B];
-  BracketList &BList = Info.BList;
-  // Remove brackets pointing to this node [line:19].
-  for (auto BLI = BList.begin(), BLE = BList.end(); BLI != BLE;) {
-    if (BLI->To == B && BLI->Direction != Direction) {
-      BLI = BList.erase(BLI);
-    } else {
-      ++BLI;
-    }
-  }
-
-  // Potentially introduce artificial dependency from start to ends.
-  if (BList.empty()) {
-    assert(Direction == PredDirection && "Should not have to do this unless we "
-                                         "are going in the backwards "
-                                         "direction");
-    // Connect to all the ends, making one huge succ
-    visitBackedge(B, FakeEnd, PredDirection);
-  }
-
-  // Potentially start a new equivalence class [line:37]
-  Bracket &Recent = BList.back();
-  if (Recent.RecentSize != BList.size()) {
-    Recent.RecentSize = BList.size();
-    Recent.RecentClass = ++ClassNumber;
-  }
-  Info.ClassNumber = Recent.RecentClass;
-  DEBUG(dbgs() << "Assigned class number is " << Info.ClassNumber << "\n");
-}
-void ControlEquivalence::visitPost(const BasicBlock *B,
-                                   const BasicBlock *ParentBlock,
-                                   DFSDirection Direction) {
-  DEBUG(dbgs() << "post-order visit of block ");
-  DEBUG(B->printAsOperand(dbgs()));
-  DEBUG(dbgs() << "\n");
-  BlockCEData &Info = BlockData[B];
-  BracketList &BList = Info.BList;
-  // Remove brackets pointing to this node [line:19].
-
-  for (auto BLI = BList.begin(), BLE = BList.end(); BLI != BLE;) {
-    if (BLI->To == B && BLI->Direction != Direction) {
-      BLI = BList.erase(BLI);
-    } else {
-      ++BLI;
-    }
-  }
-
-  // Propagate bracket list up the DFS tree [line:13].
-  if (ParentBlock != nullptr) {
-    BracketList &ParentBList = BlockData[ParentBlock].BList;
-    ParentBList.splice(ParentBList.end(), BList);
-  }
-}
-
-void ControlEquivalence::visitBackedge(const BasicBlock *From,
-                                       const BasicBlock *To,
-                                       DFSDirection Direction) {
-  DEBUG(dbgs() << "visit backedge from block ");
-  DEBUG(From->printAsOperand(dbgs()));
-  DEBUG(dbgs() << " to block ");
-  DEBUG(To->printAsOperand(dbgs()));
-  DEBUG(dbgs() << "\n");
-
-  // Push backedge onto the bracket list [line:25].
+void ControlEquivalence::cycleEquiv(const BasicBlock *From) {
   BlockCEData &Info = BlockData[From];
-  BracketList &BList = Info.BList;
-  BList.emplace_back(Bracket{Direction, 0, 0, From, To});
+  // Compute hi(n)
+  const BasicBlock *hi0 = nullptr;
+  unsigned hi0DFS;
+  for (auto &BB : Info.Backedges)
+    if (!hi0 || BlockData[BB].DFSNumber < hi0DFS) {
+      hi0DFS = BlockData[BB].DFSNumber;
+      hi0 = BB;
+    }
+  const BasicBlock *hi1 = nullptr;
+  unsigned hi1DFS;
+  const BasicBlock *hi2 = nullptr;
+  unsigned hi2DFS;
+  for (auto &BB : Info.Children) {
+    if (!hi1 || BlockData[Info.Hi].DFSNumber < hi1DFS) {
+      if (!hi2 || hi1DFS < hi2DFS) {
+        hi2 = hi1;
+        hi2DFS = hi1DFS;
+      }
+      hi1 = BlockData[BB].Hi;
+      hi1DFS = BlockData[hi1].DFSNumber;
+    } else if (!hi2 || BlockData[Info.Hi].DFSNumber < hi2DFS) {
+      hi2 = Info.Hi;
+      hi2DFS = BlockData[Info.Hi].DFSNumber;
+    }
+  }
+
+  // Take the min of hi0, hi1
+  Info.Hi = !hi0 ? hi1 : !hi1 ? hi0 : (hi0DFS < hi1DFS) ? hi0 : hi1;
+
+  // Compute the bracketlist
+  for (auto &BB : Info.Children)
+    Info.BList.splice(Info.BList.end(), BlockData[BB].BList);
+  // TODO: We can remove it in constant time by tracking the container for the
+  // edge
+  for (auto &BB : Info.Capping)
+    Info.BList.remove_if([&From, &BB](const Bracket &BR) {
+      return BR.From == From && BR.To == BB;
+    });
+  for (auto &BB : Info.Backedges) {
+    // See if it's our descendant
+    auto &BBData = BlockData[BB];
+    if (BBData.DFSNumber > Info.DFSNumber) {
+      // TODO fix this
+      Info.BList.remove_if([&From, &BB](const Bracket &BR) {
+        return BR.From == From && BR.To == BB;
+      });
+      if (BBData.ClassNumber == 0)
+        BBData.ClassNumber = ++ClassNumber;
+    } else if (BBData.DFSNumber <= Info.DFSNumber) {
+      auto Place = Info.BList.insert(Info.BList.end(), {From, BB, 0, 0});
+    }
+    if (hi2 && (!hi0 || hi0DFS > hi2DFS)) {
+      // Create a capping backedge
+      BlockData[hi2].Capping.push_back(From);
+      auto Place = Info.BList.insert(Info.BList.end(), {From, hi2, 0, 0});
+    }
+
+    // Determine class for edge from parent(n) to n
+    const BasicBlock *Parent = Info.Parent;
+    if (Parent) {
+      BlockCEData &ParentInfo = BlockData[Parent];
+      Bracket &Back = Info.BList.back();
+      if (Back.RecentSize != Info.BList.size()) {
+        Back.RecentSize = Info.BList.size();
+        Back.RecentClass = ++ClassNumber;
+      }
+      ParentInfo.ClassNumber = Back.RecentClass;
+
+      if (Back.RecentSize == 1)
+        BlockData[Back.To].ClassNumber = ParentInfo.ClassNumber;
+    }
+  }
 }
