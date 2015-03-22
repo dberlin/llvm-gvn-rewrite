@@ -78,8 +78,6 @@ STATISTIC(NumGVNPhisAllSame, "Number of PHIs whos arguments are all the same");
 //                                GVN Pass
 //===----------------------------------------------------------------------===//
 
-namespace {
-
 // Congruence classes represent the set of expressions/instructions
 // that are all the same *during some scope in the function*.
 // It is very slightly flow-sensitive.
@@ -354,7 +352,6 @@ private:
 };
 
 char NewGVN::ID = 0;
-}
 
 // createGVNPass - The public interface to this file...
 FunctionPass *llvm::createNewGVNPass() { return new NewGVN(); }
