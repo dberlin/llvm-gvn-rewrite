@@ -87,15 +87,18 @@ void ControlEquivalence::print(raw_ostream &O, const Module *M) const {}
 //
 // This will yield a true spanning tree (without cross or forward edges) and
 // also discover proper back edges in both directions.
-void ControlEquivalence::runUndirectedDFS(const BasicBlock *ExitBlock) {
+void ControlEquivalence::runUndirectedDFS(const BasicBlock *StartBlock) {
   DFSStack Stack;
   // Start out walking backwards
-  pushDFS(Stack, ExitBlock, nullptr, PredDirection);
+  pushDFS(Stack, StartBlock, nullptr, PredDirection);
 
   while (!Stack.empty()) {
     DFSStackEntry &Entry = Stack.top();
     const BasicBlock *B = Entry.Block;
-
+    DEBUG(dbgs() << "Starting from block ");
+    DEBUG(B->printAsOperand(dbgs()));
+    DEBUG(dbgs() << "\n");
+    
     if (Entry.Direction == PredDirection) {
 
       // First visit in pred direction, then swap directions, then visit in succ
