@@ -124,7 +124,7 @@ void ControlEquivalence::runDFS(const BasicBlock *BB,
       DEBUG(dbgs() << "\n");
 
       runDFS(*CCI, Visited, VisitedEdges, AllNodes);
-    } else if (!VisitedEdges.count(BasicBlockEdgeType{BB, *CCI})) {
+    } else if (*CCI != Info.Parent) {
       // We've hit something other than our parent
       // node again so this must be a backedge
       Info.Backedges.emplace_front(BB, *CCI);
