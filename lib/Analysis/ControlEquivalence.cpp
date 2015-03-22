@@ -41,6 +41,7 @@ bool ControlEquivalence::runOnFunction(Function &F) {
   BlockData[FakeEnd].FakeSucc = FakeStart;
   BlockData[FakeStart].FakePreds.push_back(FakeEnd);
   BlockData[FakeStart].FakeSucc = &F.getEntryBlock();
+  BlockData[&F.getEntryBlock()].FakePreds.push_back(FakeStart);
   //  BlockData.resize(F.size());
   for (auto &B : F) {
     BlockCEData &Info = BlockData[&B];
