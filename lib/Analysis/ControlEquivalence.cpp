@@ -42,7 +42,7 @@ bool ControlEquivalence::runOnFunction(Function &F) {
   for (auto &B : F) {
     BlockCEData &Info = BlockData[&B];
     // If this is an unreachable block, we don't care about it
-    if (pred_empty(&B)) {
+    if (pred_empty(&B) && (&B != &F.getEntryBlock())) {
       Info.Participates = false;
     }
     // If there are no successors, we need to connect it to the exit block
