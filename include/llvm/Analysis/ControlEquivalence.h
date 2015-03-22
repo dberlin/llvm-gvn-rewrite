@@ -14,8 +14,10 @@
 #define LLVM_ANALYSIS_CONTROLEQUIVALENCE_H
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Function.h"
 #include "llvm/Pass.h"
@@ -61,17 +63,16 @@ public:
 
 private:
   typedef std::pair<const BasicBlock *, const BasicBlock *> BasicBlockEdgeType;
-  typedef std::list<BasicBlockEdgeType> EdgeList;
+  typedef std::list<BasicBlockEdgeType> EdgeListType;
   struct Bracket {
-    const BasicBlock *From;
-    const BasicBlock *To;
+    BasicBlockEdgeType Edge;
     unsigned RecentClass;
     unsigned RecentSize;
   };
-
+  typedef TinyPtrVector<const BasicBlock *> FakeEdgelistType;
   typedef std::list<Bracket> BracketList;
-  typedef SmallVector<const BasicBlock *, 4> FakeEdgeListType;
 
+  
   class const_combined_iterator
       : public std::iterator<std::forward_iterator_tag, const BasicBlock,
                              ptrdiff_t, const BasicBlock *,
@@ -85,16 +86,18 @@ private:
     typedef typename super::reference reference;
 
     inline const_combined_iterator(const BasicBlock *BB,
-                                   const BasicBlock *FPred,
+                                   const FakeEdgelistType &FPreds,
                                    const BasicBlock *FSucc, bool End)
-        : PredCurr(End ? pred_end(BB) : pred_begin(BB)), PredEnd(pred_end(BB)),
+        : Block(BB), PredCurr(End ? pred_end(BB) : pred_begin(BB)), PredEnd(pred_end(BB)),
           SuccCurr(End ? succ_end(BB) : succ_begin(BB)), SuccEnd(succ_end(BB)),
-          FakePred(FPred), FakeSucc(FSucc) {}
+          FakePredCurr(End ? FPreds.end() : FPreds.begin()), FakePredEnd(FPreds.end()), FakeSucc(FSucc) {}
 
     inline bool operator==(const const_combined_iterator &x) const {
-      return PredCurr == x.PredCurr && PredEnd == x.PredEnd &&
+      return Block == x.Block && PredCurr == x.PredCurr && PredEnd == x.PredEnd &&
              SuccCurr == x.SuccCurr && SuccEnd == x.SuccEnd &&
-             FakePred == x.FakePred && FakeSucc == x.FakeSucc;
+             FakePredCurr == x.FakePredCurr
+        && FakePredEnd == x.FakePredEnd
+        && FakeSucc == x.FakeSucc;
     }
     inline bool operator!=(const const_combined_iterator &x) const {
       return !operator==(x);
@@ -104,8 +107,8 @@ private:
         return *PredCurr;
       if (SuccCurr != SuccEnd)
         return *SuccCurr;
-      if (FakePred != nullptr)
-        return FakePred;
+      if (FakePredCurr != FakePredEnd)
+        return *FakePredCurr;
       if (FakeSucc != nullptr)
         return FakeSucc;
       llvm_unreachable("trying to dereference past end of iterator");
@@ -121,8 +124,8 @@ private:
         ++SuccCurr;
         return *this;
       }
-      if (FakePred != nullptr) {
-        FakePred = nullptr;
+      if (FakePredCurr != FakePredEnd) {
+        ++FakePredCurr;
         return *this;
       }
       if (FakeSucc != nullptr) {
@@ -133,20 +136,23 @@ private:
     }
 
   private:
+    const BasicBlock *Block;
     const_pred_iterator PredCurr;
     const_pred_iterator PredEnd;
     succ_const_iterator SuccCurr;
     succ_const_iterator SuccEnd;
-    const BasicBlock *FakePred;
+    FakeEdgelistType::const_iterator FakePredCurr;
+    FakeEdgelistType::const_iterator FakePredEnd;
     const BasicBlock *FakeSucc;
   };
   const_combined_iterator
-  all_edges_begin(const BasicBlock *BB, const BasicBlock *FakePred = nullptr,
+  all_edges_begin(const BasicBlock *BB, const FakeEdgelistType &FakePreds,
                   const BasicBlock *FakeSucc = nullptr) {
-    return const_combined_iterator(BB, FakePred, FakeSucc, false);
+    return const_combined_iterator(BB, FakePreds, FakeSucc, false);
   }
-  const_combined_iterator all_edges_end(const BasicBlock *BB) {
-    return const_combined_iterator(BB, nullptr, nullptr, true);
+  const_combined_iterator all_edges_end(const BasicBlock *BB,
+                                        const FakeEdgelistType &FakePreds) {
+    return const_combined_iterator(BB, FakePreds, nullptr, true);
   }
 
   struct BlockCEData {
@@ -165,21 +171,26 @@ private:
     const BasicBlock *Hi;
     const BasicBlock *Parent;
     std::list<const BasicBlock *> Children;
-    std::list<const BasicBlock *> Backedges;
+    EdgeListType Backedges;
     std::list<const BasicBlock *> Capping;
     const BasicBlock *FakeSucc;
-    const BasicBlock *FakePred;
+    FakeEdgelistType FakePreds;
     BlockCEData()
         : ClassNumber(0), DFSNumber(0), Visited(false), OnStack(false),
           Participates(true), Hi(nullptr), Parent(nullptr), FakeSucc(nullptr),
-          FakePred(nullptr) {}
+          FakePreds()
+    {
+    }
+    
     ~BlockCEData() {}
   };
 
   void runDFS(const BasicBlock *, SmallPtrSetImpl<const BasicBlock *> &,
-              SmallVectorImpl<const BasicBlock *> &);
+              DenseSet<BasicBlockEdgeType> &,
+              std::vector<const BasicBlock *> &);
   void cycleEquiv(const BasicBlock *);
   void debugBracketList(const BracketList &BList);
+  void debugNodeInfo(const BasicBlock *);
   unsigned DFSNumber;
   unsigned ClassNumber;
   SmallDenseMap<const BasicBlock *, BlockCEData, 8> BlockData;

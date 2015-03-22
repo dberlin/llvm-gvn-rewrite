@@ -33,12 +33,13 @@ bool ControlEquivalence::runOnFunction(Function &F) {
   ClassNumber = 1;
 
   // The algorithm requires we transform the CFG into a strongly connected
-  // component. We make a fake end, connect exit blocks to it, and then connect
-  // the fake end and the real start (since we only have one of those).
+  // component. We make a fake start and end, connect blocks to it, then connect
+  // them to each other.
+
   FakeEnd = BasicBlock::Create(F.getContext(), "FakeEnd");
   FakeStart = BasicBlock::Create(F.getContext(), "FakeStart");
   BlockData[FakeEnd].FakeSucc = FakeStart;
-  BlockData[FakeStart].FakePred = FakeEnd;
+  BlockData[FakeStart].FakePreds.push_back(FakeEnd);
   BlockData[FakeStart].FakeSucc = &F.getEntryBlock();
   //  BlockData.resize(F.size());
   for (auto &B : F) {
@@ -50,13 +51,14 @@ bool ControlEquivalence::runOnFunction(Function &F) {
     // If there are no successors, we need to connect it to the exit block
     if (succ_empty(&B)) {
       Info.FakeSucc = FakeEnd;
+      BlockData[FakeEnd].FakePreds.push_back(&B);
     }
   }
   SmallPtrSet<const BasicBlock *, 8> Visited;
-  SmallVector<const BasicBlock *, 32> AllNodes;
-
+  std::vector<const BasicBlock *> AllNodes;
+  DenseSet<BasicBlockEdgeType> VisitedEdges;
   // First do an undirected DFS, and get all the nodes in DFS preorder
-  runDFS(FakeStart, Visited, AllNodes);
+  runDFS(FakeStart, Visited, VisitedEdges, AllNodes);
   // Now go through all the nodes in DFS post order, and compute cycle
   // equivalence
   for (auto POI = AllNodes.rbegin(), POE = AllNodes.rend(); POI != POE; ++POI) {
@@ -87,53 +89,101 @@ void ControlEquivalence::print(raw_ostream &O, const Module *M) const {}
 // in preorder, in AllNodes.
 void ControlEquivalence::runDFS(const BasicBlock *BB,
                                 SmallPtrSetImpl<const BasicBlock *> &Visited,
-                                SmallVectorImpl<const BasicBlock *> &AllNodes) {
+                                DenseSet<BasicBlockEdgeType> &VisitedEdges,
+                                std::vector<const BasicBlock *> &AllNodes) {
   DEBUG(dbgs() << "Starting visit of block ");
   DEBUG(BB->printAsOperand(dbgs()));
   DEBUG(dbgs() << "\n");
 
   assert(!Visited.count(BB) && "We already visited this node");
   BlockCEData &Info = BlockData[BB];
-  Info.DFSNumber = ++DFSNumber;
+  Info.DFSNumber = Visited.size();
+  //++DFSNumber;
   DEBUG(dbgs() << "DFS Number set to " << Info.DFSNumber << "\n");
   Visited.insert(BB);
-  AllNodes.emplace_back(BB);
+  AllNodes.push_back(BB);
 
   // We get preds, then succs, then fake preds, then fake succs
-  for (auto CCI = all_edges_begin(BB, Info.FakePred, Info.FakeSucc),
-            CCE = all_edges_end(BB);
+  for (auto CCI = all_edges_begin(BB, Info.FakePreds, Info.FakeSucc),
+            CCE = all_edges_end(BB, Info.FakePreds);
        CCI != CCE; ++CCI) {
     // If we haven't visited, mark this as a child, and go on
     if (!Visited.count(*CCI)) {
-      Info.Children.push_front(*CCI);
+      Info.Children.emplace_front(*CCI);
       BlockData[*CCI].Parent = BB;
       DEBUG(dbgs() << "Going to visit ");
       DEBUG((*CCI)->printAsOperand(dbgs()));
       DEBUG(dbgs() << " from ");
       DEBUG(BB->printAsOperand(dbgs()));
+      DEBUG(dbgs() << " parent set to ");
+      if (Info.Parent)
+        DEBUG(Info.Parent->printAsOperand(dbgs()));
+      else
+        DEBUG(dbgs() << " null");
+
       DEBUG(dbgs() << "\n");
 
-      runDFS(*CCI, Visited, AllNodes);
-    } else if (*CCI != Info.Parent) {
+      runDFS(*CCI, Visited, VisitedEdges, AllNodes);
+    } else if (!VisitedEdges.count(BasicBlockEdgeType{BB, *CCI})) {
       // We've hit something other than our parent
       // node again so this must be a backedge
-      Info.Backedges.push_front(*CCI);
+      Info.Backedges.emplace_front(BB, *CCI);
+      VisitedEdges.insert({BB, *CCI});
+
       DEBUG(dbgs() << "Adding ");
       DEBUG((*CCI)->printAsOperand(dbgs()));
       DEBUG(dbgs() << " as backedge of ");
       DEBUG(BB->printAsOperand(dbgs()));
+      DEBUG(dbgs() << " parent was ");
+      if (Info.Parent)
+        DEBUG(Info.Parent->printAsOperand(dbgs()));
+      else
+        DEBUG(dbgs() << " null");
+
       DEBUG(dbgs() << "\n");
     }
   }
+}
+
+static void debugEdge(std::pair<const BasicBlock *, const BasicBlock *> Edge) {
+  dbgs() << "(";
+  Edge.first->printAsOperand(dbgs());
+  dbgs() << ",";
+  Edge.second->printAsOperand(dbgs());
+  dbgs() << ")";
+}
+
+void ControlEquivalence::debugNodeInfo(const BasicBlock *BB) {
+  dbgs() << "Info for node ";
+  BB->printAsOperand(dbgs());
+  dbgs() << "\n";
+  dbgs() << "Parent is ";
+  if (BlockData[BB].Parent)
+    BlockData[BB].Parent->printAsOperand(dbgs());
+  else
+    dbgs() << "null";
+
+  dbgs() << "\nList of backedges:{";
+  for (auto &BBEdge : BlockData[BB].Backedges) {
+    debugEdge(BBEdge);
+    dbgs() << " ";
+  }
+  dbgs() << "}\n";
+  dbgs() << "List of children:{";
+  for (auto &BB : BlockData[BB].Children) {
+    BB->printAsOperand(dbgs());
+    dbgs() << " ";
+  }
+  dbgs() << "}\n";
 }
 
 void ControlEquivalence::debugBracketList(const BracketList &BList) {
   dbgs() << "{";
   for (auto &Bracket : BList) {
     dbgs() << "(";
-    Bracket.From->printAsOperand(dbgs());
+    Bracket.Edge.first->printAsOperand(dbgs());
     dbgs() << ",";
-    Bracket.To->printAsOperand(dbgs());
+    Bracket.Edge.second->printAsOperand(dbgs());
     dbgs() << ") ";
   }
   dbgs() << "}\n";
@@ -147,103 +197,141 @@ void ControlEquivalence::debugBracketList(const BracketList &BList) {
 // Equivalence paper.
 
 void ControlEquivalence::cycleEquiv(const BasicBlock *From) {
+  DEBUG(dbgs() << "Computing for ");
+  DEBUG(From->printAsOperand(dbgs()));
+  DEBUG(dbgs() << "\n");
+  DEBUG(debugNodeInfo(From));
+
   BlockCEData &Info = BlockData[From];
   // Compute hi(n)
+
+  // hi0 = min (m.dfsnum | (n, m) is a backedge)
   const BasicBlock *hi0 = nullptr;
   unsigned hi0DFS;
-  for (auto &BB : Info.Backedges) {
-    assert(BB != From);
-
-    if (!hi0 || BlockData[BB].DFSNumber < hi0DFS) {
-      hi0 = BB;
+  for (auto &BBEdge : Info.Backedges) {
+    assert(BBEdge.second != From);
+    if (!hi0 || BlockData[BBEdge.second].DFSNumber < hi0DFS) {
+      hi0 = BBEdge.second;
       hi0DFS = BlockData[hi0].DFSNumber;
     }
   }
 
+  // hi1 =min (c.hi | c is a child of of n)
   const BasicBlock *hi1 = nullptr;
   unsigned hi1DFS;
+  for (auto &BB : Info.Children) {
+    assert(BB != From);
+    BlockCEData &BBData = BlockData[BB];
+    assert(BBData.Hi != nullptr);
+    if (!hi1 || BlockData[BBData.Hi].DFSNumber < hi1DFS) {
+      hi1 = BBData.Hi;
+      hi1DFS = BlockData[BBData.Hi].DFSNumber;
+    }
+  }
+  Info.Hi = !hi0 ? hi1 : !hi1 ? hi0 : (hi0DFS < hi1DFS) ? hi0 : hi1;
+  // hi2 = min (c.hi | c is a child of n other than hi1)
+
   const BasicBlock *hi2 = nullptr;
   unsigned hi2DFS;
   for (auto &BB : Info.Children) {
     assert(BB != From);
     BlockCEData &BBData = BlockData[BB];
-    if (!hi1 || BlockData[BBData.Hi].DFSNumber < hi1DFS) {
-      if (!hi2 || hi1DFS < hi2DFS) {
-        hi2 = hi1;
-        hi2DFS = hi1DFS;
-      }
-      hi1 = BBData.Hi;
-      hi1DFS = BlockData[hi1].DFSNumber;
-    } else if (!hi2 || BlockData[BBData.Hi].DFSNumber < hi2DFS) {
+    assert(BBData.Hi != nullptr);
+    if (BBData.Hi == hi1)
+      continue;
+    if (hi2 || BlockData[BBData.Hi].DFSNumber < hi2DFS) {
       hi2 = BBData.Hi;
-      hi2DFS = BlockData[hi2].DFSNumber;
+      hi2DFS = BlockData[BBData.Hi].DFSNumber;
     }
   }
 
+  // for (auto &BBEdge : Info.Children) {
+  //   assert(BBEdge.second != From);
+  //   BlockCEData &BBData = BlockData[BBEdge.second];
+  //   if (!hi1 || BlockData[BBData.Hi].DFSNumber < hi1DFS) {
+  //     if (!hi2 || hi1DFS < hi2DFS) {
+  //       hi2 = hi1;
+  //       hi2DFS = hi1DFS;
+  //     }
+  //     hi1 = BBData.Hi;
+  //     hi1DFS = BlockData[hi1].DFSNumber;
+  //   } else if (!hi2 || BlockData[BBData.Hi].DFSNumber < hi2DFS) {
+  //     hi2 = BBData.Hi;
+  //     hi2DFS = BlockData[hi2].DFSNumber;
+  //   }
+  // }
+
   // Take the min of hi0, hi1
-  Info.Hi = !hi0 ? hi1 : !hi1 ? hi0 : (hi0DFS < hi1DFS) ? hi0 : hi1;
   // Compute the bracketlist
   for (auto &BB : Info.Children) {
     assert(BB != From);
+    // n.blist = concat (c.blist, n.blist)
     Info.BList.splice(Info.BList.begin(), BlockData[BB].BList);
   }
-  
+
   // TODO: We can remove it in constant time by tracking the container for the
   // edge
   for (auto &BB : Info.Capping) {
     assert(BB != From);
     size_t beforesize = Info.BList.size();
-    Info.BList.remove_if([&From, &BB](const Bracket &BR) {
-      return (BR.From == From && BR.To == BB) ||
-             (BR.To == From && BR.From == BB);
-    });
-    assert(beforesize == 0 || beforesize!= Info.BList.size());
+    Info.BList.remove_if(
+        [&BB](const Bracket &BR) { return BR.Edge.second == BB; });
+    assert(beforesize == 0 || beforesize != Info.BList.size());
   }
 
-  for (auto &BB : Info.Backedges) {
-    assert(BB != From);
+  // For each backedge b from a descendant of n to n
+  for (auto &BBEdge : Info.Backedges) {
+    assert(BBEdge.second != From);
     // See if it's our descendant
-    BlockCEData &BBData = BlockData[BB];
+    BlockCEData &BBData = BlockData[BBEdge.second];
     if (BBData.DFSNumber > Info.DFSNumber) {
       // TODO fix this
       size_t beforesize = Info.BList.size();
-      Info.BList.remove_if([&From, &BB](const Bracket &BR) {
-        return (BR.From == From && BR.To == BB) ||
-               (BR.To == From && BR.From == BB);
+      // delete (n.list, b)
+      Info.BList.remove_if(
+          [&BBEdge](const Bracket &BR) { return BR.Edge == BBEdge; });
 
-      });
       DEBUG(dbgs() << "Backedge was from ");
       DEBUG(From->printAsOperand(dbgs()));
       DEBUG(dbgs() << " to  ");
-      DEBUG(BB->printAsOperand(dbgs()));
+      DEBUG(BBEdge.second->printAsOperand(dbgs()));
       DEBUG(dbgs() << "\n");
 
-      assert((beforesize == 0 || beforesize!= Info.BList.size()));
+      assert((beforesize == 0 || beforesize != Info.BList.size()));
       if (BBData.ClassNumber == 0) {
         BBData.ClassNumber = ++ClassNumber;
         DEBUG(dbgs() << "Bracket list for ");
         DEBUG(From->printAsOperand(dbgs()));
         DEBUG(dbgs() << " is ");
         DEBUG(debugBracketList(Info.BList));
+        DEBUG(dbgs() << "Backedge updated class number for ");
+        DEBUG(BBEdge.second->printAsOperand(dbgs()));
+        DEBUG(dbgs() << " to " << BBData.ClassNumber << "\n");
       }
     }
-    
-    for (auto &BB : Info.Backedges){    
-      if (BBData.DFSNumber <= Info.DFSNumber) {
-        auto Place = Info.BList.insert(Info.BList.begin(), {From, BB, 0, 0});
-      }
-    }
-    
-    if (hi2 && (!hi0 || hi0DFS > hi2DFS)) {
-      // Create a capping backedge
-      BlockData[hi2].Capping.push_front(From);
-      auto Place = Info.BList.insert(Info.BList.begin(), {From, hi2, 0, 0});
-    }
-    DEBUG(dbgs() << "Bracket list for ");
-    DEBUG(From->printAsOperand(dbgs()));
-    DEBUG(dbgs() << " is ");
-    DEBUG(debugBracketList(Info.BList));
+  }
 
+  for (auto &BBEdge : Info.Backedges) {
+    assert(BBEdge.second != From);
+    // See if it's our ancestor
+    BlockCEData &BBData = BlockData[BBEdge.second];
+    if (BBData.DFSNumber <= Info.DFSNumber) {
+      auto Place = Info.BList.insert(Info.BList.begin(), {BBEdge, 0, 0});
+    }
+  }
+
+  if (hi2 && (!hi0 || hi0DFS > hi2DFS)) {
+    // Create a capping backedge
+    BlockData[hi2].Capping.push_front(From);
+    auto Place = Info.BList.insert(Info.BList.begin(), {{From, hi2}, 0, 0});
+  }
+  DEBUG(dbgs() << "Bracket list for ");
+  DEBUG(From->printAsOperand(dbgs()));
+  DEBUG(dbgs() << " is ");
+  DEBUG(debugBracketList(Info.BList));
+
+  // If n is not the root of the DFS tree
+  if (From != FakeStart) {
     // Determine class for edge from parent(n) to n
     const BasicBlock *Parent = Info.Parent;
     if (Parent) {
@@ -253,13 +341,18 @@ void ControlEquivalence::cycleEquiv(const BasicBlock *From) {
         Top.RecentSize = Info.BList.size();
         Top.RecentClass = ++ClassNumber;
       }
+      DEBUG(dbgs() << "Parent updated class number for ");
+      DEBUG(Parent->printAsOperand(dbgs()));
+      DEBUG(dbgs() << " to " << Top.RecentClass << "\n");
       ParentInfo.ClassNumber = Top.RecentClass;
 
       if (Top.RecentSize == 1) {
         // assert(Top.From != From);
-        assert(Top.To != From);
-
-        BlockData[Top.To].ClassNumber = ParentInfo.ClassNumber;
+        assert(Top.Edge.second != From);
+        DEBUG(dbgs() << "Top Size updated class number for ");
+        DEBUG(Top.Edge.second->printAsOperand(dbgs()));
+        DEBUG(dbgs() << " to " << ParentInfo.ClassNumber << "\n");
+        BlockData[Top.Edge.second].ClassNumber = ParentInfo.ClassNumber;
       }
     }
   }
