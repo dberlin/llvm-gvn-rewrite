@@ -129,16 +129,17 @@ void ControlEquivalence::cycleEquiv(const BasicBlock *From) {
   const BasicBlock *hi2 = nullptr;
   unsigned hi2DFS;
   for (auto &BB : Info.Children) {
-    if (!hi1 || BlockData[Info.Hi].DFSNumber < hi1DFS) {
+    BlockCEData &BBData = BlockData[BB];
+    if (!hi1 || BlockData[BBData.Hi].DFSNumber < hi1DFS) {
       if (!hi2 || hi1DFS < hi2DFS) {
         hi2 = hi1;
         hi2DFS = hi1DFS;
       }
-      hi1 = BlockData[BB].Hi;
+      hi1 = BBData.Hi;
       hi1DFS = BlockData[hi1].DFSNumber;
-    } else if (!hi2 || BlockData[Info.Hi].DFSNumber < hi2DFS) {
-      hi2 = Info.Hi;
-      hi2DFS = BlockData[Info.Hi].DFSNumber;
+    } else if (!hi2 || BlockData[BBData.Hi].DFSNumber < hi2DFS) {
+      hi2 = BBData.Hi;
+      hi2DFS = BlockData[BBData.Hi].DFSNumber;
     }
   }
 
