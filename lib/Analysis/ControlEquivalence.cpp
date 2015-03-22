@@ -212,6 +212,17 @@ void ControlEquivalence::visitPre(const BasicBlock *B) {
   BlockData[B].DFSNumber = ++DFSNumber;
   DEBUG(dbgs() << "Assigned DFS Number " << BlockData[B].DFSNumber << "\n");
 }
+void ControlEquivalence::debugBracketList(const BracketList &BList) {
+  dbgs() << "{";
+  for (auto &Bracket : BList) {
+    dbgs() << "(";
+    Bracket.From->printAsOperand(dbgs());
+    dbgs() << ",";
+    Bracket.To->printAsOperand(dbgs());
+    dbgs() << ") ";
+  }
+  dbgs() << "}";
+}
 
 void ControlEquivalence::visitMid(const BasicBlock *B, DFSDirection Direction) {
   DEBUG(dbgs() << "mid-order visit of block ");
@@ -235,7 +246,11 @@ void ControlEquivalence::visitMid(const BasicBlock *B, DFSDirection Direction) {
                                          "direction");
     visitBackedge(B, FakeEnd, PredDirection);
   }
-
+  DEBUG(dbgs()<<"Bracket list is ");
+  DEBUG(debugBracketList(BList));
+  DEBUG(dbgs()<<"\n");
+  
+  
   // Potentially start a new equivalence class [line:37]
   Bracket &Recent = BList.back();
   if (Recent.RecentSize != BList.size()) {
@@ -254,7 +269,9 @@ void ControlEquivalence::visitPost(const BasicBlock *B,
   BlockCEData &Info = BlockData[B];
   BracketList &BList = Info.BList;
   // Remove brackets pointing to this node [line:19].
-
+  DEBUG(dbgs()<<"Removing brackets pointing to ");
+  DEBUG(B->printAsOperand(dbgs()));
+  DEBUG(dbgs()<<"\n");
   for (auto BLI = BList.begin(), BLE = BList.end(); BLI != BLE;) {
     if (BLI->To == B && BLI->Direction != Direction) {
       BLI = BList.erase(BLI);
@@ -265,6 +282,9 @@ void ControlEquivalence::visitPost(const BasicBlock *B,
 
   // Propagate bracket list up the DFS tree [line:13].
   if (ParentBlock != nullptr) {
+    DEBUG(dbgs()<<"Splicing bracket into ");
+    DEBUG(ParentBlock->printAsOperand(dbgs()));
+    DEBUG(dbgs()<<"\n");
     BracketList &ParentBList = BlockData[ParentBlock].BList;
     ParentBList.splice(ParentBList.end(), BList);
   }
