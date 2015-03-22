@@ -219,6 +219,7 @@ private:
   unsigned ClassNumber;
   SmallDenseMap<const BasicBlock *, BlockCEData, 8> BlockData;
   bool Computed;
+  const BasicBlock *FakeStart;
   const BasicBlock *FakeEnd;
 };
 }

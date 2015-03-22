@@ -35,9 +35,12 @@ bool ControlEquivalence::runOnFunction(Function &F) {
   // The algorithm requires we transform the CFG into a strongly connected
   // component. We make a fake end, connect exit blocks to it, and then connect
   // the fake end and the real start (since we only have one of those).
+  FakeStart = BasicBlock::Create(F.getContext(), "FakeStart");
   FakeEnd = BasicBlock::Create(F.getContext(), "FakeEnd");
-  BlockData[FakeEnd].FakeSuccEdges.push_back(&F.getEntryBlock());
-  BlockData[&F.getEntryBlock()].FakePredEdges.push_back(FakeEnd);
+  BlockData[FakeEnd].FakeSuccEdges.push_back(FakeStart);
+  BlockData[FakeStart].FakePredEdges.push_back(FakeEnd);
+  BlockData[FakeStart].FakeSuccEdges.push_back(&F.getEntryBlock());
+  
   //  BlockData.resize(F.size());
   for (auto &B : F) {
     BlockCEData &Info = BlockData[&B];
@@ -67,6 +70,7 @@ bool ControlEquivalence::runOnFunction(Function &F) {
 void ControlEquivalence::releaseMemory() {
   BlockData.clear();
   delete FakeEnd;
+  delete FakeStart;
 }
 
 // print - Show contents in human readable format...
