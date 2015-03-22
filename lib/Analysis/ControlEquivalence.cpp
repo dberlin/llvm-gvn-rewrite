@@ -40,6 +40,7 @@ bool ControlEquivalence::runOnFunction(Function &F) {
   BlockData[FakeEnd].FakeSuccEdges.push_back(FakeStart);
   BlockData[FakeStart].FakePredEdges.push_back(FakeEnd);
   BlockData[FakeStart].FakeSuccEdges.push_back(&F.getEntryBlock());
+  BlockData[&F.getEntryBlock()].FakePredEdges.push_back(FakeStart);
   
   //  BlockData.resize(F.size());
   for (auto &B : F) {
