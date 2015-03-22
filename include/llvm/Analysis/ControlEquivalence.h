@@ -155,6 +155,15 @@ private:
     return const_combined_iterator(BB, FakePreds, nullptr, true);
   }
 
+  
+struct DFSStackEntry
+{
+  const BasicBlock *BB;
+  const BasicBlock *Parent;
+  const_combined_iterator ChildIt;
+  const_combined_iterator ChildEnd;
+};
+
   struct BlockCEData {
     // Equivalence class number assigned to Block.
     unsigned ClassNumber;
@@ -185,8 +194,7 @@ private:
     ~BlockCEData() {}
   };
 
-  void runDFS(const BasicBlock *, SmallPtrSetImpl<const BasicBlock *> &,
-              DenseSet<BasicBlockEdgeType> &,
+  void runDFS(const BasicBlock *,
               std::vector<const BasicBlock *> &);
   void cycleEquiv(const BasicBlock *);
   void debugBracketList(const BracketList &BList);

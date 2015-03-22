@@ -55,11 +55,9 @@ bool ControlEquivalence::runOnFunction(Function &F) {
       BlockData[FakeEnd].FakePreds.push_back(&B);
     }
   }
-  SmallPtrSet<const BasicBlock *, 8> Visited;
   std::vector<const BasicBlock *> AllNodes;
-  DenseSet<BasicBlockEdgeType> VisitedEdges;
   // First do an undirected DFS, and get all the nodes in DFS preorder
-  runDFS(FakeStart, Visited, VisitedEdges, AllNodes);
+  runDFS(FakeStart, AllNodes);
   // Now go through all the nodes in DFS post order, and compute cycle
   // equivalence
   for (auto POI = AllNodes.rbegin(), POE = AllNodes.rend(); POI != POE; ++POI) {
@@ -88,60 +86,74 @@ void ControlEquivalence::print(raw_ostream &O, const Module *M) const {}
 
 // Construct an undirected Depth First Spanning Tree, produce the list of nodes,
 // in preorder, in AllNodes.
-void ControlEquivalence::runDFS(const BasicBlock *BB,
-                                SmallPtrSetImpl<const BasicBlock *> &Visited,
-                                DenseSet<BasicBlockEdgeType> &VisitedEdges,
+void ControlEquivalence::runDFS(const BasicBlock *StartBlock,
                                 std::vector<const BasicBlock *> &AllNodes) {
-  DEBUG(dbgs() << "Starting visit of block ");
-  DEBUG(BB->printAsOperand(dbgs()));
-  DEBUG(dbgs() << "\n");
+  std::stack<DFSStackEntry> DFSStack;
+  BlockCEData &StartInfo = BlockData[StartBlock];
+  StartInfo.DFSNumber = ++DFSNumber;
+  StartInfo.OnStack = true;
+  // Push the start block
+  DFSStack.push(
+      {StartBlock, nullptr,
+       all_edges_begin(StartBlock, StartInfo.FakePreds, StartInfo.FakeSucc),
+       all_edges_end(StartBlock, StartInfo.FakePreds)});
 
-  assert(!Visited.count(BB) && "We already visited this node");
-  BlockCEData &Info = BlockData[BB];
-  Info.DFSNumber = Visited.size();
-  //++DFSNumber;
-  DEBUG(dbgs() << "DFS Number set to " << Info.DFSNumber << "\n");
-  Visited.insert(BB);
-  AllNodes.push_back(BB);
-
-  // We get preds, then succs, then fake preds, then fake succs
-  for (auto CCI = all_edges_begin(BB, Info.FakePreds, Info.FakeSucc),
-            CCE = all_edges_end(BB, Info.FakePreds);
-       CCI != CCE; ++CCI) {
-    // If we haven't visited, mark this as a child, and go on
-    if (!Visited.count(*CCI)) {
-      Info.Children.emplace_front(*CCI);
-      BlockData[*CCI].Parent = BB;
+  while (!DFSStack.empty()) {
+    DFSStackEntry &Entry = DFSStack.top();
+    if (Entry.ChildIt != Entry.ChildEnd) {
+      const BasicBlock *Child = *Entry.ChildIt;
+      ++Entry.ChildIt;
+      BlockCEData &ChildInfo = BlockData[Child];
+      if (ChildInfo.Visited)
+        continue;
+      ChildInfo.Parent = Entry.BB;
       DEBUG(dbgs() << "Going to visit ");
-      DEBUG((*CCI)->printAsOperand(dbgs()));
+      DEBUG(Child->printAsOperand(dbgs()));
       DEBUG(dbgs() << " from ");
-      DEBUG(BB->printAsOperand(dbgs()));
-      DEBUG(dbgs() << " parent set to ");
-      if (Info.Parent)
-        DEBUG(Info.Parent->printAsOperand(dbgs()));
-      else
-        DEBUG(dbgs() << " null");
-
+      DEBUG(Entry.BB->printAsOperand(dbgs()));
       DEBUG(dbgs() << "\n");
+      if (ChildInfo.OnStack) {
+        if (Child != Entry.Parent) {
+          DEBUG(dbgs() << "Adding ");
+          DEBUG(Child->printAsOperand(dbgs()));
+          DEBUG(dbgs() << " as backedge of ");
+          DEBUG(Entry.BB->printAsOperand(dbgs()));
+          DEBUG(dbgs() << "\n");
+          //     DEBUG(dbgs() << " parent was ");
+          //     if (Info.Parent)
+          //       DEBUG(Info.Parent->printAsOperand(dbgs()));
+          //     else
+          //       DEBUG(dbgs() << " null");
+          // This is a backedge
+          //     Info.Backedges.emplace_front(BB, *CCI);
+          auto &EntryInfo = BlockData[Entry.BB];
+          EntryInfo.Backedges.emplace_front(Entry.BB, Child);
+        }
+      } else {
+        ChildInfo.Parent = Entry.BB;
+        auto &EntryInfo = BlockData[Entry.BB];
 
-      runDFS(*CCI, Visited, VisitedEdges, AllNodes);
-    } else if (*CCI != Info.Parent) {
-      // We've hit something other than our parent
-      // node again so this must be a backedge
-      Info.Backedges.emplace_front(BB, *CCI);
-      VisitedEdges.insert({BB, *CCI});
-
-      DEBUG(dbgs() << "Adding ");
-      DEBUG((*CCI)->printAsOperand(dbgs()));
-      DEBUG(dbgs() << " as backedge of ");
-      DEBUG(BB->printAsOperand(dbgs()));
-      DEBUG(dbgs() << " parent was ");
-      if (Info.Parent)
-        DEBUG(Info.Parent->printAsOperand(dbgs()));
-      else
-        DEBUG(dbgs() << " null");
-
-      DEBUG(dbgs() << "\n");
+        DEBUG(dbgs() << "Parent set to ");
+        if (ChildInfo.Parent)
+          DEBUG(ChildInfo.Parent->printAsOperand(dbgs()));
+        else
+          DEBUG(dbgs() << " null");
+        DEBUG(dbgs() << "\n");
+        EntryInfo.Children.push_back(Child);
+        DFSStack.push(
+            {Child, Entry.BB,
+             all_edges_begin(Child, ChildInfo.FakePreds, ChildInfo.FakeSucc),
+             all_edges_end(Child, ChildInfo.FakePreds)});
+        ChildInfo.OnStack = true;
+        ChildInfo.DFSNumber = ++DFSNumber;
+        AllNodes.push_back(Child);
+        DEBUG(dbgs() << "DFS Number set to " << ChildInfo.DFSNumber << "\n");
+      }
+    } else {
+      auto &EntryInfo = BlockData[Entry.BB];
+      DFSStack.pop();
+      EntryInfo.OnStack = false;
+      EntryInfo.Visited = true;
     }
   }
 }
@@ -332,7 +344,7 @@ void ControlEquivalence::cycleEquiv(const BasicBlock *From) {
   DEBUG(debugBracketList(Info.BList));
 
   // If n is not the root of the DFS tree
-  if (From != FakeStart) {
+  if (From != FakeStart || 1) {
     // Determine class for edge from parent(n) to n
     const BasicBlock *Parent = Info.Parent;
     if (Parent) {
