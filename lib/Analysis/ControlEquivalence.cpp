@@ -287,6 +287,10 @@ void ControlEquivalence::visitPost(const BasicBlock *B,
     DEBUG(dbgs()<<"\n");
     BracketList &ParentBList = BlockData[ParentBlock].BList;
     ParentBList.splice(ParentBList.end(), BList);
+    DEBUG(dbgs() <<"Parent bracket list is now");
+    DEBUG(debugBracketList(ParentBList));
+    DEBUG(dbgs()<<"\n");
+    
   }
 }
 
