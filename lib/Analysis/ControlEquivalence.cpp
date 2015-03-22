@@ -120,6 +120,7 @@ void ControlEquivalence::runUndirectedDFS(const BasicBlock *StartBlock) {
         // If it's on the stack, we've found a backedge, otherwise, push it
         // and preorder-visit
         if (PredData.OnStack) {
+          DEBUG(dbgs()<<"Maybe visit pred backedge\n");
           if (Pred != Entry.ParentBlock)
             visitBackedge(B, Pred, PredDirection);
         } else {
@@ -148,6 +149,7 @@ void ControlEquivalence::runUndirectedDFS(const BasicBlock *StartBlock) {
         // If it's on the stack, we've found a backedge, otherwise, push it
         // and preorder-visit
         if (SuccData.OnStack) {
+          DEBUG(dbgs()<<"Maybe visit succ backedge\n");
           if (Succ != Entry.ParentBlock)
             visitBackedge(B, Succ, SuccDirection);
         } else {
