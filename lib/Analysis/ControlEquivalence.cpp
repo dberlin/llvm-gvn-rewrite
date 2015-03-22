@@ -41,14 +41,15 @@ bool ControlEquivalence::runOnFunction(Function &F) {
   //  BlockData.resize(F.size());
   for (auto &B : F) {
     BlockCEData &Info = BlockData[&B];
-    // If this is an unreachable block, we don't care about it
+    /*    // If this is an unreachable block, we don't care about it
     if (pred_empty(&B)) {
       Info.Participates = false;
-    }
+      }*/
     // If there are no successors, we need to connect it to the exit block
     if (succ_empty(&B)) {
       // Connect leaves to fake end
       Info.FakeSuccEdges.push_back(FakeEnd);
+      BlockData[FakeEnd].FakePredEdges.push_back(&B);
     }
   }
   runUndirectedDFS(FakeEnd);
@@ -222,7 +223,6 @@ void ControlEquivalence::visitMid(const BasicBlock *B, DFSDirection Direction) {
     assert(Direction == PredDirection && "Should not have to do this unless we "
                                          "are going in the backwards "
                                          "direction");
-    // Connect to all the ends, making one huge succ
     visitBackedge(B, FakeEnd, PredDirection);
   }
 
