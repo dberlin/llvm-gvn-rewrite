@@ -97,7 +97,7 @@ void ControlEquivalence::runDFS(const BasicBlock *StartBlock,
       {StartBlock, nullptr,
        all_edges_begin(StartBlock, StartInfo.FakePreds, StartInfo.FakeSucc),
        all_edges_end(StartBlock, StartInfo.FakePreds)});
-
+  AllNodes.push_back(StartBlock);
   while (!DFSStack.empty()) {
     DFSStackEntry &Entry = DFSStack.top();
     if (Entry.ChildIt != Entry.ChildEnd) {
@@ -106,7 +106,6 @@ void ControlEquivalence::runDFS(const BasicBlock *StartBlock,
       BlockCEData &ChildInfo = BlockData[Child];
       if (ChildInfo.Visited)
         continue;
-      ChildInfo.Parent = Entry.BB;
       DEBUG(dbgs() << "Going to visit ");
       DEBUG(Child->printAsOperand(dbgs()));
       DEBUG(dbgs() << " from ");
@@ -128,6 +127,7 @@ void ControlEquivalence::runDFS(const BasicBlock *StartBlock,
           //     Info.Backedges.emplace_front(BB, *CCI);
           auto &EntryInfo = BlockData[Entry.BB];
           EntryInfo.Backedges.emplace_front(Entry.BB, Child);
+          ChildInfo.Backedges.emplace_front(Entry.BB, Child);
         }
       } else {
         ChildInfo.Parent = Entry.BB;
@@ -222,9 +222,10 @@ void ControlEquivalence::cycleEquiv(const BasicBlock *From) {
   const BasicBlock *hi0 = nullptr;
   unsigned hi0DFS;
   for (auto &BBEdge : Info.Backedges) {
-    assert(BBEdge.second != From);
-    if (!hi0 || BlockData[BBEdge.second].DFSNumber < hi0DFS) {
-      hi0 = BBEdge.second;
+    const BasicBlock *OtherEnd = BBEdge.second == From ? BBEdge.first : BBEdge.second;
+
+    if (!hi0 || BlockData[OtherEnd].DFSNumber < hi0DFS) {
+      hi0 = OtherEnd;
       hi0DFS = BlockData[hi0].DFSNumber;
     }
   }
@@ -294,9 +295,9 @@ void ControlEquivalence::cycleEquiv(const BasicBlock *From) {
 
   // For each backedge b from a descendant of n to n
   for (auto &BBEdge : Info.Backedges) {
-    assert(BBEdge.second != From);
+    const BasicBlock *OtherEnd = BBEdge.second == From ? BBEdge.first : BBEdge.second;
     // See if it's our descendant
-    BlockCEData &BBData = BlockData[BBEdge.second];
+    BlockCEData &BBData = BlockData[OtherEnd];
     if (BBData.DFSNumber > Info.DFSNumber) {
       // TODO fix this
       size_t beforesize = Info.BList.size();
@@ -307,7 +308,7 @@ void ControlEquivalence::cycleEquiv(const BasicBlock *From) {
       DEBUG(dbgs() << "Backedge was from ");
       DEBUG(From->printAsOperand(dbgs()));
       DEBUG(dbgs() << " to  ");
-      DEBUG(BBEdge.second->printAsOperand(dbgs()));
+      DEBUG(OtherEnd->printAsOperand(dbgs()));
       DEBUG(dbgs() << "\n");
 
       assert((beforesize == 0 || beforesize != Info.BList.size()));
@@ -318,16 +319,16 @@ void ControlEquivalence::cycleEquiv(const BasicBlock *From) {
         DEBUG(dbgs() << " is ");
         DEBUG(debugBracketList(Info.BList));
         DEBUG(dbgs() << "Backedge updated class number for ");
-        DEBUG(BBEdge.second->printAsOperand(dbgs()));
+        DEBUG(OtherEnd->printAsOperand(dbgs()));
         DEBUG(dbgs() << " to " << BBData.ClassNumber << "\n");
       }
     }
   }
 
   for (auto &BBEdge : Info.Backedges) {
-    assert(BBEdge.second != From);
+    const BasicBlock *OtherEnd = BBEdge.second == From ? BBEdge.first : BBEdge.second;
     // See if it's our ancestor
-    BlockCEData &BBData = BlockData[BBEdge.second];
+    BlockCEData &BBData = BlockData[OtherEnd];
     if (BBData.DFSNumber <= Info.DFSNumber) {
       auto Place = Info.BList.insert(Info.BList.begin(), {BBEdge, 0, 0});
     }
@@ -348,24 +349,23 @@ void ControlEquivalence::cycleEquiv(const BasicBlock *From) {
     // Determine class for edge from parent(n) to n
     const BasicBlock *Parent = Info.Parent;
     if (Parent) {
-      BlockCEData &ParentInfo = BlockData[Parent];
       Bracket &Top = Info.BList.front();
       if (Top.RecentSize != Info.BList.size()) {
         Top.RecentSize = Info.BList.size();
         Top.RecentClass = ++ClassNumber;
       }
       DEBUG(dbgs() << "Parent updated class number for ");
-      DEBUG(Parent->printAsOperand(dbgs()));
+      DEBUG(From->printAsOperand(dbgs()));
       DEBUG(dbgs() << " to " << Top.RecentClass << "\n");
-      ParentInfo.ClassNumber = Top.RecentClass;
+      Info.ClassNumber = Top.RecentClass;
 
       if (Top.RecentSize == 1) {
         // assert(Top.From != From);
         assert(Top.Edge.second != From);
         DEBUG(dbgs() << "Top Size updated class number for ");
         DEBUG(Top.Edge.second->printAsOperand(dbgs()));
-        DEBUG(dbgs() << " to " << ParentInfo.ClassNumber << "\n");
-        BlockData[Top.Edge.second].ClassNumber = ParentInfo.ClassNumber;
+        DEBUG(dbgs() << " to " << Info.ClassNumber << "\n");
+        BlockData[Top.Edge.second].ClassNumber = Info.ClassNumber;
       }
     }
   }
