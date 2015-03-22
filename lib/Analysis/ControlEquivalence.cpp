@@ -52,7 +52,7 @@ bool ControlEquivalence::runOnFunction(Function &F) {
       BlockData[FakeEnd].FakePredEdges.push_back(&B);
     }
   }
-  runUndirectedDFS(FakeEnd);
+  runUndirectedDFS(&F.getEntryBlock());
 #ifndef NDEBUG
   for (auto &B : F) {
     dbgs() << "Class number for block ";
