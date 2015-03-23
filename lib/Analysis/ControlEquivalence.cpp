@@ -31,7 +31,7 @@ bool ControlEquivalence::runOnFunction(Function &F) {
   Computed = false;
   DFSNumber = 0;
   ClassNumber = 1;
-
+  unsigned ListID = 0;
   // The algorithm requires we transform the CFG into a strongly connected
   // component. We make a fake end, connect exit blocks to it, and then connect
   // the fake end and the real start (since we only have one of those).
@@ -41,17 +41,18 @@ bool ControlEquivalence::runOnFunction(Function &F) {
   BlockData[FakeStart].FakePredEdges.push_back(FakeEnd);
   BlockData[FakeStart].FakeSuccEdges.push_back(&F.getEntryBlock());
   BlockData[&F.getEntryBlock()].FakePredEdges.push_back(FakeStart);
-  BracketLists.resize(F.size() + 1);
-  BListForwarding.resize(F.size() + 1);
-  unsigned ListID = 0;
+  BlockData[FakeEnd].BracketListID = ListID++;
+  BlockData[FakeStart].BracketListID = ListID++;
+  BracketLists.resize(F.size() + 3);
+  BListForwarding.resize(F.size() + 3);
   //  BlockData.resize(F.size());
   for (auto &B : F) {
     BlockCEData &Info = BlockData[&B];
     Info.BracketListID = ListID++;
     BListForwarding[Info.BracketListID] = Info.BracketListID;
-    // If this is an unreachable block, we don't care about it
+    // If this is a reverse-unreachable block, we don't care about it
     if (pred_empty(&B) && &B != &F.getEntryBlock()) {
-      // Info.Participates = false;
+      Info.Participates = false;
     }
     // If there are no successors, we need to connect it to the exit block
     if (succ_empty(&B)) {
@@ -263,6 +264,8 @@ void ControlEquivalence::visitMid(const BasicBlock *B, DFSDirection Direction) {
 
   // Potentially introduce artificial dependency from start to ends.
   if (BList.empty()) {
+    DEBUG(dbgs()<<"Bracket list was empty\n");
+    
     assert(Direction == PredDirection && "Should not have to do this unless we "
                                          "are going in the backwards "
                                          "direction");
