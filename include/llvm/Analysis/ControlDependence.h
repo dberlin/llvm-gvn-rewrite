@@ -55,7 +55,7 @@ public:
 
   unsigned getClassNumber(BasicBlock *BB) {
     assert(Computed && "Trying to get equivalence classes before computation");
-    return BlockData[BB].ClassNumber;
+    return BlockInfo[BB].ClassNumber;
   }
 
 private:
@@ -159,7 +159,7 @@ private:
                                         EL.end());
   }
 
-  struct BlockCEData {
+  struct BlockData {
     // Equivalence class number assigned to Block.
     unsigned ClassNumber;
     // Pre-order DFS number assigned to Block.
@@ -178,10 +178,10 @@ private:
     FakeEdgeListType FakePredEdges;
     // List of bracket iterators that point to us
     std::list<BracketList::iterator> BracketIterators;
-    BlockCEData()
+    BlockData()
         : ClassNumber(0), DFSNumber(0), Visited(false), OnStack(false),
           Participates(true) {}
-    ~BlockCEData() {}
+    ~BlockData() {}
   };
   struct DFSStackEntry {
     // Direction currently used in DFS walk.
@@ -220,7 +220,7 @@ private:
 
   unsigned DFSNumber;
   unsigned ClassNumber;
-  SmallDenseMap<const BasicBlock *, BlockCEData, 8> BlockData;
+  SmallDenseMap<const BasicBlock *, BlockData, 8> BlockInfo;
   bool Computed;
   const BasicBlock *FakeStart;
   const BasicBlock *FakeEnd;

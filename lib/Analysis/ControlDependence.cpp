@@ -20,8 +20,8 @@
 using namespace llvm;
 char ControlDependence::ID = 0;
 #define DEBUG_TYPE "controlequiv"
-INITIALIZE_PASS(ControlDependence, "controlequiv",
-                "Control Equivalence Construction", true, true);
+INITIALIZE_PASS(ControlDependence, "controldep",
+                "Control Dependence Construction", true, true);
 
 // Run the main algorithm starting from the exit blocks. We proceed to perform
 // an undirected depth-first backwards traversal that determines class numbers
@@ -32,17 +32,18 @@ bool ControlDependence::runOnFunction(Function &F) {
   DFSNumber = 0;
   ClassNumber = 1;
   // The algorithm requires we transform the CFG into a strongly connected
-  // component. We make a fake end, connect exit blocks to it, and then connect
-  // the fake end and the real start (since we only have one of those).
+  // component. We make a fake start and end, connect exiting blocks to the fake
+  // end, and then connect the fake end and the fake start.
   FakeStart = BasicBlock::Create(F.getContext(), "FakeStart");
   FakeEnd = BasicBlock::Create(F.getContext(), "FakeEnd");
-  BlockData[FakeEnd].FakeSuccEdges.push_back(FakeStart);
-  BlockData[FakeStart].FakePredEdges.push_back(FakeEnd);
-  BlockData[FakeStart].FakeSuccEdges.push_back(&F.getEntryBlock());
-  BlockData[&F.getEntryBlock()].FakePredEdges.push_back(FakeStart);
-  //  BlockData.resize(F.size());
+  BlockInfo[FakeEnd].FakeSuccEdges.push_back(FakeStart);
+  BlockInfo[FakeStart].FakePredEdges.push_back(FakeEnd);
+  BlockInfo[FakeStart].FakeSuccEdges.push_back(&F.getEntryBlock());
+  BlockInfo[&F.getEntryBlock()].FakePredEdges.push_back(FakeStart);
+
+  //  BlockInfo.resize(F.size());
   for (auto &B : F) {
-    BlockCEData &Info = BlockData[&B];
+    BlockData &Info = BlockInfo[&B];
     // If this is a reverse-unreachable block, we don't care about it
     if (pred_empty(&B) && &B != &F.getEntryBlock()) {
       Info.Participates = false;
@@ -51,15 +52,15 @@ bool ControlDependence::runOnFunction(Function &F) {
     if (succ_empty(&B)) {
       // Connect leaves to fake end
       Info.FakeSuccEdges.push_back(FakeEnd);
-      BlockData[FakeEnd].FakePredEdges.push_back(&B);
+      BlockInfo[FakeEnd].FakePredEdges.push_back(&B);
     }
   }
-  runUndirectedDFS(FakeStart);
+  runUndirectedDFS(&F.getEntryBlock());
 #ifndef NDEBUG
   for (auto &B : F) {
     dbgs() << "Class number for block ";
     B.printAsOperand(dbgs());
-    dbgs() << " is " << BlockData[&B].ClassNumber << "\n";
+    dbgs() << " is " << BlockInfo[&B].ClassNumber << "\n";
   }
 #endif
 
@@ -69,9 +70,9 @@ bool ControlDependence::runOnFunction(Function &F) {
 
 void ControlDependence::releaseMemory() {
   if (Computed) {
-    BlockData.clear();
-    delete FakeEnd;
+    BlockInfo.clear();
     delete FakeStart;
+    delete FakeEnd;
   }
   Computed = false;
 }
@@ -112,7 +113,7 @@ void ControlDependence::runUndirectedDFS(const BasicBlock *StartBlock) {
       if (Entry.Pred != Entry.PredEnd) {
         const BasicBlock *Pred = *Entry.Pred;
         ++(Entry.Pred);
-        BlockCEData &PredData = BlockData.find(Pred)->second;
+        BlockData &PredData = BlockInfo.find(Pred)->second;
         if (!PredData.Participates)
           continue;
         if (PredData.Visited)
@@ -141,7 +142,7 @@ void ControlDependence::runUndirectedDFS(const BasicBlock *StartBlock) {
       if (Entry.Succ != Entry.SuccEnd) {
         const BasicBlock *Succ = *Entry.Succ;
         ++(Entry.Succ);
-        BlockCEData &SuccData = BlockData.find(Succ)->second;
+        BlockData &SuccData = BlockInfo.find(Succ)->second;
         if (!SuccData.Participates)
           continue;
         if (SuccData.Visited)
@@ -178,8 +179,8 @@ void ControlDependence::runUndirectedDFS(const BasicBlock *StartBlock) {
 void ControlDependence::pushDFS(DFSStack &Stack, const BasicBlock *B,
                                 const BasicBlock *From,
                                 DFSDirection Direction) {
-  auto BlockResult = BlockData.find(B);
-  assert(BlockResult != BlockData.end() && "Should have found block data");
+  auto BlockResult = BlockInfo.find(B);
+  assert(BlockResult != BlockInfo.end() && "Should have found block data");
 
   auto &BlockResultData = BlockResult->second;
   assert(!BlockResultData.Visited && "Should not have been visited yet");
@@ -195,9 +196,9 @@ void ControlDependence::pushDFS(DFSStack &Stack, const BasicBlock *B,
 }
 void ControlDependence::popDFS(DFSStack &Stack, const BasicBlock *B) {
   assert(Stack.top().Block == B && "Stack top is wrong");
-  auto BlockResult = BlockData.find(B);
+  auto BlockResult = BlockInfo.find(B);
 
-  assert(BlockResult != BlockData.end() && "Should have found block data");
+  assert(BlockResult != BlockInfo.end() && "Should have found block data");
   auto &BlockResultData = BlockResult->second;
   BlockResultData.OnStack = false;
   BlockResultData.Visited = true;
@@ -209,8 +210,8 @@ void ControlDependence::visitPre(const BasicBlock *B) {
   DEBUG(B->printAsOperand(dbgs()));
   DEBUG(dbgs() << "\n");
 
-  BlockData[B].DFSNumber = ++DFSNumber;
-  DEBUG(dbgs() << "Assigned DFS Number " << BlockData[B].DFSNumber << "\n");
+  BlockInfo[B].DFSNumber = ++DFSNumber;
+  DEBUG(dbgs() << "Assigned DFS Number " << BlockInfo[B].DFSNumber << "\n");
 }
 void ControlDependence::debugBracketList(const BracketList &BList) {
   dbgs() << "{";
@@ -228,36 +229,40 @@ void ControlDependence::visitMid(const BasicBlock *B, DFSDirection Direction) {
   DEBUG(dbgs() << "mid-order visit of block ");
   DEBUG(B->printAsOperand(dbgs()));
   DEBUG(dbgs() << "\n");
-  BlockCEData &Info = BlockData[B];
+  BlockData &Info = BlockInfo[B];
   BracketList &BList = Info.BList;
   // Remove brackets pointing to this node [line:19].
   DEBUG(dbgs() << "Removing brackets pointing to ");
   DEBUG(B->printAsOperand(dbgs()));
   DEBUG(dbgs() << "\n");
-  
+
   // By the time we hit this node, we are guaranteed these iterators will point
   // into our list, because it must have been spliced into us.
-  
-  for (auto BII = Info.BracketIterators.begin(),
-            BIE = Info.BracketIterators.end();
-       BII != BIE;) {
-    if ((*BII)->To == B && (*BII)->Direction != Direction) {
-      Info.BList.erase(*BII);
-      BII = Info.BracketIterators.erase(BII);
-    } else
-      ++BII;
+
+  // for (auto BII = Info.BracketIterators.begin(),
+  //           BIE = Info.BracketIterators.end();
+  //      BII != BIE;) {
+  //   if ((*BII)->To == B && (*BII)->Direction != Direction) {
+  //     Info.BList.erase(*BII);
+  //     BII = Info.BracketIterators.erase(BII);
+  //   } else
+  //     ++BII;
+  // }
+
+  for (auto BLI = BList.begin(), BLE = BList.end(); BLI != BLE;) {
+    if (BLI->To == B && BLI->Direction != Direction) {
+      BLI = BList.erase(BLI);
+    } else {
+      ++BLI;
+    }
   }
 
+  // We should have at least hit the artificial edge connecting end and start as
+  // a backedge, which would have started a bracket list that would have
+  // propagated up to this point, so this should not be possible.
+  assert(!BList.empty() && "This should have never happened at this point, we "
+                           "should have hit at least one backedge");
 
-  // Potentially introduce artificial dependency from start to ends.
-  if (BList.empty()) {
-    DEBUG(dbgs() << "Bracket list was empty\n");
-
-    assert(Direction == PredDirection && "Should not have to do this unless we "
-                                         "are going in the backwards "
-                                         "direction");
-    visitBackedge(B, FakeEnd, PredDirection);
-  }
   DEBUG(dbgs() << "Bracket list is ");
   DEBUG(debugBracketList(BList));
   DEBUG(dbgs() << "\n");
@@ -278,7 +283,7 @@ void ControlDependence::visitPost(const BasicBlock *B,
   DEBUG(dbgs() << "post-order visit of block ");
   DEBUG(B->printAsOperand(dbgs()));
   DEBUG(dbgs() << "\n");
-  BlockCEData &Info = BlockData[B];
+  BlockData &Info = BlockInfo[B];
   BracketList &BList = Info.BList;
   // Remove brackets pointing to this node [line:19].
   DEBUG(dbgs() << "Removing brackets pointing to ");
@@ -287,14 +292,22 @@ void ControlDependence::visitPost(const BasicBlock *B,
 
   // By the time we hit this node, we are guaranteed these iterators will point
   // into our list, because it must have been spliced into us.
-  for (auto BII = Info.BracketIterators.begin(),
-            BIE = Info.BracketIterators.end();
-       BII != BIE;) {
-    if ((*BII)->To == B && (*BII)->Direction != Direction) {
-      Info.BList.erase(*BII);
-      BII = Info.BracketIterators.erase(BII);
-    } else
-      ++BII;
+  // for (auto BII = Info.BracketIterators.begin(),
+  //           BIE = Info.BracketIterators.end();
+  //      BII != BIE;) {
+  //   if ((*BII)->To == B && (*BII)->Direction != Direction) {
+  //     Info.BList.erase(*BII);
+  //     BII = Info.BracketIterators.erase(BII);
+  //   } else
+  //     ++BII;
+  // }
+
+  for (auto BLI = BList.begin(), BLE = BList.end(); BLI != BLE;) {
+    if (BLI->To == B && BLI->Direction != Direction) {
+      BLI = BList.erase(BLI);
+    } else {
+      ++BLI;
+    }
   }
 
   // Propagate bracket list up the DFS tree [line:13].
@@ -302,7 +315,7 @@ void ControlDependence::visitPost(const BasicBlock *B,
     DEBUG(dbgs() << "Splicing bracket into ");
     DEBUG(ParentBlock->printAsOperand(dbgs()));
     DEBUG(dbgs() << "\n");
-    BracketList &ParentBList = BlockData[ParentBlock].BList;
+    BracketList &ParentBList = BlockInfo[ParentBlock].BList;
     // TODO
     ParentBList.splice(ParentBList.end(), BList);
     DEBUG(dbgs() << "Parent bracket list is now");
@@ -321,8 +334,8 @@ void ControlDependence::visitBackedge(const BasicBlock *From,
   DEBUG(dbgs() << "\n");
 
   // Push backedge onto the bracket list [line:25].
-  BlockCEData &Info = BlockData[From];
+  BlockData &Info = BlockInfo[From];
   BracketList &BList = Info.BList;
   auto Place = BList.insert(BList.end(), Bracket{Direction, 0, 0, From, To});
-  BlockData[To].BracketIterators.push_back(Place);
+  BlockInfo[To].BracketIterators.push_back(Place);
 }
