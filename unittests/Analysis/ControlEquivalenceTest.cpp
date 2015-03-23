@@ -180,4 +180,69 @@ TEST_F(ControlEquivalenceTest, DoubleDiamondTest) {
                      {"samepart1"},
                      {"samepart2"}});
 }
+TEST_F(ControlEquivalenceTest, EmbeddedReturnsTest) {
+  ParseAssembly(" define void @testdiamond() {\n"
+                " start:\n"
+                "  br i1 true, label %same, label %different\n"
+                " same:\n"
+                "  br i1 true, label %samepart1, label %samepart2\n"
+                " samepart1:\n"
+                "  ret void\n"
+                " samepart2:\n"
+                "  ret void\n"
+                " different:\n"
+                "  br label %returnit\n"
+                " returnit:\n"
+                "  ret void\n"
+                " }");
+  // If you look closely, you'll see different and returnit are controlled by
+  // the same predicate, because everything else exits the function
+  ExpectEquivalence({{"start"},
+                     {"same"},
+                     {"samepart1"},
+                     {"samepart2"},
+                     {"different", "returnit"}});
+}
+TEST_F(ControlEquivalenceTest, SimpleLoopTest) {
+  ParseAssembly("define void @testbasicloop() {\n"
+                "start:\n"
+                "  br label %loop\n"
+                "loop:\n"
+                "  br label %loopbody\n"
+                "loopbody:\n"
+                "  br label %looptest\n"
+                "looptest:\n"
+                "  br i1 true, label %loop, label %returnit\n"
+                "returnit:\n"
+                "  ret void\n"
+                "}");
+  ExpectEquivalence(
+      {{"start"}, {"loop", "loopbody", "looptest"}, {"returnit"}});
+}
+TEST_F(ControlEquivalenceTest, IfInLoopTest) {
+  ParseAssembly("define void @testbasicloop() {\n"
+                "start:\n"
+                "  br label %loop\n"
+                "loop:\n"
+                "  br label %loopbody\n"
+                "loopbody:\n"
+                "  br label %loopif\n"
+                "loopif:\n"
+                "  br i1 true, label %looptrue, label %loopfalse\n"
+                "looptrue:\n"
+                "  br label %loopifmerge\n"
+                "loopfalse:\n"
+                "  br label %loopifmerge\n"
+                "loopifmerge:\n"
+                "  br label %looptest\n"
+                "looptest:\n"
+                "  br i1 true, label %loop, label %returnit\n"
+                "returnit:\n"
+                "  ret void\n"
+                "}");
+  ExpectEquivalence({{"start"},
+                     {"loop", "loopbody", "looptest", "loopif", "loopifmerge"},
+                     {"looptrue"},
+                     {"loopfalse"}});
+}
 }
