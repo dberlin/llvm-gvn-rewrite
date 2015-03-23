@@ -216,7 +216,7 @@ private:
                DFSDirection);
   void popDFS(DFSStack &, const BasicBlock *);
   void debugBracketList(const BracketList &);
-  
+
   unsigned DFSNumber;
   unsigned ClassNumber;
   SmallDenseMap<const BasicBlock *, BlockCEData, 8> BlockData;

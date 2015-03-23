@@ -41,14 +41,14 @@ bool ControlEquivalence::runOnFunction(Function &F) {
   BlockData[FakeStart].FakePredEdges.push_back(FakeEnd);
   BlockData[FakeStart].FakeSuccEdges.push_back(&F.getEntryBlock());
   BlockData[&F.getEntryBlock()].FakePredEdges.push_back(FakeStart);
-  
+
   //  BlockData.resize(F.size());
   for (auto &B : F) {
     BlockCEData &Info = BlockData[&B];
-    /*    // If this is an unreachable block, we don't care about it
-    if (pred_empty(&B)) {
+    // If this is an unreachable block, we don't care about it
+    if (pred_empty(&B) && &B != &F.getEntryBlock()) {
       Info.Participates = false;
-      }*/
+    }
     // If there are no successors, we need to connect it to the exit block
     if (succ_empty(&B)) {
       // Connect leaves to fake end
@@ -57,21 +57,18 @@ bool ControlEquivalence::runOnFunction(Function &F) {
     }
   }
   runUndirectedDFS(FakeStart);
-#ifndef NDEBUG
-  for (auto &B : F) {
-    dbgs() << "Class number for block ";
-    B.printAsOperand(dbgs());
-    dbgs() << " is " << BlockData[&B].ClassNumber << "\n";
-  }
-#endif
+
   Computed = true;
   return false;
 }
 
 void ControlEquivalence::releaseMemory() {
-  BlockData.clear();
-  delete FakeEnd;
-  delete FakeStart;
+  if (Computed) {
+    BlockData.clear();
+    delete FakeEnd;
+    delete FakeStart;
+  }
+  Computed = false;
 }
 
 // print - Show contents in human readable format...
@@ -103,7 +100,7 @@ void ControlEquivalence::runUndirectedDFS(const BasicBlock *StartBlock) {
     DEBUG(dbgs() << "Starting from block ");
     DEBUG(B->printAsOperand(dbgs()));
     DEBUG(dbgs() << "\n");
-    
+
     if (Entry.Direction == PredDirection) {
 
       // First visit in pred direction, then swap directions, then visit in succ
@@ -120,7 +117,7 @@ void ControlEquivalence::runUndirectedDFS(const BasicBlock *StartBlock) {
         // If it's on the stack, we've found a backedge, otherwise, push it
         // and preorder-visit
         if (PredData.OnStack) {
-          DEBUG(dbgs()<<"Maybe visit pred backedge\n");
+          DEBUG(dbgs() << "Maybe visit pred backedge\n");
           if (Pred != Entry.ParentBlock)
             visitBackedge(B, Pred, PredDirection);
         } else {
@@ -149,7 +146,7 @@ void ControlEquivalence::runUndirectedDFS(const BasicBlock *StartBlock) {
         // If it's on the stack, we've found a backedge, otherwise, push it
         // and preorder-visit
         if (SuccData.OnStack) {
-          DEBUG(dbgs()<<"Maybe visit succ backedge\n");
+          DEBUG(dbgs() << "Maybe visit succ backedge\n");
           if (Succ != Entry.ParentBlock)
             visitBackedge(B, Succ, SuccDirection);
         } else {
@@ -246,11 +243,10 @@ void ControlEquivalence::visitMid(const BasicBlock *B, DFSDirection Direction) {
                                          "direction");
     visitBackedge(B, FakeEnd, PredDirection);
   }
-  DEBUG(dbgs()<<"Bracket list is ");
+  DEBUG(dbgs() << "Bracket list is ");
   DEBUG(debugBracketList(BList));
-  DEBUG(dbgs()<<"\n");
-  
-  
+  DEBUG(dbgs() << "\n");
+
   // Potentially start a new equivalence class [line:37]
   Bracket &Recent = BList.back();
   if (Recent.RecentSize != BList.size()) {
@@ -269,9 +265,9 @@ void ControlEquivalence::visitPost(const BasicBlock *B,
   BlockCEData &Info = BlockData[B];
   BracketList &BList = Info.BList;
   // Remove brackets pointing to this node [line:19].
-  DEBUG(dbgs()<<"Removing brackets pointing to ");
+  DEBUG(dbgs() << "Removing brackets pointing to ");
   DEBUG(B->printAsOperand(dbgs()));
-  DEBUG(dbgs()<<"\n");
+  DEBUG(dbgs() << "\n");
   for (auto BLI = BList.begin(), BLE = BList.end(); BLI != BLE;) {
     if (BLI->To == B && BLI->Direction != Direction) {
       BLI = BList.erase(BLI);
@@ -282,15 +278,14 @@ void ControlEquivalence::visitPost(const BasicBlock *B,
 
   // Propagate bracket list up the DFS tree [line:13].
   if (ParentBlock != nullptr) {
-    DEBUG(dbgs()<<"Splicing bracket into ");
+    DEBUG(dbgs() << "Splicing bracket into ");
     DEBUG(ParentBlock->printAsOperand(dbgs()));
-    DEBUG(dbgs()<<"\n");
+    DEBUG(dbgs() << "\n");
     BracketList &ParentBList = BlockData[ParentBlock].BList;
     ParentBList.splice(ParentBList.end(), BList);
-    DEBUG(dbgs() <<"Parent bracket list is now");
+    DEBUG(dbgs() << "Parent bracket list is now");
     DEBUG(debugBracketList(ParentBList));
-    DEBUG(dbgs()<<"\n");
-    
+    DEBUG(dbgs() << "\n");
   }
 }
 
