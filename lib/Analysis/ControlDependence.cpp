@@ -32,14 +32,12 @@ bool ControlDependence::runOnFunction(Function &F) {
   DFSNumber = 0;
   ClassNumber = 1;
   // The algorithm requires we transform the CFG into a strongly connected
-  // component. We make a fake start and end, connect exiting blocks to the fake
-  // end, and then connect the fake end and the fake start.
-  FakeStart = BasicBlock::Create(F.getContext(), "FakeStart");
+  // component. We make a fake end, connect exiting blocks to the fake end, and
+  // then connect the fake end and the real start.  We then start the DFS walk
+  // from the fake exit block instead of a fake start block
   FakeEnd = BasicBlock::Create(F.getContext(), "FakeEnd");
-  BlockInfo[FakeEnd].FakeSuccEdges.push_back(FakeStart);
-  BlockInfo[FakeStart].FakePredEdges.push_back(FakeEnd);
-  BlockInfo[FakeStart].FakeSuccEdges.push_back(&F.getEntryBlock());
-  BlockInfo[&F.getEntryBlock()].FakePredEdges.push_back(FakeStart);
+  BlockInfo[FakeEnd].FakeSuccEdges.push_back(&F.getEntryBlock());
+  BlockInfo[&F.getEntryBlock()].FakePredEdges.push_back(FakeEnd);
 
   //  BlockInfo.resize(F.size());
   for (auto &B : F) {
@@ -55,15 +53,7 @@ bool ControlDependence::runOnFunction(Function &F) {
       BlockInfo[FakeEnd].FakePredEdges.push_back(&B);
     }
   }
-  runUndirectedDFS(FakeStart);
-#ifndef NDEBUG
-  for (auto &B : F) {
-    dbgs() << "Class number for block ";
-    B.printAsOperand(dbgs());
-    dbgs() << " is " << BlockInfo[&B].ClassNumber << "\n";
-  }
-#endif
-
+  runUndirectedDFS(FakeEnd);
   Computed = true;
   return false;
 }
@@ -71,7 +61,6 @@ bool ControlDependence::runOnFunction(Function &F) {
 void ControlDependence::releaseMemory() {
   if (Computed) {
     BlockInfo.clear();
-    delete FakeStart;
     delete FakeEnd;
   }
   Computed = false;
@@ -239,23 +228,23 @@ void ControlDependence::visitMid(const BasicBlock *B, DFSDirection Direction) {
   // By the time we hit this node, we are guaranteed these iterators will point
   // into our list, because it must have been spliced into us.
 
-  // for (auto BII = Info.BracketIterators.begin(),
-  //           BIE = Info.BracketIterators.end();
-  //      BII != BIE;) {
-  //   if ((*BII)->To == B && (*BII)->Direction != Direction) {
-  //     Info.BList.erase(*BII);
-  //     BII = Info.BracketIterators.erase(BII);
-  //   } else
-  //     ++BII;
-  // }
-
-  for (auto BLI = BList.begin(), BLE = BList.end(); BLI != BLE;) {
-    if (BLI->To == B && BLI->Direction != Direction) {
-      BLI = BList.erase(BLI);
-    } else {
-      ++BLI;
-    }
+  for (auto BII = Info.BracketIterators.begin(),
+            BIE = Info.BracketIterators.end();
+       BII != BIE;) {
+    if ((*BII)->To == B && (*BII)->Direction != Direction) {
+      Info.BList.erase(*BII);
+      BII = Info.BracketIterators.erase(BII);
+    } else
+      ++BII;
   }
+
+  // for (auto BLI = BList.begin(), BLE = BList.end(); BLI != BLE;) {
+  //   if (BLI->To == B && BLI->Direction != Direction) {
+  //     BLI = BList.erase(BLI);
+  //   } else {
+  //     ++BLI;
+  //   }
+  // }
 
   // We should have at least hit the artificial edge connecting end and start as
   // a backedge, which would have started a bracket list that would have
@@ -292,23 +281,23 @@ void ControlDependence::visitPost(const BasicBlock *B,
 
   // By the time we hit this node, we are guaranteed these iterators will point
   // into our list, because it must have been spliced into us.
-  // for (auto BII = Info.BracketIterators.begin(),
-  //           BIE = Info.BracketIterators.end();
-  //      BII != BIE;) {
-  //   if ((*BII)->To == B && (*BII)->Direction != Direction) {
-  //     Info.BList.erase(*BII);
-  //     BII = Info.BracketIterators.erase(BII);
-  //   } else
-  //     ++BII;
-  // }
-
-  for (auto BLI = BList.begin(), BLE = BList.end(); BLI != BLE;) {
-    if (BLI->To == B && BLI->Direction != Direction) {
-      BLI = BList.erase(BLI);
-    } else {
-      ++BLI;
-    }
+  for (auto BII = Info.BracketIterators.begin(),
+            BIE = Info.BracketIterators.end();
+       BII != BIE;) {
+    if ((*BII)->To == B && (*BII)->Direction != Direction) {
+      Info.BList.erase(*BII);
+      BII = Info.BracketIterators.erase(BII);
+    } else
+      ++BII;
   }
+
+  // for (auto BLI = BList.begin(), BLE = BList.end(); BLI != BLE;) {
+  //   if (BLI->To == B && BLI->Direction != Direction) {
+  //     BLI = BList.erase(BLI);
+  //   } else {
+  //     ++BLI;
+  //   }
+  // }
 
   // Propagate bracket list up the DFS tree [line:13].
   if (ParentBlock != nullptr) {
