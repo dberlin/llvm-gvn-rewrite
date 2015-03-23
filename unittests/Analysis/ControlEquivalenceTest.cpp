@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Analysis/ControlEquivalence.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Function.h"
@@ -19,7 +20,7 @@
 #include "llvm/Support/SourceMgr.h"
 #include "gtest/gtest.h"
 #include <map>
-#include <unordered_set>
+#include <set>
 #include <string>
 
 using namespace llvm;
@@ -82,7 +83,7 @@ protected:
           EXPECT_NE(ClassNum, (unsigned)0);
           Results[BB.getName().str()] = ClassNum;
         }
-        std::unordered_set<unsigned> SeenIds;
+        std::set<unsigned> SeenIds;
         for (const auto &V : Expectation) {
           unsigned int LookingFor = 0;
           // This is a vector, check each member of the vector has the same

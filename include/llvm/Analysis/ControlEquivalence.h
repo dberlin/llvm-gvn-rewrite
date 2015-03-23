@@ -60,7 +60,8 @@ public:
 
 private:
   typedef enum { PredDirection, SuccDirection } DFSDirection;
-
+  struct Bracket;
+  typedef std::list<Bracket> BracketList;
   struct Bracket {
     // Direction in which this bracket was added.
     DFSDirection Direction;
@@ -73,7 +74,6 @@ private:
     // Block that this bracket points to.
     const BasicBlock *To;
   };
-  typedef std::list<Bracket> BracketList;
   typedef SmallVector<const BasicBlock *, 4> FakeEdgeListType;
 
   // We use combined iterators to allow fake and real edges to be next to each
@@ -170,16 +170,19 @@ private:
     bool OnStack;
     // Indicates Block participates in DFS walk.
     bool Participates;
-    // List of brackets per Block.
-    BracketList BList;
+    // // List of brackets per Block.
+    // BracketList BList;
     // List of fake successor edges, if any
     FakeEdgeListType FakeSuccEdges;
     // List of fake predecessor edges, if any
     FakeEdgeListType FakePredEdges;
-
+    // List of bracket iterators that point to us
+    std::list<std::pair<BracketList &, BracketList::iterator>> BracketIterators;
+    // ID of bracket list
+    unsigned BracketListID;
     BlockCEData()
         : ClassNumber(0), DFSNumber(0), Visited(false), OnStack(false),
-          Participates(true), BList() {}
+          Participates(true), BracketListID(0) {}
     ~BlockCEData() {}
   };
   struct DFSStackEntry {
@@ -223,6 +226,8 @@ private:
   bool Computed;
   const BasicBlock *FakeStart;
   const BasicBlock *FakeEnd;
+  std::vector<BracketList> BracketLists;
+  std::vector<unsigned> BListForwarding;
 };
 }
 

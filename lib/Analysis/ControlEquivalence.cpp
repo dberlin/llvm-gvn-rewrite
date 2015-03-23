@@ -41,13 +41,17 @@ bool ControlEquivalence::runOnFunction(Function &F) {
   BlockData[FakeStart].FakePredEdges.push_back(FakeEnd);
   BlockData[FakeStart].FakeSuccEdges.push_back(&F.getEntryBlock());
   BlockData[&F.getEntryBlock()].FakePredEdges.push_back(FakeStart);
-
+  BracketLists.resize(F.size() + 1);
+  BListForwarding.resize(F.size() + 1);
+  unsigned ListID = 0;
   //  BlockData.resize(F.size());
   for (auto &B : F) {
     BlockCEData &Info = BlockData[&B];
+    Info.BracketListID = ListID++;
+    BListForwarding[Info.BracketListID] = Info.BracketListID;
     // If this is an unreachable block, we don't care about it
     if (pred_empty(&B) && &B != &F.getEntryBlock()) {
-      Info.Participates = false;
+      // Info.Participates = false;
     }
     // If there are no successors, we need to connect it to the exit block
     if (succ_empty(&B)) {
@@ -57,6 +61,13 @@ bool ControlEquivalence::runOnFunction(Function &F) {
     }
   }
   runUndirectedDFS(FakeStart);
+#ifndef NDEBUG
+  for (auto &B : F) {
+    dbgs() << "Class number for block ";
+    B.printAsOperand(dbgs());
+    dbgs() << " is " << BlockData[&B].ClassNumber << "\n";
+  }
+#endif
 
   Computed = true;
   return false;
@@ -226,8 +237,22 @@ void ControlEquivalence::visitMid(const BasicBlock *B, DFSDirection Direction) {
   DEBUG(B->printAsOperand(dbgs()));
   DEBUG(dbgs() << "\n");
   BlockCEData &Info = BlockData[B];
-  BracketList &BList = Info.BList;
+  BracketList &BList = BracketLists[Info.BracketListID];
   // Remove brackets pointing to this node [line:19].
+  DEBUG(dbgs() << "Removing brackets pointing to ");
+  DEBUG(B->printAsOperand(dbgs()));
+  DEBUG(dbgs() << "\n");
+
+  // for (auto BII = Info.BracketIterators.begin(),
+  //           BIE = Info.BracketIterators.end();
+  //      BII != BIE;) {
+  //   if (BII->second->To == B && BII->second->Direction != Direction) {
+  //     BII->first.erase(BII->second);
+  //     BII = Info.BracketIterators.erase(BII);
+  //   } else
+  //     ++BII;
+  // }
+
   for (auto BLI = BList.begin(), BLE = BList.end(); BLI != BLE;) {
     if (BLI->To == B && BLI->Direction != Direction) {
       BLI = BList.erase(BLI);
@@ -254,6 +279,7 @@ void ControlEquivalence::visitMid(const BasicBlock *B, DFSDirection Direction) {
     Recent.RecentClass = ++ClassNumber;
   }
   Info.ClassNumber = Recent.RecentClass;
+
   DEBUG(dbgs() << "Assigned class number is " << Info.ClassNumber << "\n");
 }
 void ControlEquivalence::visitPost(const BasicBlock *B,
@@ -263,11 +289,21 @@ void ControlEquivalence::visitPost(const BasicBlock *B,
   DEBUG(B->printAsOperand(dbgs()));
   DEBUG(dbgs() << "\n");
   BlockCEData &Info = BlockData[B];
-  BracketList &BList = Info.BList;
+  BracketList &BList = BracketLists[Info.BracketListID];
   // Remove brackets pointing to this node [line:19].
   DEBUG(dbgs() << "Removing brackets pointing to ");
   DEBUG(B->printAsOperand(dbgs()));
   DEBUG(dbgs() << "\n");
+  // for (auto BII = Info.BracketIterators.begin(),
+  //           BIE = Info.BracketIterators.end();
+  //      BII != BIE;) {
+  //   if (BII->second->To == B && BII->second->Direction != Direction) {
+  //     BII->first.erase(BII->second);
+  //     BII = Info.BracketIterators.erase(BII);
+  //   } else
+  //     ++BII;
+  // }
+
   for (auto BLI = BList.begin(), BLE = BList.end(); BLI != BLE;) {
     if (BLI->To == B && BLI->Direction != Direction) {
       BLI = BList.erase(BLI);
@@ -281,7 +317,9 @@ void ControlEquivalence::visitPost(const BasicBlock *B,
     DEBUG(dbgs() << "Splicing bracket into ");
     DEBUG(ParentBlock->printAsOperand(dbgs()));
     DEBUG(dbgs() << "\n");
-    BracketList &ParentBList = BlockData[ParentBlock].BList;
+    BracketList &ParentBList =
+        BracketLists[BlockData[ParentBlock].BracketListID];
+    // TODO
     ParentBList.splice(ParentBList.end(), BList);
     DEBUG(dbgs() << "Parent bracket list is now");
     DEBUG(debugBracketList(ParentBList));
@@ -300,6 +338,7 @@ void ControlEquivalence::visitBackedge(const BasicBlock *From,
 
   // Push backedge onto the bracket list [line:25].
   BlockCEData &Info = BlockData[From];
-  BracketList &BList = Info.BList;
-  BList.emplace_back(Bracket{Direction, 0, 0, From, To});
+  BracketList &BList = BracketLists[Info.BracketListID];
+  auto Place = BList.insert(BList.end(), Bracket{Direction, 0, 0, From, To});
+  BlockData[To].BracketIterators.push_back({BList, Place});
 }
