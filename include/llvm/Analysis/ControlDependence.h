@@ -223,8 +223,6 @@ private:
   SmallDenseMap<const BasicBlock *, BlockData, 8> BlockInfo;
   bool Computed;
   const BasicBlock *FakeEnd;
-  std::vector<BracketList> BracketLists;
-  std::vector<unsigned> BListForwarding;
 };
 }
 

@@ -166,6 +166,13 @@ namespace llvm {
   //
   FunctionPass *createMemDerefPrinter();
 
+  //===--------------------------------------------------------------------===//
+  //
+  // createControlDependencePrinter - This pass collects control dependence info
+  // information and prints it with -print-controldeps
+  //
+  FunctionPass *createControlDependencePrinter();
+
 }
 
 #endif

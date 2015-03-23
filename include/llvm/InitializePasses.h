@@ -100,6 +100,7 @@ void initializeCodeGenPreparePass(PassRegistry&);
 void initializeConstantMergePass(PassRegistry&);
 void initializeConstantPropagationPass(PassRegistry&);
 void initializeControlDependencePass(PassRegistry&);
+void initializeControlDependencePrinterPass(PassRegistry&);
 void initializeMachineCopyPropagationPass(PassRegistry&);
 void initializeCostModelAnalysisPass(PassRegistry&);
 void initializeCorrelatedValuePropagationPass(PassRegistry&);

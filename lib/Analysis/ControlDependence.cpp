@@ -312,3 +312,109 @@ void ControlDependence::visitBackedge(const BasicBlock *From,
   auto Place = BList.insert(BList.end(), Bracket{Direction, 0, 0, From, To});
   BlockInfo[To].BracketIterators.push_back(Place);
 }
+namespace {
+
+class ControlDependencePrinter : public FunctionPass {
+  const Function *F;
+
+public:
+  ControlDependencePrinter() : FunctionPass(ID) {
+    initializeControlDependencePrinterPass(*PassRegistry::getPassRegistry());
+  }
+  // run - Calculate control Equivalence for this function
+  bool runOnFunction(Function &F) override;
+
+  // getAnalysisUsage - Implement the Pass API
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.addRequired<ControlDependence>();
+    AU.setPreservesAll();
+  }
+  // releaseMemory - Reset state back to before function was analyzed
+  void releaseMemory() override {
+    F = nullptr;
+    EquivClasses.clear();
+  }
+
+  // print - Show contents in human readable format...
+  void print(raw_ostream &O, const Module * = nullptr) const override;
+
+  static char ID;
+  std::vector<std::vector<const BasicBlock *>> EquivClasses;
+};
+}
+char ControlDependencePrinter::ID = 0;
+
+INITIALIZE_PASS_BEGIN(ControlDependencePrinter, "print-controldep",
+                      "Print Control Dependence of function", true, true)
+INITIALIZE_PASS_DEPENDENCY(ControlDependence)
+INITIALIZE_PASS_END(ControlDependencePrinter, "print-controldep",
+                    "Print Control Dependence of function", true, true)
+
+FunctionPass *llvm::createControlDependencePrinter() {
+  return new ControlDependencePrinter();
+}
+
+void ControlDependencePrinter::print(raw_ostream &OS, const Module *) const {
+  OS << "Equivalence classes: (";
+  for (auto &V : EquivClasses) {
+    OS << "{";
+    for (auto &B : V) {
+      if (B->hasName())
+        OS << B->getName();
+      else
+        B->printAsOperand(OS);
+      if (&B != &V.back())
+        OS << ",";
+    } 
+    OS << "}";
+    if (&V != &EquivClasses.back())
+      OS << ",";
+  }
+  OS << ")\n";
+}
+
+bool ControlDependencePrinter::runOnFunction(Function &F) {
+  this->F = &F;
+  ControlDependence &CD = getAnalysis<ControlDependence>();
+  // Make a nice map from class number to vectors of bb's
+  std::map<unsigned, std::vector<const BasicBlock *>> ClassSets;
+  for (auto &BB : F) {
+    unsigned ClassNum = CD.getClassNumber(&BB);
+    ClassSets[ClassNum].push_back(&BB);
+  }
+
+  // Sort each vector by bb name, putting named bbs before unnamed ones, then
+  // add it to the equivalence class list
+  for (auto &V : ClassSets) {
+    std::stable_sort(V.second.begin(), V.second.end(),
+                     [](const BasicBlock *A, const BasicBlock *B) {
+                       if (A->hasName() && !B->hasName())
+                         return true;
+                       if (B->hasName() && !A->hasName())
+                         return false;
+                       if (!A->hasName() && !B->hasName())
+                         return false;
+                       return A->getName() < B->getName();
+                     });
+    EquivClasses.push_back(V.second);
+  }
+  // Now stable sort by size and then name
+  std::stable_sort(EquivClasses.begin(), EquivClasses.end(),
+                   [](const std::vector<const BasicBlock *> &A,
+                      const std::vector<const BasicBlock *> &B) {
+                     if (A.size() < B.size())
+                       return true;
+                     if (A.size() > B.size())
+                       return false;
+                     // The same block can't be in multiple equivalence classes,
+                     // so we know
+                     // that the above sorting means we can just compare the
+                     // first elements
+                     if (A[0]->hasName() && !B[0]->hasName())
+                       return true;
+                     if (B[0]->hasName() && !A[0]->hasName())
+                       return false;
+                     return A[0]->getName() < B[0]->getName();
+                   });
+  return false;
+}

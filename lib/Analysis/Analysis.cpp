@@ -36,6 +36,7 @@ void llvm::initializeAnalysis(PassRegistry &Registry) {
   initializeCFGOnlyPrinterPass(Registry);
   initializeCFLAliasAnalysisPass(Registry);
   initializeControlDependencePass(Registry);
+  initializeControlDependencePrinterPass(Registry);
   initializeDependenceAnalysisPass(Registry);
   initializeDelinearizationPass(Registry);
   initializeDominanceFrontierPass(Registry);
