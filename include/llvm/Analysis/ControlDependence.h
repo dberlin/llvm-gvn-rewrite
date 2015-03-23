@@ -170,19 +170,17 @@ private:
     bool OnStack;
     // Indicates Block participates in DFS walk.
     bool Participates;
-    // // List of brackets per Block.
-    // BracketList BList;
+    // List of brackets per Block.
+    BracketList BList;
     // List of fake successor edges, if any
     FakeEdgeListType FakeSuccEdges;
     // List of fake predecessor edges, if any
     FakeEdgeListType FakePredEdges;
     // List of bracket iterators that point to us
-    std::list<std::pair<BracketList &, BracketList::iterator>> BracketIterators;
-    // ID of bracket list
-    unsigned BracketListID;
+    std::list<BracketList::iterator> BracketIterators;
     BlockCEData()
         : ClassNumber(0), DFSNumber(0), Visited(false), OnStack(false),
-          Participates(true), BracketListID(0) {}
+          Participates(true) {}
     ~BlockCEData() {}
   };
   struct DFSStackEntry {
