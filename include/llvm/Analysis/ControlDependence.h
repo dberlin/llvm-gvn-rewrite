@@ -1,4 +1,4 @@
-//===- ControlEquivalence.h - Compute Control Equivalence-------*- C++ -*--===//
+//===- ControlDependence.h - Compute Control Equivalence-------*- C++ -*--===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -10,8 +10,8 @@
 // blocks having the same set of control dependences land in one class.
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_ANALYSIS_CONTROLEQUIVALENCE_H
-#define LLVM_ANALYSIS_CONTROLEQUIVALENCE_H
+#ifndef LLVM_ANALYSIS_CONTROLDEPENDENCE_H
+#define LLVM_ANALYSIS_CONTROLDEPENDENCE_H
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
@@ -34,10 +34,10 @@ class BasicBlock;
 // control regions in linear time" by Johnson, Pearson & Pingali (PLDI94) which
 // also contains proofs for the aforementioned equivalence. References to line
 // numbers in the algorithm from figure 4 have been added [line:x].
-class ControlEquivalence : public FunctionPass {
+class ControlDependence : public FunctionPass {
 public:
-  ControlEquivalence() : FunctionPass(ID), Computed(false) {
-    initializeControlEquivalencePass(*PassRegistry::getPassRegistry());
+  ControlDependence() : FunctionPass(ID), Computed(false) {
+    initializeControlDependencePass(*PassRegistry::getPassRegistry());
   }
   static char ID;
 

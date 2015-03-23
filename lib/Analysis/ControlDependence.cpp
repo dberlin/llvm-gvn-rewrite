@@ -1,4 +1,4 @@
-//===- ControlEquivalence.cpp - Compute Control Equivalence ---------------===//
+//===- ControlDependence.cpp - Compute Control Equivalence ---------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -9,7 +9,7 @@
 //
 //
 //===----------------------------------------------------------------------===//
-#include "llvm/Analysis/ControlEquivalence.h"
+#include "llvm/Analysis/ControlDependence.h"
 #include "llvm/Analysis/Passes.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
@@ -18,16 +18,16 @@
 #include <utility>
 #include <algorithm>
 using namespace llvm;
-char ControlEquivalence::ID = 0;
+char ControlDependence::ID = 0;
 #define DEBUG_TYPE "controlequiv"
-INITIALIZE_PASS(ControlEquivalence, "controlequiv",
+INITIALIZE_PASS(ControlDependence, "controlequiv",
                 "Control Equivalence Construction", true, true);
 
 // Run the main algorithm starting from the exit blocks. We proceed to perform
 // an undirected depth-first backwards traversal that determines class numbers
 // for all participating blocks. Takes O(E) time and O(N) space.
 
-bool ControlEquivalence::runOnFunction(Function &F) {
+bool ControlDependence::runOnFunction(Function &F) {
   Computed = false;
   DFSNumber = 0;
   ClassNumber = 1;
@@ -74,7 +74,7 @@ bool ControlEquivalence::runOnFunction(Function &F) {
   return false;
 }
 
-void ControlEquivalence::releaseMemory() {
+void ControlDependence::releaseMemory() {
   if (Computed) {
     BlockData.clear();
     delete FakeEnd;
@@ -84,7 +84,7 @@ void ControlEquivalence::releaseMemory() {
 }
 
 // print - Show contents in human readable format...
-void ControlEquivalence::print(raw_ostream &O, const Module *M) const {}
+void ControlDependence::print(raw_ostream &O, const Module *M) const {}
 
 // Performs and undirected DFS walk of the CFG. Conceptually all nodes are
 // expanded, splitting "predecessors" and "successors" out into separate nodes.
@@ -101,7 +101,7 @@ void ControlEquivalence::print(raw_ostream &O, const Module *M) const {}
 //
 // This will yield a true spanning tree (without cross or forward edges) and
 // also discover proper back edges in both directions.
-void ControlEquivalence::runUndirectedDFS(const BasicBlock *StartBlock) {
+void ControlDependence::runUndirectedDFS(const BasicBlock *StartBlock) {
   DFSStack Stack;
   // Start out walking backwards
   pushDFS(Stack, StartBlock, nullptr, PredDirection);
@@ -184,7 +184,7 @@ void ControlEquivalence::runUndirectedDFS(const BasicBlock *StartBlock) {
   }
 }
 
-void ControlEquivalence::pushDFS(DFSStack &Stack, const BasicBlock *B,
+void ControlDependence::pushDFS(DFSStack &Stack, const BasicBlock *B,
                                  const BasicBlock *From,
                                  DFSDirection Direction) {
   auto BlockResult = BlockData.find(B);
@@ -202,7 +202,7 @@ void ControlEquivalence::pushDFS(DFSStack &Stack, const BasicBlock *B,
       combined_succ_begin(B, BlockResultData.FakeSuccEdges),
       combined_succ_end(B, BlockResultData.FakeSuccEdges), From, B});
 }
-void ControlEquivalence::popDFS(DFSStack &Stack, const BasicBlock *B) {
+void ControlDependence::popDFS(DFSStack &Stack, const BasicBlock *B) {
   assert(Stack.top().Block == B && "Stack top is wrong");
   auto BlockResult = BlockData.find(B);
 
@@ -213,7 +213,7 @@ void ControlEquivalence::popDFS(DFSStack &Stack, const BasicBlock *B) {
   Stack.pop();
 }
 
-void ControlEquivalence::visitPre(const BasicBlock *B) {
+void ControlDependence::visitPre(const BasicBlock *B) {
   DEBUG(dbgs() << "pre-order visit of block ");
   DEBUG(B->printAsOperand(dbgs()));
   DEBUG(dbgs() << "\n");
@@ -221,7 +221,7 @@ void ControlEquivalence::visitPre(const BasicBlock *B) {
   BlockData[B].DFSNumber = ++DFSNumber;
   DEBUG(dbgs() << "Assigned DFS Number " << BlockData[B].DFSNumber << "\n");
 }
-void ControlEquivalence::debugBracketList(const BracketList &BList) {
+void ControlDependence::debugBracketList(const BracketList &BList) {
   dbgs() << "{";
   for (auto &Bracket : BList) {
     dbgs() << "(";
@@ -233,7 +233,7 @@ void ControlEquivalence::debugBracketList(const BracketList &BList) {
   dbgs() << "}";
 }
 
-void ControlEquivalence::visitMid(const BasicBlock *B, DFSDirection Direction) {
+void ControlDependence::visitMid(const BasicBlock *B, DFSDirection Direction) {
   DEBUG(dbgs() << "mid-order visit of block ");
   DEBUG(B->printAsOperand(dbgs()));
   DEBUG(dbgs() << "\n");
@@ -285,7 +285,7 @@ void ControlEquivalence::visitMid(const BasicBlock *B, DFSDirection Direction) {
 
   DEBUG(dbgs() << "Assigned class number is " << Info.ClassNumber << "\n");
 }
-void ControlEquivalence::visitPost(const BasicBlock *B,
+void ControlDependence::visitPost(const BasicBlock *B,
                                    const BasicBlock *ParentBlock,
                                    DFSDirection Direction) {
   DEBUG(dbgs() << "post-order visit of block ");
@@ -330,7 +330,7 @@ void ControlEquivalence::visitPost(const BasicBlock *B,
   }
 }
 
-void ControlEquivalence::visitBackedge(const BasicBlock *From,
+void ControlDependence::visitBackedge(const BasicBlock *From,
                                        const BasicBlock *To,
                                        DFSDirection Direction) {
   DEBUG(dbgs() << "visit backedge from block ");

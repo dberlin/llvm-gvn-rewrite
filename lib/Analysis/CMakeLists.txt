@@ -18,7 +18,7 @@ add_llvm_library(LLVMAnalysis
   CostModel.cpp
   CodeMetrics.cpp
   ConstantFolding.cpp
-  ControlEquivalence.cpp
+  ControlDependence.cpp
   Delinearization.cpp
   DependenceAnalysis.cpp
   DomPrinter.cpp

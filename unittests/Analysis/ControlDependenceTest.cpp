@@ -1,4 +1,4 @@
-//===- ControlEquivalenceTest.cpp - Control Equivalence tests -------------===//
+//===- ControlDependenceTest.cpp - Control Equivalence tests -------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -8,7 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/DenseSet.h"
-#include "llvm/Analysis/ControlEquivalence.h"
+#include "llvm/Analysis/ControlDependence.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
@@ -27,11 +27,11 @@ using namespace llvm;
 
 namespace {
 
-// This fixture assists in running the ControlEquivalence analysis
+// This fixture assists in running the ControlDependence analysis
 // and ensuring it produces the correct answer each time.
-class ControlEquivalenceTest : public testing::Test {
+class ControlDependenceTest : public testing::Test {
 protected:
-  ControlEquivalenceTest() : M(nullptr) {}
+  ControlDependenceTest() : M(nullptr) {}
   std::unique_ptr<Module> M;
 
   void ParseAssembly(const char *Assembly) {
@@ -54,26 +54,26 @@ protected:
   // share one
   void ExpectEquivalence(const ResultType &ExpectedResults) {
     static char ID;
-    class ControlEquivalenceTestPass : public FunctionPass {
+    class ControlDependenceTestPass : public FunctionPass {
     public:
-      ControlEquivalenceTestPass(const ResultType &ExpectedResults)
+      ControlDependenceTestPass(const ResultType &ExpectedResults)
           : FunctionPass(ID), Expectation(ExpectedResults) {}
 
       static int initialize() {
         PassInfo *PI = new PassInfo("isPotentiallyReachable testing pass", "",
                                     &ID, nullptr, true, true);
         PassRegistry::getPassRegistry()->registerPass(*PI, false);
-        initializeControlEquivalencePass(*PassRegistry::getPassRegistry());
+        initializeControlDependencePass(*PassRegistry::getPassRegistry());
         return 0;
       }
 
       void getAnalysisUsage(AnalysisUsage &AU) const {
         AU.setPreservesAll();
-        AU.addRequired<ControlEquivalence>();
+        AU.addRequired<ControlDependence>();
       }
 
       bool runOnFunction(Function &F) {
-        ControlEquivalence *CE = &getAnalysis<ControlEquivalence>();
+        ControlDependence *CE = &getAnalysis<ControlDependence>();
         std::map<std::string, unsigned> Results;
         for (auto &BB : F) {
           unsigned int ClassNum = CE->getClassNumber(&BB);
@@ -107,18 +107,18 @@ protected:
       const ResultType &Expectation;
     };
 
-    static int initialize = ControlEquivalenceTestPass::initialize();
+    static int initialize = ControlDependenceTestPass::initialize();
     (void)initialize;
 
-    ControlEquivalenceTestPass *P =
-        new ControlEquivalenceTestPass(ExpectedResults);
+    ControlDependenceTestPass *P =
+        new ControlDependenceTestPass(ExpectedResults);
     legacy::PassManager PM;
     PM.add(P);
     PM.run(*M);
   }
 };
 
-TEST_F(ControlEquivalenceTest, StraightLineTest) {
+TEST_F(ControlDependenceTest, StraightLineTest) {
   ParseAssembly(" define void @teststraightline() {\n"
                 " start:\n"
                 "   br label %next\n"
@@ -129,7 +129,7 @@ TEST_F(ControlEquivalenceTest, StraightLineTest) {
                 " }");
   ExpectEquivalence({{"start", "next", "returnit"}});
 }
-TEST_F(ControlEquivalenceTest, DiamondTest) {
+TEST_F(ControlDependenceTest, DiamondTest) {
   ParseAssembly("define void @testdiamond() {\n"
                 "start:\n"
                 "  br i1 true, label %same, label %different\n"
@@ -145,7 +145,7 @@ TEST_F(ControlEquivalenceTest, DiamondTest) {
                 "}");
   ExpectEquivalence({{"start", "returnit"}, {"same"}, {"different"}});
 }
-TEST_F(ControlEquivalenceTest, SplitWithMultipleReturnTest) {
+TEST_F(ControlDependenceTest, SplitWithMultipleReturnTest) {
   ParseAssembly("define void @testsplitwithmultiplereturn() {\n"
                 "start:\n"
                 "  br i1 true, label %same, label %different\n"
@@ -158,7 +158,7 @@ TEST_F(ControlEquivalenceTest, SplitWithMultipleReturnTest) {
                 "}");
   ExpectEquivalence({{"start"}, {"same"}, {"different"}});
 }
-TEST_F(ControlEquivalenceTest, DoubleDiamondTest) {
+TEST_F(ControlDependenceTest, DoubleDiamondTest) {
   ParseAssembly(" define void @testdiamond() {\n"
                 " start:\n"
                 "  br i1 true, label %same, label %different\n"
@@ -181,7 +181,7 @@ TEST_F(ControlEquivalenceTest, DoubleDiamondTest) {
                      {"samepart1"},
                      {"samepart2"}});
 }
-TEST_F(ControlEquivalenceTest, EmbeddedReturnsTest) {
+TEST_F(ControlDependenceTest, EmbeddedReturnsTest) {
   ParseAssembly(" define void @testdiamond() {\n"
                 " start:\n"
                 "  br i1 true, label %same, label %different\n"
@@ -204,7 +204,7 @@ TEST_F(ControlEquivalenceTest, EmbeddedReturnsTest) {
                      {"samepart2"},
                      {"different", "returnit"}});
 }
-TEST_F(ControlEquivalenceTest, SimpleLoopTest) {
+TEST_F(ControlDependenceTest, SimpleLoopTest) {
   ParseAssembly("define void @testbasicloop() {\n"
                 "start:\n"
                 "  br label %loop\n"
@@ -220,7 +220,7 @@ TEST_F(ControlEquivalenceTest, SimpleLoopTest) {
   ExpectEquivalence(
       {{"start"}, {"loop", "loopbody", "looptest"}, {"returnit"}});
 }
-TEST_F(ControlEquivalenceTest, IfInLoopTest) {
+TEST_F(ControlDependenceTest, IfInLoopTest) {
   ParseAssembly("define void @testbasicloop() {\n"
                 "start:\n"
                 "  br label %loop\n"

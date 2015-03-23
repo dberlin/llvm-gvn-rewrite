@@ -99,7 +99,7 @@ void initializeConstantHoistingPass(PassRegistry&);
 void initializeCodeGenPreparePass(PassRegistry&);
 void initializeConstantMergePass(PassRegistry&);
 void initializeConstantPropagationPass(PassRegistry&);
-void initializeControlEquivalencePass(PassRegistry&);
+void initializeControlDependencePass(PassRegistry&);
 void initializeMachineCopyPropagationPass(PassRegistry&);
 void initializeCostModelAnalysisPass(PassRegistry&);
 void initializeCorrelatedValuePropagationPass(PassRegistry&);
