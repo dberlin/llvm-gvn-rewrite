@@ -55,7 +55,7 @@ bool ControlDependence::runOnFunction(Function &F) {
       BlockInfo[FakeEnd].FakePredEdges.push_back(&B);
     }
   }
-  runUndirectedDFS(&F.getEntryBlock());
+  runUndirectedDFS(FakeStart);
 #ifndef NDEBUG
   for (auto &B : F) {
     dbgs() << "Class number for block ";
