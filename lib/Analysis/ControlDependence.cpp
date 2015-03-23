@@ -238,14 +238,6 @@ void ControlDependence::visitMid(const BasicBlock *B, DFSDirection Direction) {
       ++BII;
   }
 
-  // for (auto BLI = BList.begin(), BLE = BList.end(); BLI != BLE;) {
-  //   if (BLI->To == B && BLI->Direction != Direction) {
-  //     BLI = BList.erase(BLI);
-  //   } else {
-  //     ++BLI;
-  //   }
-  // }
-
   // We should have at least hit the artificial edge connecting end and start as
   // a backedge, which would have started a bracket list that would have
   // propagated up to this point, so this should not be possible.
@@ -290,14 +282,6 @@ void ControlDependence::visitPost(const BasicBlock *B,
     } else
       ++BII;
   }
-
-  // for (auto BLI = BList.begin(), BLE = BList.end(); BLI != BLE;) {
-  //   if (BLI->To == B && BLI->Direction != Direction) {
-  //     BLI = BList.erase(BLI);
-  //   } else {
-  //     ++BLI;
-  //   }
-  // }
 
   // Propagate bracket list up the DFS tree [line:13].
   if (ParentBlock != nullptr) {
