@@ -111,7 +111,7 @@ struct CongruenceClass {
   static unsigned int nextCongruenceNum;
   unsigned int id;
   Value *leader;
-  Expression *expression;
+  const Expression *expression;
   // Actual members of this class.  These are the things the same everywhere
   MemberSet members;
   // Coercible members of this class. These are loads where we can pull the
@@ -129,7 +129,7 @@ struct CongruenceClass {
   bool dead;
   explicit CongruenceClass()
       : id(nextCongruenceNum++), leader(0), expression(0), dead(false) {}
-  CongruenceClass(Value *Leader, Expression *E)
+  CongruenceClass(Value *Leader, const Expression *E)
       : id(nextCongruenceNum++), leader(Leader), expression(E), dead(false) {}
 };
 unsigned int CongruenceClass::nextCongruenceNum = 0;
@@ -148,16 +148,17 @@ class NewGVN : public FunctionPass {
 
   // Congruence class info
   DenseMap<Value *, CongruenceClass *> ValueToClass;
+
   struct ComparingExpressionInfo {
-    static inline Expression *getEmptyKey() {
+    static inline const Expression *getEmptyKey() {
       intptr_t Val = -1;
       Val <<= PointerLikeTypeTraits<Expression *>::NumLowBitsAvailable;
-      return reinterpret_cast<Expression *>(Val);
+      return reinterpret_cast<const Expression *>(Val);
     }
-    static inline Expression *getTombstoneKey() {
+    static inline const Expression *getTombstoneKey() {
       intptr_t Val = -2;
       Val <<= PointerLikeTypeTraits<Expression *>::NumLowBitsAvailable;
-      return reinterpret_cast<Expression *>(Val);
+      return reinterpret_cast<const Expression *>(Val);
     }
     static unsigned getHashValue(const Expression *V) {
       return static_cast<unsigned>(V->getHashValue());
@@ -183,17 +184,18 @@ class NewGVN : public FunctionPass {
     size_t operator()(const Expression *A) const { return A->getHashValue(); }
   };
 
-  std::unordered_multimap<Expression *, Equivalence, hash_expression,
+  std::unordered_multimap<const Expression *, Equivalence, hash_expression,
                           expression_equal_to> PendingEquivalences;
 
-  typedef DenseMap<Expression *, CongruenceClass *, ComparingExpressionInfo>
-      ExpressionClassMap;
+  //  DenseMap<const Use &,
+  typedef DenseMap<const Expression *, CongruenceClass *,
+                   ComparingExpressionInfo> ExpressionClassMap;
   ExpressionClassMap ExpressionToClass;
   // We separate out the memory expressions to keep hashtable resizes from
   // occurring as often.
   ExpressionClassMap MemoryExpressionToClass;
 
-  DenseSet<Expression *, ComparingExpressionInfo> UniquedExpressions;
+  DenseSet<const Expression *, ComparingExpressionInfo> UniquedExpressions;
   SmallPtrSet<Value *, 8> ChangedValues;
   DenseSet<std::pair<BasicBlock *, BasicBlock *>> ReachableEdges;
   SmallPtrSet<const BasicBlock *, 8> ReachableBlocks;
@@ -252,32 +254,32 @@ private:
   }
 
   // expression handling
-  Expression *createExpression(Instruction *, BasicBlock *);
-  Expression *createBinaryExpression(unsigned, Type *, Value *, Value *,
-                                     BasicBlock *);
+  const Expression *createExpression(Instruction *, BasicBlock *);
+  const Expression *createBinaryExpression(unsigned, Type *, Value *, Value *,
+                                           BasicBlock *);
   bool setBasicExpressionInfo(Instruction *, BasicExpression *, BasicBlock *);
   PHIExpression *createPHIExpression(Instruction *);
-  VariableExpression *createVariableExpression(Value *, bool);
-  ConstantExpression *createConstantExpression(Constant *, bool);
-  Expression *createVariableOrConstant(Value *V, BasicBlock *B);
-  StoreExpression *createStoreExpression(StoreInst *, MemoryAccess *,
-                                         BasicBlock *);
-  LoadExpression *createLoadExpression(LoadInst *, MemoryAccess *,
-                                       BasicBlock *);
-  CoercibleLoadExpression *createCoercibleLoadExpression(LoadInst *,
-                                                         MemoryAccess *,
-                                                         unsigned, Value *,
-                                                         BasicBlock *);
-  CallExpression *createCallExpression(CallInst *, MemoryAccess *,
-                                       BasicBlock *);
-  AggregateValueExpression *createAggregateValueExpression(Instruction *,
-                                                           BasicBlock *l);
+  const VariableExpression *createVariableExpression(Value *, bool);
+  const ConstantExpression *createConstantExpression(Constant *, bool);
+  const Expression *createVariableOrConstant(Value *V, BasicBlock *B);
+  const StoreExpression *createStoreExpression(StoreInst *, MemoryAccess *,
+                                               BasicBlock *);
+  const LoadExpression *createLoadExpression(LoadInst *, MemoryAccess *,
+                                             BasicBlock *);
+  const CoercibleLoadExpression *
+  createCoercibleLoadExpression(LoadInst *, MemoryAccess *, unsigned, Value *,
+                                BasicBlock *);
+  const CallExpression *createCallExpression(CallInst *, MemoryAccess *,
+                                             BasicBlock *);
+  const AggregateValueExpression *createAggregateValueExpression(Instruction *,
+                                                                 BasicBlock *l);
 
-  Expression *uniquifyExpression(Expression *);
-  BasicExpression *createCmpExpression(unsigned, Type *, CmpInst::Predicate,
-                                       Value *, Value *, BasicBlock *);
+  const Expression *uniquifyExpression(Expression *);
+  const BasicExpression *createCmpExpression(unsigned, Type *,
+                                             CmpInst::Predicate, Value *,
+                                             Value *, BasicBlock *);
   // Congruence class handling
-  CongruenceClass *createCongruenceClass(Value *Leader, Expression *E) {
+  CongruenceClass *createCongruenceClass(Value *Leader, const Expression *E) {
     CongruenceClass *result = new CongruenceClass(Leader, E);
     CongruenceClasses.emplace_back(result);
     return result;
@@ -292,15 +294,17 @@ private:
   void initializeCongruenceClasses(Function &F);
 
   // Symbolic evaluation
-  Expression *checkSimplificationResults(Expression *, Instruction *, Value *);
-  Expression *performSymbolicEvaluation(Value *, BasicBlock *);
-  Expression *performSymbolicLoadCoercion(LoadInst *, Instruction *,
-                                          MemoryAccess *, BasicBlock *);
-  Expression *performSymbolicLoadEvaluation(Instruction *, BasicBlock *);
-  Expression *performSymbolicStoreEvaluation(Instruction *, BasicBlock *);
-  Expression *performSymbolicCallEvaluation(Instruction *, BasicBlock *);
-  Expression *performSymbolicPHIEvaluation(Instruction *, BasicBlock *);
-  Expression *performSymbolicAggrValueEvaluation(Instruction *, BasicBlock *);
+  const Expression *checkSimplificationResults(Expression *, Instruction *,
+                                               Value *);
+  const Expression *performSymbolicEvaluation(Value *, BasicBlock *);
+  const Expression *performSymbolicLoadCoercion(LoadInst *, Instruction *,
+                                                MemoryAccess *, BasicBlock *);
+  const Expression *performSymbolicLoadEvaluation(Instruction *, BasicBlock *);
+  const Expression *performSymbolicStoreEvaluation(Instruction *, BasicBlock *);
+  const Expression *performSymbolicCallEvaluation(Instruction *, BasicBlock *);
+  const Expression *performSymbolicPHIEvaluation(Instruction *, BasicBlock *);
+  const Expression *performSymbolicAggrValueEvaluation(Instruction *,
+                                                       BasicBlock *);
   int analyzeLoadFromClobberingStore(Type *, Value *, StoreInst *);
   int analyzeLoadFromClobberingLoad(Type *, Value *, LoadInst *);
   int analyzeLoadFromClobberingMemInst(Type *, Value *, MemIntrinsic *);
@@ -311,7 +315,7 @@ private:
   std::pair<Value *, bool> lookupOperandLeader(Value *, const T &) const;
   template <class T>
   Value *findDominatingEquivalent(CongruenceClass *, const T &) const;
-  void performCongruenceFinding(Value *, Expression *);
+  void performCongruenceFinding(Value *, const Expression *);
   // Predicate and reachability handling
   void updateReachableEdge(BasicBlock *, BasicBlock *);
   void processOutgoingEdges(TerminatorInst *, BasicBlock *);
@@ -424,10 +428,10 @@ bool NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
 
 // This is a special function only used by equality propagation, it
 // should not be called elsewhere
-BasicExpression *NewGVN::createCmpExpression(unsigned Opcode, Type *Type,
-                                             CmpInst::Predicate Predicate,
-                                             Value *LHS, Value *RHS,
-                                             BasicBlock *B) {
+const BasicExpression *NewGVN::createCmpExpression(unsigned Opcode, Type *Type,
+                                                   CmpInst::Predicate Predicate,
+                                                   Value *LHS, Value *RHS,
+                                                   BasicBlock *B) {
   BasicExpression *E = new (ExpressionAllocator) BasicExpression(2);
   bool UsedEquiv = false;
   E->allocateArgs(ArgRecycler, ExpressionAllocator);
@@ -443,9 +447,9 @@ BasicExpression *NewGVN::createCmpExpression(unsigned Opcode, Type *Type,
   return E;
 }
 
-Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
-                                           Value *Arg1, Value *Arg2,
-                                           BasicBlock *B) {
+const Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
+                                                 Value *Arg1, Value *Arg2,
+                                                 BasicBlock *B) {
   BasicExpression *E = new (ExpressionAllocator) BasicExpression(2);
 
   E->setType(T);
@@ -469,7 +473,7 @@ Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
   E->args_push_back(BinaryLeader.first);
 
   Value *V = SimplifyBinOp(Opcode, E->Args[0], E->Args[1], *DL, TLI, DT, AC);
-  if (Expression *simplifiedE = checkSimplificationResults(E, nullptr, V))
+  if (const Expression *simplifiedE = checkSimplificationResults(E, nullptr, V))
     return simplifiedE;
   return E;
 }
@@ -479,8 +483,8 @@ Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
 // that expression
 // TODO: Once finished, this should not take an Instruction, we only
 // use it for printing
-Expression *NewGVN::checkSimplificationResults(Expression *E, Instruction *I,
-                                               Value *V) {
+const Expression *NewGVN::checkSimplificationResults(Expression *E,
+                                                     Instruction *I, Value *V) {
   if (!V)
     return NULL;
   if (Constant *C = dyn_cast<Constant>(V)) {
@@ -525,7 +529,7 @@ Expression *NewGVN::checkSimplificationResults(Expression *E, Instruction *I,
   return NULL;
 }
 
-Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
+const Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
 
   BasicExpression *E =
       new (ExpressionAllocator) BasicExpression(I->getNumOperands());
@@ -571,7 +575,7 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
          E->Args[1]->getType() == I->getOperand(1)->getType())) {
       Value *V =
           SimplifyCmpInst(Predicate, E->Args[0], E->Args[1], *DL, TLI, DT, AC);
-      if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
+      if (const Expression *simplifiedE = checkSimplificationResults(E, I, V))
         return simplifiedE;
     }
 
@@ -581,23 +585,23 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
          E->Args[2]->getType() == I->getOperand(2)->getType())) {
       Value *V = SimplifySelectInst(E->Args[0], E->Args[1], E->Args[2], *DL,
                                     TLI, DT, AC);
-      if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
+      if (const Expression *simplifiedE = checkSimplificationResults(E, I, V))
         return simplifiedE;
     }
   } else if (I->isBinaryOp()) {
     Value *V =
         SimplifyBinOp(E->getOpcode(), E->Args[0], E->Args[1], *DL, TLI, DT, AC);
-    if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
+    if (const Expression *simplifiedE = checkSimplificationResults(E, I, V))
       return simplifiedE;
   } else if (BitCastInst *BI = dyn_cast<BitCastInst>(I)) {
     Value *V = SimplifyInstruction(BI, *DL, TLI, DT, AC);
-    if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
+    if (const Expression *simplifiedE = checkSimplificationResults(E, I, V))
       return simplifiedE;
   } else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
     if (GEP->getPointerOperandType() == E->Args[0]->getType()) {
       Value *V = SimplifyGEPInst(ArrayRef<Value *>(E->Args, E->args_size()),
                                  *DL, TLI, DT, AC);
-      if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
+      if (const Expression *simplifiedE = checkSimplificationResults(E, I, V))
         return simplifiedE;
     }
   } else if (AllConstant) {
@@ -615,14 +619,14 @@ Expression *NewGVN::createExpression(Instruction *I, BasicBlock *B) {
     Value *V =
         ConstantFoldInstOperands(E->getOpcode(), E->getType(), C, *DL, TLI);
     if (V) {
-      if (Expression *simplifiedE = checkSimplificationResults(E, I, V))
+      if (const Expression *simplifiedE = checkSimplificationResults(E, I, V))
         return simplifiedE;
     }
   }
   return E;
 }
 
-Expression *NewGVN::uniquifyExpression(Expression *E) {
+const Expression *NewGVN::uniquifyExpression(Expression *E) {
   auto P = UniquedExpressions.insert(E);
   if (!P.second) {
     return *(P.first);
@@ -630,7 +634,7 @@ Expression *NewGVN::uniquifyExpression(Expression *E) {
   return E;
 }
 
-AggregateValueExpression *
+const AggregateValueExpression *
 NewGVN::createAggregateValueExpression(Instruction *I, BasicBlock *B) {
   if (InsertValueInst *II = dyn_cast<InsertValueInst>(I)) {
     AggregateValueExpression *E = new (ExpressionAllocator)
@@ -655,33 +659,31 @@ NewGVN::createAggregateValueExpression(Instruction *I, BasicBlock *B) {
   llvm_unreachable("Unhandled type of aggregate value operation");
 }
 
-VariableExpression *NewGVN::createVariableExpression(Value *V,
-                                                     bool UsedEquivalence) {
+const VariableExpression *
+NewGVN::createVariableExpression(Value *V, bool UsedEquivalence) {
   VariableExpression *E = new (ExpressionAllocator) VariableExpression(V);
   E->setOpcode(V->getValueID());
   E->setUsedEquivalence(UsedEquivalence);
-  E = cast<VariableExpression>(uniquifyExpression(E));
-  return E;
+  return cast<VariableExpression>(uniquifyExpression(E));
 }
 
-Expression *NewGVN::createVariableOrConstant(Value *V, BasicBlock *B) {
+const Expression *NewGVN::createVariableOrConstant(Value *V, BasicBlock *B) {
   auto Leader = lookupOperandLeader(V, B);
   if (Constant *C = dyn_cast<Constant>(Leader.first))
     return createConstantExpression(C, Leader.second);
   return createVariableExpression(Leader.first, Leader.second);
 }
 
-ConstantExpression *NewGVN::createConstantExpression(Constant *C,
-                                                     bool UsedEquivalence) {
+const ConstantExpression *
+NewGVN::createConstantExpression(Constant *C, bool UsedEquivalence) {
   ConstantExpression *E = new (ExpressionAllocator) ConstantExpression(C);
   E->setOpcode(C->getValueID());
   E->setUsedEquivalence(UsedEquivalence);
-  E = cast<ConstantExpression>(uniquifyExpression(E));
-  return E;
+  return cast<ConstantExpression>(uniquifyExpression(E));
 }
 
-CallExpression *NewGVN::createCallExpression(CallInst *CI, MemoryAccess *HV,
-                                             BasicBlock *B) {
+const CallExpression *
+NewGVN::createCallExpression(CallInst *CI, MemoryAccess *HV, BasicBlock *B) {
   CallExpression *E =
       new (ExpressionAllocator) CallExpression(CI->getNumOperands(), CI, HV);
   setBasicExpressionInfo(CI, E, B);
@@ -748,8 +750,8 @@ std::pair<Value *, bool> NewGVN::lookupOperandLeader(Value *V,
   return std::make_pair(V, false);
 }
 
-LoadExpression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *DA,
-                                             BasicBlock *B) {
+const LoadExpression *
+NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *DA, BasicBlock *B) {
   LoadExpression *E =
       new (ExpressionAllocator) LoadExpression(LI->getNumOperands(), LI, DA);
   E->allocateArgs(ArgRecycler, ExpressionAllocator);
@@ -766,11 +768,10 @@ LoadExpression *NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *DA,
   return E;
 }
 
-CoercibleLoadExpression *NewGVN::createCoercibleLoadExpression(LoadInst *LI,
-                                                               MemoryAccess *DA,
-                                                               unsigned Offset,
-                                                               Value *SrcVal,
-                                                               BasicBlock *B) {
+const CoercibleLoadExpression *
+NewGVN::createCoercibleLoadExpression(LoadInst *LI, MemoryAccess *DA,
+                                      unsigned Offset, Value *SrcVal,
+                                      BasicBlock *B) {
   CoercibleLoadExpression *E = new (ExpressionAllocator)
       CoercibleLoadExpression(LI->getNumOperands(), LI, DA, Offset, SrcVal);
   E->allocateArgs(ArgRecycler, ExpressionAllocator);
@@ -786,8 +787,8 @@ CoercibleLoadExpression *NewGVN::createCoercibleLoadExpression(LoadInst *LI,
   return E;
 }
 
-StoreExpression *NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *DA,
-                                               BasicBlock *B) {
+const StoreExpression *
+NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *DA, BasicBlock *B) {
   StoreExpression *E =
       new (ExpressionAllocator) StoreExpression(SI->getNumOperands(), SI, DA);
   E->allocateArgs(ArgRecycler, ExpressionAllocator);
@@ -959,18 +960,18 @@ int NewGVN::analyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
   return -1;
 }
 
-Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
-                                                   BasicBlock *B) {
+const Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
+                                                         BasicBlock *B) {
   StoreInst *SI = cast<StoreInst>(I);
-  Expression *E =
+  const Expression *E =
       createStoreExpression(SI, MSSAWalker->getClobberingMemoryAccess(SI), B);
   return E;
 }
 
-Expression *NewGVN::performSymbolicLoadCoercion(LoadInst *LI,
-                                                Instruction *DepInst,
-                                                MemoryAccess *DefiningAccess,
-                                                BasicBlock *B) {
+const Expression *
+NewGVN::performSymbolicLoadCoercion(LoadInst *LI, Instruction *DepInst,
+                                    MemoryAccess *DefiningAccess,
+                                    BasicBlock *B) {
   Type *LoadType = LI->getType();
   if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
     Value *LoadAddressLeader =
@@ -1024,8 +1025,8 @@ Expression *NewGVN::performSymbolicLoadCoercion(LoadInst *LI,
   return nullptr;
 }
 
-Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
-                                                  BasicBlock *B) {
+const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
+                                                        BasicBlock *B) {
   LoadInst *LI = cast<LoadInst>(I);
 
   // We really can't do anything with non-simple loads
@@ -1047,7 +1048,7 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
       // undef
       if (!ReachableBlocks.count(DefiningInst->getParent()))
         return createConstantExpression(UndefValue::get(LI->getType()), false);
-      Expression *CoercionResult =
+      const Expression *CoercionResult =
           performSymbolicLoadCoercion(LI, DefiningInst, DefiningAccess, B);
       if (CoercionResult)
         return CoercionResult;
@@ -1090,14 +1091,14 @@ Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
     }
   }
 
-  Expression *E = createLoadExpression(LI, DefiningAccess, B);
+  const Expression *E = createLoadExpression(LI, DefiningAccess, B);
   return E;
 }
 
 /// performSymbolicCallEvaluation - Evaluate read only and pure calls, and
 /// create an expression result
-Expression *NewGVN::performSymbolicCallEvaluation(Instruction *I,
-                                                  BasicBlock *B) {
+const Expression *NewGVN::performSymbolicCallEvaluation(Instruction *I,
+                                                        BasicBlock *B) {
   CallInst *CI = cast<CallInst>(I);
   if (AA->doesNotAccessMemory(CI))
     return createCallExpression(CI, nullptr, B);
@@ -1110,10 +1111,9 @@ Expression *NewGVN::performSymbolicCallEvaluation(Instruction *I,
 
 // performSymbolicPHIEvaluation - Evaluate PHI nodes symbolically, and
 // create an expression result
-Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
-                                                 BasicBlock *B) {
+const Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
+                                                       BasicBlock *B) {
   PHIExpression *E = cast<PHIExpression>(createPHIExpression(I));
-  E->setOpcode(I->getOpcode());
   if (E->args_empty()) {
     DEBUG(dbgs() << "Simplified PHI node " << *I << " to undef"
                  << "\n");
@@ -1157,8 +1157,8 @@ Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
   return E;
 }
 
-Expression *NewGVN::performSymbolicAggrValueEvaluation(Instruction *I,
-                                                       BasicBlock *B) {
+const Expression *NewGVN::performSymbolicAggrValueEvaluation(Instruction *I,
+                                                             BasicBlock *B) {
   if (ExtractValueInst *EI = dyn_cast<ExtractValueInst>(I)) {
     IntrinsicInst *II = dyn_cast<IntrinsicInst>(EI->getAggregateOperand());
     if (II != nullptr && EI->getNumIndices() == 1 && *EI->idx_begin() == 0) {
@@ -1200,8 +1200,8 @@ Expression *NewGVN::performSymbolicAggrValueEvaluation(Instruction *I,
 
 /// performSymbolicEvaluation - Substitute and symbolize the value
 /// before value numbering
-Expression *NewGVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
-  Expression *E = NULL;
+const Expression *NewGVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
+  const Expression *E = NULL;
   if (Constant *C = dyn_cast<Constant>(V))
     E = createConstantExpression(C, false);
   else if (isa<Argument>(V) || isa<GlobalVariable>(V)) {
@@ -1454,7 +1454,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
       // that to find an appropriate instruction (if any).
       CmpInst::Predicate NotPred = Cmp->getInversePredicate();
       Constant *NotVal = ConstantInt::get(Cmp->getType(), isKnownFalse);
-      BasicExpression *E =
+      const BasicExpression *E =
           createCmpExpression(Cmp->getOpcode(), Cmp->getType(), NotPred, Op0,
                               Op1, Cmp->getParent());
 
@@ -1521,7 +1521,7 @@ void NewGVN::markUsersTouched(Value *V) {
 
 /// performCongruenceFinding - Perform congruence finding on a given
 /// value numbering expression
-void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
+void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
   // This is guaranteed to return something, since it will at least find
   // INITIAL
   CongruenceClass *VClass = ValueToClass[V];
@@ -1543,7 +1543,7 @@ void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
     } else {
       EClass = VClass;
     }
-  } else if (VariableExpression *VE = dyn_cast<VariableExpression>(E)) {
+  } else if (const VariableExpression *VE = dyn_cast<VariableExpression>(E)) {
     EClass = ValueToClass[VE->getVariableValue()];
   } else {
 
@@ -1560,11 +1560,11 @@ void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
       place->second = NewClass;
 
       // Constants and variables should always be made the leader
-      if (ConstantExpression *CE = dyn_cast<ConstantExpression>(E))
+      if (const ConstantExpression *CE = dyn_cast<ConstantExpression>(E))
         NewClass->leader = CE->getConstantValue();
-      else if (VariableExpression *VE = dyn_cast<VariableExpression>(E))
+      else if (const VariableExpression *VE = dyn_cast<VariableExpression>(E))
         NewClass->leader = VE->getVariableValue();
-      else if (StoreExpression *SE = dyn_cast<StoreExpression>(E))
+      else if (const StoreExpression *SE = dyn_cast<StoreExpression>(E))
         NewClass->leader = SE->getStoreInst()->getValueOperand();
       else
         NewClass->leader = V;
@@ -1590,7 +1590,7 @@ void NewGVN::performCongruenceFinding(Value *V, Expression *E) {
                    << "\n");
 
       if (E && isa<CoercibleLoadExpression>(E)) {
-        CoercibleLoadExpression *L = cast<CoercibleLoadExpression>(E);
+        const CoercibleLoadExpression *L = cast<CoercibleLoadExpression>(E);
         VClass->coercible_members.erase(V);
         EClass->coercible_members.insert(V);
         CoercionInfo.insert(
@@ -1694,8 +1694,8 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
     Value *CondEvaluated = findConditionEquivalence(Cond, B);
     if (!CondEvaluated) {
       if (Instruction *I = dyn_cast<Instruction>(Cond)) {
-        Expression *E = createExpression(I, B);
-        if (ConstantExpression *CE = dyn_cast<ConstantExpression>(E)) {
+        const Expression *E = createExpression(I, B);
+        if (const ConstantExpression *CE = dyn_cast<ConstantExpression>(E)) {
           CondEvaluated = CE->getConstantValue();
         }
       } else if (isa<ConstantInt>(Cond)) {
@@ -2023,7 +2023,7 @@ bool NewGVN::runOnFunction(Function &F) {
       }
 #endif
       if (!I->isTerminator()) {
-        Expression *Symbolized = performSymbolicEvaluation(I, CurrBlock);
+        const Expression *Symbolized = performSymbolicEvaluation(I, CurrBlock);
         if (Symbolized && Symbolized->usedEquivalence())
           InvolvedInEquivalence.set(InstrDFS[I]);
         performCongruenceFinding(I, Symbolized);

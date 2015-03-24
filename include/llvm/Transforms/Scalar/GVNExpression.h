@@ -86,20 +86,20 @@ public:
   virtual hash_code getHashValue() const {
     return hash_combine(EType, Opcode, UsedEquivalence);
   }
-  virtual void printInternal(raw_ostream &OS, bool printEType) {
+  virtual void printInternal(raw_ostream &OS, bool printEType) const {
     if (printEType)
       OS << "etype = " << EType << ",";
     OS << "opcode = " << Opcode << ", ";
     OS << "UsedEquivalence = " << UsedEquivalence << ", ";
   }
 
-  void print(raw_ostream &OS) {
+  void print(raw_ostream &OS) const {
     OS << "{ ";
     printInternal(OS, true);
     OS << "}";
   }
 };
-inline raw_ostream &operator<<(raw_ostream &OS, Expression &E) {
+inline raw_ostream &operator<<(raw_ostream &OS, const Expression &E) {
   E.print(OS);
   return OS;
 }
@@ -179,7 +179,7 @@ public:
       return false;
     return true;
   }
-  virtual void printInternal(raw_ostream &OS, bool printEType) {
+  virtual void printInternal(raw_ostream &OS, bool printEType) const {
     if (printEType)
       OS << "ExpressionTypeBasic, ";
 
@@ -231,7 +231,7 @@ public:
     return hash_combine(this->BasicExpression::getHashValue(), DefiningAccess);
   }
 
-  virtual void printInternal(raw_ostream &OS, bool printEType) {
+  virtual void printInternal(raw_ostream &OS, bool printEType) const {
     if (printEType)
       OS << "ExpressionTypeCall, ";
     this->BasicExpression::printInternal(OS, false);
@@ -282,7 +282,7 @@ public:
     return hash_combine(this->BasicExpression::getHashValue(), DefiningAccess);
   }
 
-  virtual void printInternal(raw_ostream &OS, bool printEType) {
+  virtual void printInternal(raw_ostream &OS, bool printEType) const {
     if (printEType)
       OS << "ExpressionTypeLoad, ";
     this->BasicExpression::printInternal(OS, false);
@@ -336,7 +336,7 @@ public:
   virtual hash_code getHashValue() const {
     return hash_combine(ValueType, Offset, Src);
   }
-  virtual void printInternal(raw_ostream &OS, bool printEType) {
+  virtual void printInternal(raw_ostream &OS, bool printEType) const {
     if (printEType)
       OS << "ExpressionTypeCoercibleLoad, ";
     this->LoadExpression::printInternal(OS, false);
@@ -379,7 +379,7 @@ public:
     return true;
   }
 
-  virtual void printInternal(raw_ostream &OS, bool printEType) {
+  virtual void printInternal(raw_ostream &OS, bool printEType) const {
     if (printEType)
       OS << "ExpressionTypeStore, ";
     this->BasicExpression::printInternal(OS, false);
@@ -451,7 +451,7 @@ public:
     return hash_combine(this->BasicExpression::getHashValue(),
                         hash_combine_range(int_args_begin(), int_args_end()));
   }
-  virtual void printInternal(raw_ostream &OS, bool printEType) {
+  virtual void printInternal(raw_ostream &OS, bool printEType) const {
     if (printEType)
       OS << "ExpressionTypeAggregateValue, ";
     this->BasicExpression::printInternal(OS, false);
@@ -491,7 +491,7 @@ public:
   virtual hash_code getHashValue() const {
     return hash_combine(this->BasicExpression::getHashValue(), BB);
   }
-  virtual void printInternal(raw_ostream &OS, bool printEType) {
+  virtual void printInternal(raw_ostream &OS, bool printEType) const {
     if (printEType)
       OS << "ExpressionTypePhi, ";
     this->BasicExpression::printInternal(OS, false);
@@ -527,7 +527,7 @@ public:
     return hash_combine(EType, VariableValue->getType(), VariableValue);
   }
 
-  virtual void printInternal(raw_ostream &OS, bool printEType) {
+  virtual void printInternal(raw_ostream &OS, bool printEType) const {
     if (printEType)
       OS << "ExpressionTypeVariable, ";
     this->Expression::printInternal(OS, false);
@@ -566,7 +566,7 @@ public:
   virtual hash_code getHashValue() const {
     return hash_combine(EType, ConstantValue->getType(), ConstantValue);
   }
-  virtual void printInternal(raw_ostream &OS, bool printEType) {
+  virtual void printInternal(raw_ostream &OS, bool printEType) const {
     if (printEType)
       OS << "ExpressionTypeConstant, ";
     this->Expression::printInternal(OS, false);
