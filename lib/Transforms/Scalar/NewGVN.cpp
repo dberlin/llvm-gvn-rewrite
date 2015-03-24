@@ -1121,7 +1121,7 @@ const Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
     ExpressionAllocator.Deallocate(E);
     return createConstantExpression(UndefValue::get(I->getType()), false);
   }
-
+  
   Value *AllSameValue = E->Args[0];
 
   for (const Value *Arg : E->arguments())
@@ -2078,14 +2078,12 @@ struct NewGVN::ValueDFS {
   int LocalNum;
   bool Equivalence;
   bool Coercible;
-  const BasicBlockEdge *Edge;
-  bool EdgeOnly;
   // Only one of these will be set
   Value *Val;
   Use *U;
   ValueDFS()
       : DFSIn(0), DFSOut(0), LocalNum(0), Equivalence(false), Coercible(false),
-        Edge(nullptr), EdgeOnly(false), Val(nullptr), U(nullptr) {}
+        Val(nullptr), U(nullptr) {}
 
   bool operator<(const ValueDFS &other) const {
     // It's not enough that any given field be less than - we have sets
@@ -2175,6 +2173,10 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
 void NewGVN::convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &Dense,
                                       std::vector<ValueDFS> &DFSOrderedSet) {
   for (const auto &D : Dense) {
+    // We don't have the machinery to handle edge only equivalences yet.
+    // We should be using control regions to know where they are valid.
+    if (D.EdgeOnly)
+      continue;
     std::pair<int, int> &DFSPair = DFSBBMap[D.Edge.getEnd()];
     ValueDFS VD;
     VD.DFSIn = DFSPair.first;
@@ -2192,8 +2194,6 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &Dense,
       VD.LocalNum = -1;
 
     VD.Val = D.Val;
-    VD.Edge = &D.Edge;
-    VD.EdgeOnly = D.EdgeOnly;
     DFSOrderedSet.emplace_back(VD);
   }
 }
