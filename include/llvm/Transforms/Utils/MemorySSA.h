@@ -98,6 +98,8 @@ public:
   typedef UseListType::iterator iterator;
   typedef UseListType::const_iterator const_iterator;
 
+  bool use_empty() const { return Uses.empty(); }
+
   iterator use_begin() { return Uses.begin(); }
   iterator use_end() { return Uses.end(); }
   iterator_range<iterator> uses() {
@@ -330,9 +332,16 @@ public:
   }
 
   typedef iplist<MemoryAccess> AccessListType;
+
+  // This function gives the list of memory accesses for basic block BB
+  // This list is not modifiable by the user
   const AccessListType *getBlockAccesses(const BasicBlock *BB) {
     return PerBlockAccesses[BB];
   }
+
+  // This function removes as a memory access that is going to be deleted, from
+  // Memory SSA.
+  void removeMemoryAccess(MemoryAccess *);
 
 protected:
   // Used by memory ssa annotater, dumpers, and wrapper pass
