@@ -388,10 +388,14 @@ void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
     // Re-point the uses at our defining access
     if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
       DefiningAccess = MU->getDefiningAccess();
-
+    else if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
+      DefiningAccess = MD->getDefiningAccess();
+    
     for (auto U : MA->uses()) {
       if (MemoryUse *MU = dyn_cast<MemoryUse>(U))
         MU->setDefiningAccess(DefiningAccess);
+      else if (MemoryDef *MD = dyn_cast<MemoryDef>(U))
+        MD->setDefiningAccess(DefiningAccess);
       else if (MemoryPhi *MP = dyn_cast<MemoryPhi>(U)) {
         for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i) {
           if (MP->getIncomingValue(i) == MA)
