@@ -65,9 +65,11 @@
 #ifndef LLVM_TRANSFORMS_UTILS_MEMORYSSA_H
 #define LLVM_TRANSFORMS_UTILS_MEMORYSSA_H
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/ADT/ilist_node.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/Pass.h"
 #include <list>
 namespace llvm {
@@ -76,7 +78,9 @@ class BasicBlock;
 class DominatorTree;
 class Function;
 
-class MemoryAccess {
+// This is the base for all memory accesses. All memory accesses in a block are
+// linked together using an intrusive list
+class MemoryAccess : public ilist_node<MemoryAccess> {
 public:
   enum AccessType { AccessUse, AccessDef, AccessPhi };
 
@@ -88,7 +92,7 @@ public:
   virtual ~MemoryAccess() {}
   BasicBlock *getBlock() const { return Block; }
 
-  virtual void print(raw_ostream &OS) = 0;
+  virtual void print(raw_ostream &OS){};
 
   typedef SmallPtrSet<MemoryAccess *, 8> UseListType;
   typedef UseListType::iterator iterator;
@@ -131,6 +135,22 @@ private:
   AccessType AccessType;
   BasicBlock *Block;
   UseListType Uses;
+};
+
+template <>
+struct ilist_traits<MemoryAccess> : public ilist_default_traits<MemoryAccess> {
+  // See details of the instruction class for why this trick works
+  MemoryAccess *createSentinel() const {
+    return static_cast<MemoryAccess *>(&Sentinel);
+  }
+  static void destroySentinel(MemoryAccess *) {}
+
+  MemoryAccess *provideInitialHead() const { return createSentinel(); }
+  MemoryAccess *ensureHead(MemoryAccess *) const { return createSentinel(); }
+  static void noteHead(MemoryAccess *, MemoryAccess *) {}
+
+private:
+  mutable ilist_half_node<MemoryAccess> Sentinel;
 };
 
 static inline raw_ostream &operator<<(raw_ostream &OS, MemoryAccess &MA) {
@@ -289,22 +309,6 @@ private:
 
 class MemorySSAWalker;
 class MemorySSA {
-
-private:
-  AliasAnalysis *AA;
-  DominatorTree *DT;
-  Function &F;
-
-  // Memory SSA mappings
-  DenseMap<const Value *, MemoryAccess *> InstructionToMemoryAccess;
-  MemoryAccess *LiveOnEntryDef;
-
-  // Memory SSA building info
-  typedef DenseMap<BasicBlock *, std::list<MemoryAccess *> *> AccessMap;
-  unsigned int nextID;
-  bool builtAlready;
-  std::vector<MemoryAccess *> AllAccesses;
-
 public:
   MemorySSA(Function &);
   ~MemorySSA();
@@ -325,6 +329,11 @@ public:
     return LiveOnEntryDef;
   }
 
+  typedef iplist<MemoryAccess> AccessListType;
+  const AccessListType *getBlockAccesses(const BasicBlock *BB) {
+    return PerBlockAccesses[BB];
+  }
+
 protected:
   // Used by memory ssa annotater, dumpers, and wrapper pass
   friend class MemorySSAAnnotatedWriter;
@@ -334,6 +343,7 @@ protected:
 
 private:
   void verifyUseInDefs(MemoryAccess *, MemoryAccess *);
+  typedef DenseMap<const BasicBlock *, AccessListType *> AccessMap;
 
   void
   determineInsertionPoint(Function &F, AccessMap &BlockAccesses,
@@ -361,6 +371,18 @@ private:
                   AccessMap &BlockAccesses,
                   std::vector<RenamePassData> &Worklist,
                   SmallPtrSet<BasicBlock *, 16> &Visited, MemorySSAWalker *);
+  AliasAnalysis *AA;
+  DominatorTree *DT;
+  Function &F;
+
+  // Memory SSA mappings
+  DenseMap<const Value *, MemoryAccess *> InstructionToMemoryAccess;
+  MemoryAccess *LiveOnEntryDef;
+
+  // Memory SSA building info
+  AccessMap PerBlockAccesses;
+  unsigned int nextID;
+  bool builtAlready;
 };
 
 // This pass does eager building of MemorySSA. It is used by the tests to be

@@ -148,12 +148,11 @@ void MemorySSA::determineInsertionPoint(
     // Insert phi node
     auto Accesses = BlockAccesses.lookup(BB);
     if (!Accesses) {
-      Accesses = new std::list<MemoryAccess *>;
+      Accesses = new iplist<MemoryAccess>;
       BlockAccesses.insert(std::make_pair(BB, Accesses));
     }
     MemoryPhi *Phi = new MemoryPhi(
         BB, std::distance(pred_begin(BB), pred_end(BB)), nextID++);
-    AllAccesses.push_back(Phi);
     InstructionToMemoryAccess.insert(std::make_pair(BB, Phi));
     // Phi goes first
     Accesses->push_front(Phi);
@@ -169,11 +168,11 @@ void MemorySSA::renamePass(BasicBlock *BB, BasicBlock *Pred,
                            SmallPtrSet<BasicBlock *, 16> &Visited,
                            MemorySSAWalker *Walker) {
 NextIteration:
-  auto Accesses = BlockAccesses.lookup(BB);
+  const auto Accesses = BlockAccesses.lookup(BB);
 
   // First rename the phi nodes
   if (Accesses && isa<MemoryPhi>(Accesses->front())) {
-    MemoryPhi *Phi = cast<MemoryPhi>(Accesses->front());
+    MemoryPhi *Phi = cast<MemoryPhi>(&Accesses->front());
     unsigned NumEdges = std::count(succ_begin(Pred), succ_end(Pred), BB);
     assert(NumEdges && "Must be at least one edge from Pred to BB!");
     for (unsigned i = 0; i != NumEdges; ++i)
@@ -193,11 +192,11 @@ NextIteration:
       if (isa<MemoryPhi>(L))
         continue;
 
-      if (MemoryUse *MU = dyn_cast<MemoryUse>(L)) {
+      if (MemoryUse *MU = dyn_cast<MemoryUse>(&L)) {
         MU->setDefiningAccess(IncomingVal);
         auto RealVal = Walker->getClobberingMemoryAccess(MU->getMemoryInst());
         MU->setDefiningAccess(RealVal);
-      } else if (MemoryDef *MD = dyn_cast<MemoryDef>(L)) {
+      } else if (MemoryDef *MD = dyn_cast<MemoryDef>(&L)) {
         MD->setDefiningAccess(IncomingVal);
         auto RealVal = Walker->getClobberingMemoryAccess(MD->getMemoryInst());
         if (RealVal == MD)
@@ -260,12 +259,12 @@ void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
     auto Next = std::next(AI);
     // If we have a phi, just remove it. We are going to replace all
     // users with live on entry.
-    if (MemoryPhi *P = dyn_cast<MemoryPhi>(*AI)) {
+    if (MemoryPhi *P = dyn_cast<MemoryPhi>(&*AI)) {
       delete P;
       Accesses->erase(AI);
-    } else if (MemoryUse *U = dyn_cast<MemoryUse>(*AI)) {
+    } else if (MemoryUse *U = dyn_cast<MemoryUse>(&*AI)) {
       U->setDefiningAccess(LiveOnEntryDef);
-    } else if (MemoryDef *D = dyn_cast<MemoryDef>(*AI)) {
+    } else if (MemoryDef *D = dyn_cast<MemoryDef>(&*AI)) {
       D->setDefiningAccess(LiveOnEntryDef);
     }
     AI = Next;
@@ -277,9 +276,16 @@ MemorySSA::MemorySSA(Function &Func)
 
 MemorySSA::~MemorySSA() {
   InstructionToMemoryAccess.clear();
-  for (auto MA : AllAccesses)
-    delete MA;
-  AllAccesses.clear();
+  SmallVector<AccessListType *, 8> toDelete;
+  for (auto &B : PerBlockAccesses)
+    delete B.second;
+  // toDelete.push_back(B.second);
+
+  // for (auto MA : toDelete)
+  //   delete MA;
+  // toDelete.clear();
+  PerBlockAccesses.clear();
+  delete LiveOnEntryDef;
 }
 
 void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
@@ -296,17 +302,15 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
   // the IR.
   BasicBlock &StartingPoint = F.getEntryBlock();
   LiveOnEntryDef = new MemoryDef(nullptr, nullptr, &StartingPoint, nextID++);
-  AllAccesses.push_back(LiveOnEntryDef);
 
   // We temporarily maintain lists of memory accesses per-block,
   // trading time for memory. We could just look up the memory access
   // for every possible instruction in the stream.  Instead, we build
   // lists, and then throw it out once the use-def form is built.
-  AccessMap PerBlockAccesses;
   SmallPtrSet<BasicBlock *, 32> DefiningBlocks;
 
   for (auto &B : F) {
-    std::list<MemoryAccess *> *Accesses = nullptr;
+    AccessListType *Accesses = nullptr;
     for (auto &I : B) {
       bool use = false;
       bool def = false;
@@ -327,21 +331,19 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
       // Defs are already uses, so use && def == def
       if (use && !def) {
         MemoryUse *MU = new MemoryUse(nullptr, &I, &B);
-        AllAccesses.push_back(MU);
         InstructionToMemoryAccess.insert(std::make_pair(&I, MU));
         if (!Accesses) {
-          Accesses = new std::list<MemoryAccess *>;
+          Accesses = new AccessListType();
           PerBlockAccesses.insert(std::make_pair(&B, Accesses));
         }
         Accesses->push_back(MU);
       }
       if (def) {
         MemoryDef *MD = new MemoryDef(nullptr, &I, &B, nextID++);
-        AllAccesses.push_back(MD);
         InstructionToMemoryAccess.insert(std::make_pair(&I, MD));
         DefiningBlocks.insert(&B);
         if (!Accesses) {
-          Accesses = new std::list<MemoryAccess *>;
+          Accesses = new AccessListType();
           PerBlockAccesses.insert(std::make_pair(&B, Accesses));
         }
         Accesses->push_back(MD);
@@ -371,10 +373,6 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
       if (!Visited.count(&B))
         markUnreachableAsLiveOnEntry(PerBlockAccesses, &B);
   }
-
-  // Delete our access lists
-  for (auto &D : PerBlockAccesses)
-    delete D.second;
 
   builtAlready = true;
 }
@@ -450,7 +448,7 @@ void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
            "Null def but use not point to live on entry def");
     return;
   }
-  assert(!Def->findUse(Use) && "Did not find use in def's use list");
+  assert(Def->findUse(Use) && "Did not find use in def's use list");
 }
 
 // Verify the immediate use information, by walking all the memory
