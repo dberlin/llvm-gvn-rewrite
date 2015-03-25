@@ -184,10 +184,21 @@ class NewGVN : public FunctionPass {
     size_t operator()(const Expression *A) const { return A->getHashValue(); }
   };
 
+  // This multimap holds equivalences that we've detected that we haven't see
+  // users in the program for, yet. If we later see a user, we will add these to
+  // it's equivalences
   std::unordered_multimap<const Expression *, Equivalence, hash_expression,
                           expression_equal_to> PendingEquivalences;
 
-  //  DenseMap<const Use &,
+  // This map holds the list of equivalences that only apply to a single
+  // instruction.  Because we don't have control regions, when we have
+  // equivalences along edges to blocks with multiple predecessors, we can't add
+  // them to the general equivalences list, because they don't dominate a given
+  // root, but instead, they really represent something valid in certain control
+  // regions of the program, a concept that is not really expressible using the
+  // a standard dominator (and not postdominator) tree.
+  DenseMap<User *, std::pair<unsigned, Value *>> SingleUserEquivalences;
+
   typedef DenseMap<const Expression *, CongruenceClass *,
                    ComparingExpressionInfo> ExpressionClassMap;
   ExpressionClassMap ExpressionToClass;
@@ -312,15 +323,19 @@ private:
   // Congruence finding
   // Templated to allow them to work both on BB's and BB-edges
   template <class T>
-  std::pair<Value *, bool> lookupOperandLeader(Value *, const T &) const;
+  std::pair<Value *, bool> lookupOperandLeader(Value *, const User *,
+                                               const T &) const;
   template <class T>
-  Value *findDominatingEquivalent(CongruenceClass *, const T &) const;
+  Value *findDominatingEquivalent(CongruenceClass *, const User *,
+                                  const T &) const;
   void performCongruenceFinding(Value *, const Expression *);
   // Predicate and reachability handling
   void updateReachableEdge(BasicBlock *, BasicBlock *);
   void processOutgoingEdges(TerminatorInst *, BasicBlock *);
   void propagateChangeInEdge(BasicBlock *);
   bool propagateEquality(Value *, Value *, const BasicBlockEdge &);
+  void markDominatedSingleUserEquivalences(Value *, Value *,
+                                           const BasicBlockEdge &);
   Value *findConditionEquivalence(Value *, BasicBlock *) const;
   std::pair<unsigned, unsigned>
   calculateDominatedInstRange(const DomTreeNode *);
@@ -393,7 +408,7 @@ PHIExpression *NewGVN::createPHIExpression(Instruction *I) {
     }
     if (I->getOperand(i) != I) {
       const BasicBlockEdge BBE(B, PhiBlock);
-      auto Operand = lookupOperandLeader(I->getOperand(i), BBE);
+      auto Operand = lookupOperandLeader(I->getOperand(i), I, BBE);
       E->args_push_back(Operand.first);
       UsedEquiv |= Operand.second;
     } else {
@@ -416,7 +431,7 @@ bool NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
   E->allocateArgs(ArgRecycler, ExpressionAllocator);
 
   for (auto &O : I->operands()) {
-    auto Operand = lookupOperandLeader(O, B);
+    auto Operand = lookupOperandLeader(O, I, B);
     UsedEquiv |= Operand.second;
     if (!isa<Constant>(Operand.first))
       AllConstant = false;
@@ -437,10 +452,10 @@ const BasicExpression *NewGVN::createCmpExpression(unsigned Opcode, Type *Type,
   E->allocateArgs(ArgRecycler, ExpressionAllocator);
   E->setType(Type);
   E->setOpcode((Opcode << 8) | Predicate);
-  auto Result = lookupOperandLeader(LHS, B);
+  auto Result = lookupOperandLeader(LHS, nullptr, B);
   UsedEquiv |= Result.second;
   E->args_push_back(Result.first);
-  Result = lookupOperandLeader(RHS, B);
+  Result = lookupOperandLeader(RHS, nullptr, B);
   UsedEquiv |= Result.second;
   E->args_push_back(Result.first);
   E->setUsedEquivalence(UsedEquiv);
@@ -464,11 +479,11 @@ const Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
       std::swap(Arg1, Arg2);
   }
   bool UsedEquiv = false;
-  auto BinaryLeader = lookupOperandLeader(Arg1, B);
+  auto BinaryLeader = lookupOperandLeader(Arg1, nullptr, B);
   UsedEquiv |= BinaryLeader.second;
   E->args_push_back(BinaryLeader.first);
 
-  BinaryLeader = lookupOperandLeader(Arg2, B);
+  BinaryLeader = lookupOperandLeader(Arg2, nullptr, B);
   UsedEquiv |= BinaryLeader.second;
   E->args_push_back(BinaryLeader.first);
 
@@ -668,7 +683,7 @@ NewGVN::createVariableExpression(Value *V, bool UsedEquivalence) {
 }
 
 const Expression *NewGVN::createVariableOrConstant(Value *V, BasicBlock *B) {
-  auto Leader = lookupOperandLeader(V, B);
+  auto Leader = lookupOperandLeader(V, nullptr, B);
   if (Constant *C = dyn_cast<Constant>(Leader.first))
     return createConstantExpression(C, Leader.second);
   return createVariableExpression(Leader.first, Leader.second);
@@ -695,13 +710,13 @@ NewGVN::createCallExpression(CallInst *CI, MemoryAccess *HV, BasicBlock *B) {
 // TODO: Compare this against the predicate handling system in the paper
 
 template <class T>
-Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, const T &B) const {
-  // This check is much faster than doing 0 iterations of the loop below
-  if (CC->equivalences.empty())
-    return nullptr;
+Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, const User *U,
+                                        const T &B) const {
 
   // TODO: This can be made faster by different set ordering, if
-  // necessary, or caching whether we found one
+  // necessary, or caching whether we found one before and only updating it when
+  // things change.
+
   for (const auto &Member : CC->equivalences) {
     if (DT->dominates(Member.Edge, B))
       return Member.Val;
@@ -713,14 +728,11 @@ Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, const T &B) const {
 // (like a phi node incoming edge).  So even if it doesn't dominate the block at
 // the end of the edge, if it's the same edge, that's fine too.
 template <>
-Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC,
+Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, const User *U,
                                         const BasicBlockEdge &B) const {
-  // This check is much faster than doing 0 iterations of the loop below
-  if (CC->equivalences.empty())
-    return nullptr;
-
   // TODO: This can be made faster by different set ordering, if
-  // necessary, or caching whether we found one
+  // necessary, or caching whether we found one before and only updating it when
+  // things change.
   for (const auto &Member : CC->equivalences) {
     if ((Member.Edge.getStart() == B.getStart() &&
          Member.Edge.getEnd() == B.getEnd()) ||
@@ -735,11 +747,11 @@ Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC,
 // original operand.  The second part of the return value is true if a
 // dominating equivalence is being returned.
 template <class T>
-std::pair<Value *, bool> NewGVN::lookupOperandLeader(Value *V,
+std::pair<Value *, bool> NewGVN::lookupOperandLeader(Value *V, const User *U,
                                                      const T &B) const {
   CongruenceClass *CC = ValueToClass.lookup(V);
   if (CC && (CC != InitialClass)) {
-    Value *Equivalence = findDominatingEquivalent(CC, B);
+    Value *Equivalence = findDominatingEquivalent(CC, U, B);
     if (Equivalence) {
       DEBUG(dbgs() << "Found equivalence " << *Equivalence << " for value "
                    << *V << " in block " << getBlockName(B) << "\n");
@@ -758,7 +770,7 @@ NewGVN::createLoadExpression(LoadInst *LI, MemoryAccess *DA, BasicBlock *B) {
   E->setType(LI->getType());
   // Give store and loads same opcode so they value number together
   E->setOpcode(0);
-  auto Operand = lookupOperandLeader(LI->getPointerOperand(), B);
+  auto Operand = lookupOperandLeader(LI->getPointerOperand(), LI, B);
   E->args_push_back(Operand.first);
   E->setUsedEquivalence(Operand.second);
 
@@ -778,7 +790,7 @@ NewGVN::createCoercibleLoadExpression(LoadInst *LI, MemoryAccess *DA,
   E->setType(LI->getType());
   // Give store and loads same opcode so they value number together
   E->setOpcode(0);
-  auto Operand = lookupOperandLeader(LI->getPointerOperand(), B);
+  auto Operand = lookupOperandLeader(LI->getPointerOperand(), LI, B);
   E->args_push_back(Operand.first);
   E->setUsedEquivalence(Operand.second);
   // TODO: Value number heap versions. We may be able to discover
@@ -795,7 +807,7 @@ NewGVN::createStoreExpression(StoreInst *SI, MemoryAccess *DA, BasicBlock *B) {
   E->setType(SI->getType());
   // Give store and loads same opcode so they value number together
   E->setOpcode(0);
-  auto Operand = lookupOperandLeader(SI->getPointerOperand(), B);
+  auto Operand = lookupOperandLeader(SI->getPointerOperand(), SI, B);
   E->args_push_back(Operand.first);
   E->setUsedEquivalence(Operand.second);
   // TODO: Value number heap versions. We may be able to discover
@@ -975,9 +987,9 @@ NewGVN::performSymbolicLoadCoercion(LoadInst *LI, Instruction *DepInst,
   Type *LoadType = LI->getType();
   if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
     Value *LoadAddressLeader =
-        lookupOperandLeader(LI->getPointerOperand(), B).first;
+        lookupOperandLeader(LI->getPointerOperand(), LI, B).first;
     Value *StoreAddressLeader =
-        lookupOperandLeader(DepSI->getPointerOperand(), B).first;
+        lookupOperandLeader(DepSI->getPointerOperand(), DepSI, B).first;
     Value *StoreVal = DepSI->getValueOperand();
     if (StoreVal->getType() == LoadType &&
         LoadAddressLeader == StoreAddressLeader) {
@@ -1034,7 +1046,7 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
     return NULL;
 
   Value *LoadAddressLeader =
-      lookupOperandLeader(LI->getPointerOperand(), B).first;
+      lookupOperandLeader(LI->getPointerOperand(), I, B).first;
   // Load of undef is undef
   if (isa<UndefValue>(LoadAddressLeader))
     return createConstantExpression(UndefValue::get(LI->getType()), false);
@@ -1078,8 +1090,8 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
           // We don't want to mark identical loads coercible, since coercible
           // loads don't value number with normal loads.
           if (LI->getType() != DepLI->getType() ||
-              (lookupOperandLeader(DepLI->getPointerOperand(), B).first !=
-               LoadAddressLeader)) {
+              (lookupOperandLeader(DepLI->getPointerOperand(), DepLI, B)
+                   .first != LoadAddressLeader)) {
             int Offset = analyzeLoadFromClobberingLoad(
                 LI->getType(), LI->getPointerOperand(), DepLI);
             if (Offset >= 0)
@@ -1121,7 +1133,7 @@ const Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
     ExpressionAllocator.Deallocate(E);
     return createConstantExpression(UndefValue::get(I->getType()), false);
   }
-  
+
   Value *AllSameValue = E->Args[0];
 
   for (const Value *Arg : E->arguments())
@@ -1276,6 +1288,32 @@ const Expression *NewGVN::performSymbolicEvaluation(Value *V, BasicBlock *B) {
     return NULL;
   return E;
 }
+
+/// markDominatedSingleUseEquivalences - Go through all uses of From, and mark
+/// them as equivalent to To if From dominates them
+
+void NewGVN::markDominatedSingleUserEquivalences(Value *From, Value *To,
+                                                 const BasicBlockEdge &Root) {
+  for (const auto &U : From->uses()) {
+    // If From occurs as a phi node operand then the use implicitly lives in
+    // the
+    // corresponding incoming block.  Otherwise it is the block containing the
+    // user that must be dominated by Root.
+    BasicBlock *UsingBlock;
+    if (PHINode *PN = dyn_cast<PHINode>(U.getUser()))
+      UsingBlock = PN->getIncomingBlock(U);
+    else
+      UsingBlock = cast<Instruction>(U.getUser())->getParent();
+
+    if (DT->dominates(Root, UsingBlock)) {
+      SingleUserEquivalences[U.getUser()] = {U.getOperandNo(), To};
+      // Mark the users as touched
+      if (Instruction *I = dyn_cast<Instruction>(U.getUser()))
+        TouchedInstructions.set(InstrDFS[I]);
+    }
+  }
+}
+
 /// replaceAllDominatedUsesWith - Replace all uses of 'From' with 'To'
 /// if the use is dominated by the given basic block.  Returns the
 /// number of uses that were replaced.
@@ -1380,8 +1418,10 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
     // 'RHS' within the scope Root.
     CongruenceClass *CC = ValueToClass[LHS];
     assert(CC && "Should have found a congruence class");
-    CC->equivalences.emplace_back(RHS, Root, RootDominatesEnd);
+    CC->equivalences.emplace_back(RHS, Root, !RootDominatesEnd);
 
+    if (!RootDominatesEnd)
+      markDominatedSingleUserEquivalences(LHS, RHS, Root);
     // Replace all occurrences of 'LHS' with 'RHS' everywhere in the
     // scope.  As LHS always has at least one use that is not
     // dominated by Root, this will never do anything if LHS has only
@@ -1481,12 +1521,13 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
         // Ensure that any instruction in scope that gets the "A < B"
         // value number is replaced with false.
 
-        CC->equivalences.emplace_back(NotVal, Root, RootDominatesEnd);
+        CC->equivalences.emplace_back(NotVal, Root, !RootDominatesEnd);
+
       } else {
         // Put this in pending equivalences so if an expression shows up, we'll
         // add the equivalence
         PendingEquivalences.emplace(
-            E, Equivalence{NotVal, Root, RootDominatesEnd});
+            E, Equivalence{NotVal, Root, !RootDominatesEnd});
       }
 
       // TODO: Equality propagation - do equivalent of this
@@ -1676,7 +1717,7 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
 // switch, cmp, or whatever) and a block, see if we know some constant
 // value for it already
 Value *NewGVN::findConditionEquivalence(Value *Cond, BasicBlock *B) const {
-  auto Result = lookupOperandLeader(Cond, B);
+  auto Result = lookupOperandLeader(Cond, nullptr, B);
   if (isa<Constant>(Result.first))
     return Result.first;
 
@@ -1893,6 +1934,7 @@ void NewGVN::cleanupTables() {
   CoercionInfo.clear();
   CoercionForwarding.clear();
   DominatedInstRange.clear();
+  SingleUserEquivalences.clear();
 }
 
 std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
@@ -2147,6 +2189,15 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
     // Now add the users
     for (auto &U : D->uses()) {
       if (Instruction *I = dyn_cast<Instruction>(U.getUser())) {
+        // If we the the same use we have an equivalence for, we will replace it
+        // with the equivalence later
+
+        const auto &LI = SingleUserEquivalences.find(I);
+        if (LI != SingleUserEquivalences.end()) {
+          if (U.getOperandNo() == LI->second.first)
+            continue;
+        }
+
         ValueDFS VD;
         VD.Coercible = Coercible;
         // Put the phi node uses in the incoming block
@@ -2808,8 +2859,8 @@ bool NewGVN::eliminateInstructions(Function &F) {
                          << EliminationStack.dfs_back().first << ","
                          << EliminationStack.dfs_back().second << ")\n");
           }
-          //          if (Member && isa<Constant>(Member))
-          assert(isa<Constant>(CC->leader) || EquivalenceOnly);
+          if (Member && isa<Constant>(Member))
+            assert(isa<Constant>(CC->leader) || EquivalenceOnly);
 
           DEBUG(dbgs() << "Current DFS numbers are (" << MemberDFSIn << ","
                        << MemberDFSOut << ")\n");
@@ -2874,6 +2925,12 @@ bool NewGVN::eliminateInstructions(Function &F) {
         }
       }
     }
+  }
+  for (auto &Equivs : SingleUserEquivalences) {
+    DEBUG(dbgs() << "Using single user equivalence to replace ");
+    DEBUG(dbgs() << *Equivs.first << " with " << *Equivs.second.second);
+    DEBUG(dbgs() << "\n");
+    Equivs.first->getOperandUse(Equivs.second.first).set(Equivs.second.second);
   }
 
   return true;
