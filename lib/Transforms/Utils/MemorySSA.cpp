@@ -378,6 +378,7 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
 }
 
 void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
+  assert (MA != LiveOnEntryDef && "Trying to remove the live on entry def");
   // We can only delete phi nodes if they are use empty
   if (isa<MemoryPhi>(MA)) {
     assert(MA->use_empty() && "We can't delete memory phis that still have "
@@ -404,6 +405,7 @@ void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
       }
     }
   }
+  PerBlockAccesses[MA->getBlock()]->erase(MA);
 }
 
 void MemorySSA::print(raw_ostream &OS) const {
