@@ -197,7 +197,7 @@ class NewGVN : public FunctionPass {
   // root, but instead, they really represent something valid in certain control
   // regions of the program, a concept that is not really expressible using the
   // a standard dominator (and not postdominator) tree.
-  DenseMap<User *, std::pair<unsigned, Value *>> SingleUserEquivalences;
+  SmallDenseMap<User *, std::pair<unsigned, Value *>> SingleUserEquivalences;
 
   typedef DenseMap<const Expression *, CongruenceClass *,
                    ComparingExpressionInfo> ExpressionClassMap;
