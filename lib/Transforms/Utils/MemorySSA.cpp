@@ -377,6 +377,31 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
   builtAlready = true;
 }
 
+void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
+  // We can only delete phi nodes if they are use empty
+  if (isa<MemoryPhi>(MA)) {
+    assert(MA->use_empty() && "We can't delete memory phis that still have "
+                              "uses, we don't know where the uses should "
+                              "repoint to!");
+  } else {
+    MemoryAccess *DefiningAccess = nullptr;
+    // Re-point the uses at our defining access
+    if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
+      DefiningAccess = MU->getDefiningAccess();
+
+    for (auto U : MA->uses()) {
+      if (MemoryUse *MU = dyn_cast<MemoryUse>(U))
+        MU->setDefiningAccess(DefiningAccess);
+      else if (MemoryPhi *MP = dyn_cast<MemoryPhi>(U)) {
+        for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i) {
+          if (MP->getIncomingValue(i) == MA)
+            MP->setIncomingValue(i, DefiningAccess);
+        }
+      }
+    }
+  }
+}
+
 void MemorySSA::print(raw_ostream &OS) const {
   MemorySSAAnnotatedWriter Writer(this);
   F.print(OS, &Writer);
