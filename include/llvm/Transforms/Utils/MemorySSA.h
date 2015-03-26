@@ -98,6 +98,8 @@ public:
   typedef UseListType::iterator iterator;
   typedef UseListType::const_iterator const_iterator;
 
+  unsigned use_size() const { return Uses.size(); }
+
   bool use_empty() const { return Uses.empty(); }
 
   iterator use_begin() { return Uses.begin(); }
@@ -145,6 +147,7 @@ struct ilist_traits<MemoryAccess> : public ilist_default_traits<MemoryAccess> {
   MemoryAccess *createSentinel() const {
     return static_cast<MemoryAccess *>(&Sentinel);
   }
+
   static void destroySentinel(MemoryAccess *) {}
 
   MemoryAccess *provideInitialHead() const { return createSentinel(); }
@@ -342,6 +345,14 @@ public:
   // This function removes as a memory access that is going to be deleted, from
   // Memory SSA.
   void removeMemoryAccess(MemoryAccess *);
+
+  // Replace a MemorySSA access with another.
+  void replaceMemoryAccess(MemoryAccess *Replacee, MemoryAccess *Replacer);
+
+  // Replace a MemorySSA access with a new access - this does not perform SSA
+  // update, so it only works if the new access dominates the old accesses uses.
+  void replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
+                                        Instruction *Replacer);
 
 protected:
   // Used by memory ssa annotater, dumpers, and wrapper pass

@@ -377,22 +377,127 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
   builtAlready = true;
 }
 
+static MemoryAccess *getDefiningAccess(MemoryAccess *MA) {
+  if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
+    return MU->getDefiningAccess();
+  else if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
+    return MD->getDefiningAccess();
+  else
+    return nullptr;
+}
+
+void MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
+                                                 Instruction *Replacer) {
+
+  // There is no easy way to assert that you are replacing it with a memory
+  // access, and this call will assert it for us
+  AliasAnalysis::ModRefResult ModRef = AA->getModRefInfo(Replacer);
+  bool def = false, use = false;
+  if (ModRef & AliasAnalysis::Mod)
+    def = true;
+  if (ModRef & AliasAnalysis::Ref)
+    use = true;
+  // A memory instruction that doesn't affect memory. Okay ....
+  if (!def && !use)
+    return;
+  BasicBlock *ReplacerBlock = Replacer->getParent();
+  MemoryAccess *MA = nullptr;
+  MemoryAccess *DefiningAccess = getDefiningAccess(Replacee);
+  // Handle the case we are replacing a phi node, in which case, we don't kill
+  // the phi node
+  if (DefiningAccess == nullptr) {
+    assert(DT->dominates(Replacee->getBlock(), ReplacerBlock) &&
+           "Need to reuse PHI for defining access, but it will not dominate "
+           "replacing instruction");
+    DefiningAccess = Replacee;
+  }
+
+  if (def) {
+    MemoryDef *MD =
+        new MemoryDef(DefiningAccess, Replacer, ReplacerBlock, nextID++);
+    MA = MD;
+  } else if (use) {
+    MemoryUse *MU = new MemoryUse(DefiningAccess, Replacer, ReplacerBlock);
+    MA = MU;
+  }
+
+  // Insert our access after any phi nodes in the block
+  AccessListType *Accesses = nullptr;
+  auto Result = PerBlockAccesses.insert(std::make_pair(ReplacerBlock, nullptr));
+
+  if (Result.second) {
+    Accesses = Result.first->second;
+  } else {
+    Accesses = new AccessListType();
+    Result.first->second = Accesses;
+  }
+  auto AI = Accesses->begin();
+  for (auto AE = Accesses->end(); AI != AE; ++AI) {
+    if (!isa<MemoryPhi>(AI))
+      break;
+  }
+  Accesses->insert(AI, MA);
+  replaceMemoryAccess(Replacee, MA);
+}
+
+void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
+                                    MemoryAccess *Replacer) {
+  bool replacedAllPhiEntries = true;
+  // Just to note: We can replace the live on entry def, unlike removing it, so
+  // we don't assert here, but it's almost always a bug, unless you are
+  // inserting a load/store in a block that dominates the rest of the program.
+  for (auto U : Replacee->uses()) {
+    assert(DT->dominates(Replacer->getBlock(), U->getBlock()) &&
+           "Definitions will not dominate uses in replacement!");
+    if (MemoryUse *MU = dyn_cast<MemoryUse>(U))
+      MU->setDefiningAccess(Replacer);
+    else if (MemoryDef *MD = dyn_cast<MemoryDef>(U))
+      MD->setDefiningAccess(Replacer);
+    else if (MemoryPhi *MP = dyn_cast<MemoryPhi>(U)) {
+      for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i) {
+        if (MP->getIncomingValue(i) == Replacee)
+          MP->setIncomingValue(i, Replacer);
+        else
+          replacedAllPhiEntries = false;
+      }
+    }
+  }
+  // Kill our dead replacee if it's dead
+  if (replacedAllPhiEntries)
+    PerBlockAccesses[Replacee->getBlock()]->erase(Replacee);
+}
+
+#ifndef NDEBUG
+static bool onlySingleValue(MemoryPhi *MP) {
+  MemoryAccess *MA = nullptr;
+
+  for (auto &Arg : MP->args()) {
+    if (!MA)
+      MA = Arg.second;
+    else if (MA != Arg.second)
+      return false;
+  }
+  return true;
+}
+#endif
+
 void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
-  assert (MA != LiveOnEntryDef && "Trying to remove the live on entry def");
+  assert(MA != LiveOnEntryDef && "Trying to remove the live on entry def");
   // We can only delete phi nodes if they are use empty
-  if (isa<MemoryPhi>(MA)) {
-    assert(MA->use_empty() && "We can't delete memory phis that still have "
+  if (MemoryPhi *MP = dyn_cast<MemoryPhi>(MA)) {
+    // This code only used in assert builds
+    (void)MP;
+    assert(MP->use_empty() && "We can't delete memory phis that still have "
                               "uses, we don't know where the uses should "
                               "repoint to!");
+    assert(onlySingleValue(MP) && "This phi still points to multiple values, "
+                                  "which means it is still needed");
   } else {
-    MemoryAccess *DefiningAccess = nullptr;
+    MemoryAccess *DefiningAccess = getDefiningAccess(MA);
     // Re-point the uses at our defining access
-    if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
-      DefiningAccess = MU->getDefiningAccess();
-    else if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
-      DefiningAccess = MD->getDefiningAccess();
-    
     for (auto U : MA->uses()) {
+      assert(DT->dominates(DefiningAccess->getBlock(), U->getBlock()) &&
+             "Definitions will not dominate uses in removal!");
       if (MemoryUse *MU = dyn_cast<MemoryUse>(U))
         MU->setDefiningAccess(DefiningAccess);
       else if (MemoryDef *MD = dyn_cast<MemoryDef>(U))
@@ -656,9 +761,9 @@ struct CachingMemorySSAWalker::MemoryQuery {
   // Set of visited Instructions for this query
   SmallPtrSet<const MemoryAccess *, 32> Visited;
   // Set of visited call accesses for this query This is separated out because
-  // you can always cache and lookup the result of call queries (IE when isCall
-  // == true) for every call in the chain. The calls have no AA location
-  // associated with them with them, and thus, no context dependence.
+  // you can always cache and lookup the result of call queries (IE when
+  // isCall == true) for every call in the chain. The calls have no AA
+  // location associated with them with them, and thus, no context dependence.
   SmallPtrSet<const MemoryAccess *, 32> VisitedCalls;
 };
 
