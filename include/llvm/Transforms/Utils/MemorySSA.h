@@ -92,7 +92,8 @@ public:
   virtual ~MemoryAccess() {}
   BasicBlock *getBlock() const { return Block; }
 
-  virtual void print(raw_ostream &OS){};
+  virtual void print(raw_ostream &OS) const {};
+  virtual void dump() const;
 
   typedef SmallPtrSet<MemoryAccess *, 8> UseListType;
   typedef UseListType::iterator iterator;
@@ -188,7 +189,7 @@ public:
   static inline bool classof(const MemoryAccess *MA) {
     return MA->getAccessType() == AccessUse;
   }
-  virtual void print(raw_ostream &OS);
+  virtual void print(raw_ostream &OS) const;
 
 protected:
   MemoryUse(MemoryAccess *DMA, enum AccessType AT, Instruction *MI,
@@ -215,7 +216,7 @@ public:
   static inline bool classof(const MemoryAccess *MA) {
     return MA->getAccessType() == AccessDef;
   }
-  virtual void print(raw_ostream &OS);
+  virtual void print(raw_ostream &OS) const;
   typedef MemoryAccess **iterator;
   typedef const MemoryAccess **const_iterator;
 
@@ -240,11 +241,11 @@ public:
     Args.reserve(NumPreds);
   }
   // This is the number of actual predecessors
-  unsigned int getNumPreds() { return NumPreds; }
+  unsigned int getNumPreds() const { return NumPreds; }
   // This is the number of incoming values filled in right now
   // During construction, we differentiate between this and NumPreds to know
   // when the PHI node is fully constructed.
-  unsigned int getNumIncomingValues() { return Args.size(); }
+  unsigned int getNumIncomingValues() const { return Args.size(); }
   void setIncomingValue(unsigned int v, MemoryAccess *MA) {
     std::pair<BasicBlock *, MemoryAccess *> &Val = Args[v];
     // We need to update use lists.  Because our Uses are not to specific
@@ -268,12 +269,14 @@ public:
       Val.second = MA;
     }
   }
-  MemoryAccess *getIncomingValue(unsigned int v) { return Args[v].second; }
+  MemoryAccess *getIncomingValue(unsigned int v) const {
+    return Args[v].second;
+  }
   void setIncomingBlock(unsigned int v, BasicBlock *BB) {
     std::pair<BasicBlock *, MemoryAccess *> &Val = Args[v];
     Val.first = BB;
   }
-  BasicBlock *getIncomingBlock(unsigned int v) { return Args[v].first; }
+  BasicBlock *getIncomingBlock(unsigned int v) const { return Args[v].first; }
 
   typedef SmallVector<std::pair<BasicBlock *, MemoryAccess *>, 8> ArgsType;
   typedef ArgsType::const_iterator const_arg_iterator;
@@ -289,7 +292,7 @@ public:
     return MA->getAccessType() == AccessPhi;
   }
 
-  virtual void print(raw_ostream &OS);
+  virtual void print(raw_ostream &OS) const;
 
 protected:
   friend class MemorySSA;
@@ -326,6 +329,7 @@ public:
   MemoryAccess *getMemoryAccess(const Value *) const;
   void dump(Function &);
   void print(raw_ostream &) const;
+
   inline bool isLiveOnEntryDef(const MemoryAccess *MA) const {
     return MA == LiveOnEntryDef;
   }
