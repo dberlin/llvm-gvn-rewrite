@@ -487,6 +487,8 @@ void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
   }
   // Kill our dead replacee if it's dead
   if (replacedAllPhiEntries && !usedByReplacee) {
+    assert(Replacee->use_empty() &&
+           "Trying to remove memory access that still has uses");
     PerBlockAccesses[Replacee->getBlock()]->erase(Replacee);
     Instruction *MemoryInst = getMemoryInst(Replacee);
     if (MemoryInst)
@@ -538,6 +540,8 @@ void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
     }
   }
 
+  assert(MA->use_empty() &&
+         "Trying to remove memory access that still has uses");
   PerBlockAccesses[MA->getBlock()]->erase(MA);
   Instruction *MemoryInst = getMemoryInst(MA);
   if (MemoryInst)
