@@ -450,12 +450,13 @@ static Instruction *getMemoryInst(MemoryAccess *MA) {
 void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
                                     MemoryAccess *Replacer) {
   bool replacedAllPhiEntries = true;
-
+  bool usedByReplacee = false;
   // Just to note: We can replace the live on entry def, unlike removing it, so
   // we don't assert here, but it's almost always a bug, unless you are
   // inserting a load/store in a block that dominates the rest of the program.
   for (auto U : Replacee->uses()) {
     if (U == Replacer) {
+      usedByReplacee = true;
       continue;
     }
     assert(DT->dominates(Replacer->getBlock(), U->getBlock()) &&
@@ -474,12 +475,11 @@ void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
     }
   }
   // Kill our dead replacee if it's dead
-  if (replacedAllPhiEntries) {
+  if (replacedAllPhiEntries && !usedByReplacee) {
     PerBlockAccesses[Replacee->getBlock()]->erase(Replacee);
     Instruction *MemoryInst = getMemoryInst(Replacee);
     if (MemoryInst)
       InstructionToMemoryAccess.erase(MemoryInst);
-    delete Replacee;
   }
 }
 
