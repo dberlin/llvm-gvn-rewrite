@@ -439,6 +439,8 @@ void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
   // we don't assert here, but it's almost always a bug, unless you are
   // inserting a load/store in a block that dominates the rest of the program.
   for (auto U : Replacee->uses()) {
+    if (U == Replacer)
+      continue;
     assert(DT->dominates(Replacer->getBlock(), U->getBlock()) &&
            "Definitions will not dominate uses in replacement!");
     if (MemoryUse *MU = dyn_cast<MemoryUse>(U))
