@@ -615,7 +615,7 @@ MemoryAccess *MemorySSA::getMemoryAccess(const Value *I) const {
   return InstructionToMemoryAccess.lookup(I);
 }
 
-void MemoryDef::print(raw_ostream &OS) {
+void MemoryDef::print(raw_ostream &OS) const {
   MemoryAccess *UO = getDefiningAccess();
 
   OS << getID() << " = "
@@ -627,7 +627,7 @@ void MemoryDef::print(raw_ostream &OS) {
   OS << ")";
 }
 
-void MemoryPhi::print(raw_ostream &OS) {
+void MemoryPhi::print(raw_ostream &OS) const {
   OS << getID() << " = "
      << "MemoryPhi(";
   for (unsigned int i = 0, e = getNumIncomingValues(); i != e; ++i) {
@@ -652,12 +652,14 @@ void MemoryPhi::print(raw_ostream &OS) {
   OS << ")";
 }
 
-void MemoryUse::print(raw_ostream &OS) {
+void MemoryUse::print(raw_ostream &OS) const {
   MemoryAccess *UO = getDefiningAccess();
   OS << "MemoryUse(";
   OS << UO->getID();
   OS << ")";
 }
+
+void MemoryAccess::dump() const { print(dbgs()); dbgs() << "\n"; }
 
 char MemorySSAWrapperPass::ID = 0;
 
