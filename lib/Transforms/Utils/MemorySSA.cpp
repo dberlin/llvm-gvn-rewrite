@@ -461,15 +461,15 @@ bool MemorySSA::dominatesUse(MemoryAccess *Replacer,
 void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
                                     MemoryAccess *Replacer) {
   bool replacedAllPhiEntries = true;
-  bool usedByReplacee = false;
+  // If we are replacing a phi node, we may still actually use it, since we
+  // may now be defined in terms of it.
+  bool usedByReplacee = getDefiningAccess(Replacer) == Replacee;
   // Just to note: We can replace the live on entry def, unlike removing it, so
   // we don't assert here, but it's almost always a bug, unless you are
   // inserting a load/store in a block that dominates the rest of the program.
   for (auto U : Replacee->uses()) {
-    if (U == Replacer) {
-      usedByReplacee = true;
+    if (U == Replacer)
       continue;
-    }
     assert(dominatesUse(Replacer, Replacee) &&
            "Definitions will not dominate uses in replacement!");
     if (MemoryUse *MU = dyn_cast<MemoryUse>(U))
