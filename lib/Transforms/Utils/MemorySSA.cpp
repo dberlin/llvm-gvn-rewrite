@@ -392,12 +392,17 @@ void MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
   // A memory instruction that doesn't affect memory. Okay ....
   if (!def && !use)
     return;
+  bool DefinedByPhi = false;
   BasicBlock *ReplacerBlock = Replacer->getParent();
   MemoryAccess *MA = nullptr;
   MemoryAccess *DefiningAccess = getDefiningAccess(Replacee);
+
   // Handle the case we are replacing a phi node, in which case, we don't kill
   // the phi node
   if (DefiningAccess == nullptr) {
+    assert(isa<MemoryPhi>(Replacee) &&
+           "Should have been a phi node if we can't get a defining access");
+    DefinedByPhi = true;
     assert(DT->dominates(Replacee->getBlock(), ReplacerBlock) &&
            "Need to reuse PHI for defining access, but it will not dominate "
            "replacing instruction");
@@ -429,18 +434,30 @@ void MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
       break;
   }
   Accesses->insert(AI, MA);
+  InstructionToMemoryAccess.insert({Replacer, MA});
   replaceMemoryAccess(Replacee, MA);
 }
+static Instruction *getMemoryInst(MemoryAccess *MA) {
+  if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
+    return MU->getMemoryInst();
+  else if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
+    return MD->getMemoryInst();
+
+  return nullptr;
+}
+
 
 void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
                                     MemoryAccess *Replacer) {
   bool replacedAllPhiEntries = true;
+
   // Just to note: We can replace the live on entry def, unlike removing it, so
   // we don't assert here, but it's almost always a bug, unless you are
   // inserting a load/store in a block that dominates the rest of the program.
   for (auto U : Replacee->uses()) {
-    if (U == Replacer)
+    if (U == Replacer) {
       continue;
+    }
     assert(DT->dominates(Replacer->getBlock(), U->getBlock()) &&
            "Definitions will not dominate uses in replacement!");
     if (MemoryUse *MU = dyn_cast<MemoryUse>(U))
@@ -457,8 +474,13 @@ void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
     }
   }
   // Kill our dead replacee if it's dead
-  if (replacedAllPhiEntries)
+  if (replacedAllPhiEntries) {
     PerBlockAccesses[Replacee->getBlock()]->erase(Replacee);
+    Instruction *MemoryInst = getMemoryInst(Replacee);
+    if (MemoryInst)
+      InstructionToMemoryAccess.erase(MemoryInst);
+    delete Replacee;
+  }
 }
 
 #ifndef NDEBUG
@@ -504,7 +526,11 @@ void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
       }
     }
   }
+
   PerBlockAccesses[MA->getBlock()]->erase(MA);
+  Instruction *MemoryInst = getMemoryInst(MA);
+  if (MemoryInst)
+    InstructionToMemoryAccess.erase(MemoryInst);
 }
 
 void MemorySSA::print(raw_ostream &OS) const {
@@ -661,7 +687,10 @@ void MemoryUse::print(raw_ostream &OS) const {
   OS << ")";
 }
 
-void MemoryAccess::dump() const { print(dbgs()); dbgs() << "\n"; }
+void MemoryAccess::dump() const {
+  print(dbgs());
+  dbgs() << "\n";
+}
 
 char MemorySSAWrapperPass::ID = 0;
 
