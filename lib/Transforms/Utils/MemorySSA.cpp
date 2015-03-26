@@ -417,7 +417,7 @@ void MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
   AccessListType *Accesses = nullptr;
   auto Result = PerBlockAccesses.insert(std::make_pair(ReplacerBlock, nullptr));
 
-  if (Result.second) {
+  if (!Result.second) {
     Accesses = Result.first->second;
   } else {
     Accesses = new AccessListType();
