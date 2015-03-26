@@ -376,7 +376,7 @@ private:
                           const SmallPtrSetImpl<BasicBlock *> &DefiningBlocks);
   void computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels);
   void markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses, BasicBlock *BB);
-
+  bool dominatesUse(MemoryAccess *, MemoryAccess *) const;
   struct RenamePassData {
     BasicBlock *BB;
     BasicBlock *Pred;

@@ -446,6 +446,17 @@ static Instruction *getMemoryInst(MemoryAccess *MA) {
   return nullptr;
 }
 
+bool MemorySSA::dominatesUse(MemoryAccess *Replacer,
+                             MemoryAccess *Replacee) const {
+  if (isa<MemoryUse>(Replacee) || isa<MemoryDef>(Replacee))
+    return DT->dominates(Replacer->getBlock(), Replacee->getBlock());
+  MemoryPhi *MP = cast<MemoryPhi>(Replacee);
+  for (const auto &U : MP->args())
+    if (U.second == Replacee)
+      if (!DT->dominates(Replacer->getBlock(), U.first))
+        return false;
+  return true;
+}
 
 void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
                                     MemoryAccess *Replacer) {
@@ -459,7 +470,7 @@ void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
       usedByReplacee = true;
       continue;
     }
-    assert(DT->dominates(Replacer->getBlock(), U->getBlock()) &&
+    assert(dominatesUse(Replacer, Replacee) &&
            "Definitions will not dominate uses in replacement!");
     if (MemoryUse *MU = dyn_cast<MemoryUse>(U))
       MU->setDefiningAccess(Replacer);
@@ -487,7 +498,7 @@ void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
 static bool onlySingleValue(MemoryPhi *MP) {
   MemoryAccess *MA = nullptr;
 
-  for (auto &Arg : MP->args()) {
+  for (const auto &Arg : MP->args()) {
     if (!MA)
       MA = Arg.second;
     else if (MA != Arg.second)
@@ -512,7 +523,7 @@ void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
     MemoryAccess *DefiningAccess = getDefiningAccess(MA);
     // Re-point the uses at our defining access
     for (auto U : MA->uses()) {
-      assert(DT->dominates(DefiningAccess->getBlock(), U->getBlock()) &&
+      assert(dominatesUse(DefiningAccess, U) &&
              "Definitions will not dominate uses in removal!");
       if (MemoryUse *MU = dyn_cast<MemoryUse>(U))
         MU->setDefiningAccess(DefiningAccess);
