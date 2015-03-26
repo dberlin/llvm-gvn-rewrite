@@ -194,7 +194,9 @@ public:
 protected:
   MemoryUse(MemoryAccess *DMA, enum AccessType AT, Instruction *MI,
             BasicBlock *BB)
-      : MemoryAccess(AT, BB), DefiningAccess(DMA), MemoryInst(MI) {}
+      : MemoryAccess(AT, BB), MemoryInst(MI) {
+    setDefiningAccess(DMA);
+  }
 
 private:
   MemoryAccess *DefiningAccess;
