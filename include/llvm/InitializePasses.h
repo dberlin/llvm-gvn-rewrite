@@ -214,7 +214,7 @@ void initializeMemDepPrinterPass(PassRegistry&);
 void initializeMemDerefPrinterPass(PassRegistry&);
 void initializeMemoryDependenceAnalysisPass(PassRegistry&);
 void initializeMemorySSALazyPass(PassRegistry&);
-void initializeMemorySSAWrapperPassPass(PassRegistry&);
+void initializeMemorySSAPrinterPassPass(PassRegistry&);
 void initializeMergedLoadStoreMotionPass(PassRegistry &);
 void initializeMetaRenamerPass(PassRegistry&);
 void initializeMergeFunctionsPass(PassRegistry&);

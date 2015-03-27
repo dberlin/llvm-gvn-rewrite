@@ -363,7 +363,7 @@ public:
 protected:
   // Used by memory ssa annotater, dumpers, and wrapper pass
   friend class MemorySSAAnnotatedWriter;
-  friend class MemorySSAWrapperPass;
+  friend class MemorySSAPrinterPass;
   void verifyDefUses(Function &F);
   void verifyDomination(Function &F);
 
@@ -372,7 +372,7 @@ private:
   typedef DenseMap<const BasicBlock *, AccessListType *> AccessMap;
 
   void
-  determineInsertionPoint(Function &F, AccessMap &BlockAccesses,
+  determineInsertionPoint(AccessMap &BlockAccesses,
                           const SmallPtrSetImpl<BasicBlock *> &DefiningBlocks);
   void computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels);
   void markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses, BasicBlock *BB);
@@ -411,28 +411,28 @@ private:
   bool builtAlready;
 };
 
-// This pass does eager building of MemorySSA. It is used by the tests to be
-// able to build, dump, and verify Memory SSA. It should not really be used in
-// normal cases, you should use MemorySSALazyPass instead.
+// This pass does eager building and then printing of MemorySSA. It is used by
+// the tests to be able to build, dump, and verify Memory SSA.
 
-class MemorySSAWrapperPass : public FunctionPass {
+class MemorySSAPrinterPass : public FunctionPass {
 public:
-  MemorySSAWrapperPass();
+  MemorySSAPrinterPass();
 
   static char ID;
   bool doInitialization(Module &M) override;
   bool runOnFunction(Function &) override;
   void releaseMemory() override;
   void getAnalysisUsage(AnalysisUsage &AU) const override;
+  void print(raw_ostream &OS, const Module *M) const override;
   static void registerOptions();
   MemorySSA &getMSSA() { return *MSSA; }
 
 private:
-  bool DumpMemorySSA;
   bool VerifyMemorySSA;
 
   MemorySSA *MSSA;
   MemorySSAWalker *Walker;
+  Function *F;
 };
 
 class MemorySSALazy : public FunctionPass {
