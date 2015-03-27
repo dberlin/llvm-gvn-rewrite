@@ -39,11 +39,11 @@ using namespace llvm;
 STATISTIC(NumClobberCacheLookups, "Number of Memory SSA version cache lookups");
 STATISTIC(NumClobberCacheHits, "Number of Memory SSA version cache hits");
 
-INITIALIZE_PASS_WITH_OPTIONS_BEGIN(MemorySSAWrapperPass, "memoryssa",
-                                   "Memory SSA", false, true)
+INITIALIZE_PASS_WITH_OPTIONS_BEGIN(MemorySSAPrinterPass, "print-memoryssa",
+                                   "Memory SSA", true, true)
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
-INITIALIZE_PASS_END(MemorySSAWrapperPass, "memoryssa", "Memory SSA", true,
+INITIALIZE_PASS_END(MemorySSAPrinterPass, "print-memoryssa", "Memory SSA", true,
                     true);
 
 INITIALIZE_PASS(MemorySSALazy, "memoryssalazy", "Memory SSA", true, true);
@@ -77,8 +77,7 @@ public:
 // placement algorithm.
 
 void MemorySSA::determineInsertionPoint(
-    Function &F, AccessMap &BlockAccesses,
-    const SmallPtrSetImpl<BasicBlock *> &DefBlocks) {
+    AccessMap &BlockAccesses, const SmallPtrSetImpl<BasicBlock *> &DefBlocks) {
   // Compute dominator levels and BB numbers
   DenseMap<DomTreeNode *, unsigned> DomLevels;
   computeDomLevels(DomLevels);
@@ -197,12 +196,11 @@ NextIteration:
         auto RealVal = Walker->getClobberingMemoryAccess(MU->getMemoryInst());
         MU->setDefiningAccess(RealVal);
       } else if (MemoryDef *MD = dyn_cast<MemoryDef>(&L)) {
+        // We can't legally optimize defs, because we only allow single memory
+        // phis/uses on operations, and if we optimize these, we can end up with
+        // multiple reaching defs.  Uses do not have this problem, since they do
+        // not produce a value
         MD->setDefiningAccess(IncomingVal);
-        auto RealVal = Walker->getClobberingMemoryAccess(MD->getMemoryInst());
-        if (RealVal == MD)
-          RealVal = IncomingVal;
-
-        MD->setDefiningAccess(RealVal);
         IncomingVal = MD;
       }
     }
@@ -275,7 +273,7 @@ MemorySSA::MemorySSA(Function &Func)
 
 MemorySSA::~MemorySSA() {
   InstructionToMemoryAccess.clear();
-  SmallVector<AccessListType *, 8> toDelete;
+  // This will destroy and delete all the accesses
   PerBlockAccesses.clear();
   delete LiveOnEntryDef;
 }
@@ -335,7 +333,7 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
     }
   }
   // Determine where our PHI's should go
-  determineInsertionPoint(F, PerBlockAccesses, DefiningBlocks);
+  determineInsertionPoint(PerBlockAccesses, DefiningBlocks);
 
   // Now do regular SSA renaming
   SmallPtrSet<BasicBlock *, 16> Visited;
@@ -711,56 +709,50 @@ void MemoryAccess::dump() const {
   dbgs() << "\n";
 }
 
-char MemorySSAWrapperPass::ID = 0;
+char MemorySSAPrinterPass::ID = 0;
 
-MemorySSAWrapperPass::MemorySSAWrapperPass() : FunctionPass(ID) {
-  initializeMemorySSAWrapperPassPass(*PassRegistry::getPassRegistry());
+MemorySSAPrinterPass::MemorySSAPrinterPass() : FunctionPass(ID) {
+  initializeMemorySSAPrinterPassPass(*PassRegistry::getPassRegistry());
 }
 
-void MemorySSAWrapperPass::releaseMemory() {
+void MemorySSAPrinterPass::releaseMemory() {
   delete MSSA;
   delete Walker;
 }
 
-void MemorySSAWrapperPass::getAnalysisUsage(AnalysisUsage &AU) const {
+void MemorySSAPrinterPass::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesAll();
   AU.addRequiredTransitive<AliasAnalysis>();
   AU.addRequired<DominatorTreeWrapperPass>();
 }
 
-bool MemorySSAWrapperPass::doInitialization(Module &M) {
-  DumpMemorySSA =
-      M.getContext()
-          .template getOption<bool, MemorySSAWrapperPass,
-                              &MemorySSAWrapperPass::DumpMemorySSA>();
+bool MemorySSAPrinterPass::doInitialization(Module &M) {
 
   VerifyMemorySSA =
       M.getContext()
-          .template getOption<bool, MemorySSAWrapperPass,
-                              &MemorySSAWrapperPass::VerifyMemorySSA>();
+          .template getOption<bool, MemorySSAPrinterPass,
+                              &MemorySSAPrinterPass::VerifyMemorySSA>();
   return false;
 }
 
-void MemorySSAWrapperPass::registerOptions() {
-  OptionRegistry::registerOption<bool, MemorySSAWrapperPass,
-                                 &MemorySSAWrapperPass::DumpMemorySSA>(
-      "dump-memoryssa", "Dump Memory SSA after building it", false);
-
-  OptionRegistry::registerOption<bool, MemorySSAWrapperPass,
-                                 &MemorySSAWrapperPass::VerifyMemorySSA>(
+void MemorySSAPrinterPass::registerOptions() {
+  OptionRegistry::registerOption<bool, MemorySSAPrinterPass,
+                                 &MemorySSAPrinterPass::VerifyMemorySSA>(
       "verify-memoryssa", "Run the Memory SSA verifier", false);
 }
-bool MemorySSAWrapperPass::runOnFunction(Function &F) {
+
+void MemorySSAPrinterPass::print(raw_ostream &OS, const Module *M) const {
+  MSSA->dump(*F);
+}
+
+bool MemorySSAPrinterPass::runOnFunction(Function &F) {
+  this->F = &F;
   MSSA = new MemorySSA(F);
   AliasAnalysis *AA = &getAnalysis<AliasAnalysis>();
   DominatorTree *DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   Walker = new CachingMemorySSAWalker(MSSA, AA);
 
   MSSA->buildMemorySSA(AA, DT, Walker);
-
-  if (DumpMemorySSA) {
-    MSSA->print(errs());
-  }
 
   if (VerifyMemorySSA) {
     MSSA->verifyDefUses(F);
@@ -928,10 +920,6 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryAccess *MA,
                                                   struct MemoryQuery &Q) {
   MemoryAccess *CurrAccess = MA;
   while (true) {
-    // If we started with a heap use, walk to the def
-    if (MemoryUse *MU = dyn_cast<MemoryUse>(CurrAccess))
-      CurrAccess = MU->getDefiningAccess();
-
     // Should be either a Memory Def or a Phi node at this point
     if (MemoryPhi *P = dyn_cast<MemoryPhi>(CurrAccess))
       return getClobberingMemoryAccess(P, Q);
@@ -1001,6 +989,12 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   auto CacheResult = doCacheLookup(StartingAccess, Q);
   if (CacheResult)
     return CacheResult;
+
+  // If we started with a heap use, walk to the def
+  if (MemoryUse *MU = dyn_cast<MemoryUse>(StartingAccess))
+    StartingAccess = MU->getDefiningAccess();
+  else if (MemoryDef *MD = dyn_cast<MemoryDef>(StartingAccess))
+    StartingAccess = MD->getDefiningAccess();
 
   SmallPtrSet<MemoryAccess *, 32> Visited;
   MemoryAccess *FinalAccess =
