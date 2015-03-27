@@ -260,7 +260,6 @@ void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
     // If we have a phi, just remove it. We are going to replace all
     // users with live on entry.
     if (MemoryPhi *P = dyn_cast<MemoryPhi>(&*AI)) {
-      delete P;
       Accesses->erase(AI);
     } else if (MemoryUse *U = dyn_cast<MemoryUse>(&*AI)) {
       U->setDefiningAccess(LiveOnEntryDef);
@@ -277,13 +276,6 @@ MemorySSA::MemorySSA(Function &Func)
 MemorySSA::~MemorySSA() {
   InstructionToMemoryAccess.clear();
   SmallVector<AccessListType *, 8> toDelete;
-  for (auto &B : PerBlockAccesses)
-    delete B.second;
-  // toDelete.push_back(B.second);
-
-  // for (auto MA : toDelete)
-  //   delete MA;
-  // toDelete.clear();
   PerBlockAccesses.clear();
   delete LiveOnEntryDef;
 }
@@ -376,6 +368,12 @@ static MemoryAccess *getDefiningAccess(MemoryAccess *MA) {
     return MD->getDefiningAccess();
   else
     return nullptr;
+}
+static void setDefiningAccess(MemoryAccess *Of, MemoryAccess *To) {
+  if (MemoryUse *MU = dyn_cast<MemoryUse>(Of))
+    MU->setDefiningAccess(To);
+  else if (MemoryDef *MD = dyn_cast<MemoryDef>(Of))
+    MD->setDefiningAccess(To);
 }
 
 void MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
@@ -489,10 +487,13 @@ void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
   if (replacedAllPhiEntries && !usedByReplacee) {
     assert(Replacee->use_empty() &&
            "Trying to remove memory access that still has uses");
-    PerBlockAccesses[Replacee->getBlock()]->erase(Replacee);
+    setDefiningAccess(Replacee, nullptr);
+    // The call below to erase will destroy MA, so we can't change the order we
+    // are doing things here
     Instruction *MemoryInst = getMemoryInst(Replacee);
     if (MemoryInst)
       InstructionToMemoryAccess.erase(MemoryInst);
+    PerBlockAccesses[Replacee->getBlock()]->erase(Replacee);
   }
 }
 
@@ -540,12 +541,15 @@ void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
     }
   }
 
-  assert(MA->use_empty() &&
-         "Trying to remove memory access that still has uses");
-  PerBlockAccesses[MA->getBlock()]->erase(MA);
+  // The call below to erase will destroy MA, so we can't change the order we
+  // are doing things here
   Instruction *MemoryInst = getMemoryInst(MA);
   if (MemoryInst)
     InstructionToMemoryAccess.erase(MemoryInst);
+  assert(MA->use_empty() &&
+         "Trying to remove memory access that still has uses");
+  setDefiningAccess(MA, nullptr);
+  PerBlockAccesses[MA->getBlock()]->erase(MA);
 }
 
 void MemorySSA::print(raw_ostream &OS) const {
