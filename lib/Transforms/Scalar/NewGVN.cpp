@@ -149,17 +149,7 @@ class NewGVN : public FunctionPass {
   // Congruence class info
   DenseMap<Value *, CongruenceClass *> ValueToClass;
 
-  struct ComparingExpressionInfo {
-    static inline const Expression *getEmptyKey() {
-      intptr_t Val = -1;
-      Val <<= PointerLikeTypeTraits<Expression *>::NumLowBitsAvailable;
-      return reinterpret_cast<const Expression *>(Val);
-    }
-    static inline const Expression *getTombstoneKey() {
-      intptr_t Val = -2;
-      Val <<= PointerLikeTypeTraits<Expression *>::NumLowBitsAvailable;
-      return reinterpret_cast<const Expression *>(Val);
-    }
+  struct ComparingExpressionInfo : public DenseMapInfo<const Expression *> {
     static unsigned getHashValue(const Expression *V) {
       return static_cast<unsigned>(V->getHashValue());
     }
