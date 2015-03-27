@@ -781,11 +781,11 @@ CachingMemorySSAWalker::CachingMemorySSAWalker(MemorySSA *M, AliasAnalysis *A)
     : MemorySSAWalker(M), AA(A) {}
 
 CachingMemorySSAWalker::~CachingMemorySSAWalker() {
-  CachedClobberingAccess.clear();
-  CachedClobberingCall.clear();
+  CachedUpwardsClobberingAccess.clear();
+  CachedUpwardsClobberingCall.clear();
 }
 
-struct CachingMemorySSAWalker::MemoryQuery {
+struct CachingMemorySSAWalker::UpwardsMemoryQuery {
   // True if our original query started off as a call
   bool isCall;
   // The pointer location we are going to query about. This will be
@@ -805,24 +805,24 @@ struct CachingMemorySSAWalker::MemoryQuery {
 
 void CachingMemorySSAWalker::doCacheInsert(const MemoryAccess *M,
                                            MemoryAccess *Result,
-                                           const MemoryQuery &Q) {
+                                           const UpwardsMemoryQuery &Q) {
   if (Q.isCall)
-    CachedClobberingCall.insert(std::make_pair(M, Result));
+    CachedUpwardsClobberingCall.insert(std::make_pair(M, Result));
   else
-    CachedClobberingAccess.insert(
+    CachedUpwardsClobberingAccess.insert(
         std::make_pair(std::make_pair(M, Q.Loc), Result));
 }
 
 MemoryAccess *CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
-                                                    const MemoryQuery &Q) {
+                                                    const UpwardsMemoryQuery &Q) {
 
   ++NumClobberCacheLookups;
   MemoryAccess *Result;
 
   if (Q.isCall)
-    Result = CachedClobberingCall.lookup(M);
+    Result = CachedUpwardsClobberingCall.lookup(M);
   else
-    Result = CachedClobberingAccess.lookup(std::make_pair(M, Q.Loc));
+    Result = CachedUpwardsClobberingAccess.lookup(std::make_pair(M, Q.Loc));
 
   if (Result) {
     ++NumClobberCacheHits;
@@ -834,7 +834,7 @@ MemoryAccess *CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
 // Get the clobbering memory access for a phi node and alias location
 std::pair<MemoryAccess *, bool>
 CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryPhi *P,
-                                                  struct MemoryQuery &Q) {
+                                                  struct UpwardsMemoryQuery &Q) {
 
   bool HitVisited = false;
 
@@ -917,7 +917,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryPhi *P,
 // the pair we return is whether we hit a cyclic phi node.
 std::pair<MemoryAccess *, bool>
 CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryAccess *MA,
-                                                  struct MemoryQuery &Q) {
+                                                  struct UpwardsMemoryQuery &Q) {
   MemoryAccess *CurrAccess = MA;
   while (true) {
     // Should be either a Memory Def or a Phi node at this point
@@ -966,7 +966,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryAccess *MA,
 MemoryAccess *
 CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   MemoryAccess *StartingAccess = MSSA->getMemoryAccess(I);
-  struct MemoryQuery Q;
+  struct UpwardsMemoryQuery Q;
 
   // First extract our location, then start walking until it is
   // clobbered

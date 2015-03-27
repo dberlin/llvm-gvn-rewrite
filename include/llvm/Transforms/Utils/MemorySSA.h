@@ -495,19 +495,19 @@ public:
   MemoryAccess *getClobberingMemoryAccess(const Instruction *) override;
 
 protected:
-  struct MemoryQuery;
-  MemoryAccess *doCacheLookup(const MemoryAccess *, const MemoryQuery &);
-  void doCacheInsert(const MemoryAccess *, MemoryAccess *, const MemoryQuery &);
+  struct UpwardsMemoryQuery;
+  MemoryAccess *doCacheLookup(const MemoryAccess *, const UpwardsMemoryQuery &);
+  void doCacheInsert(const MemoryAccess *, MemoryAccess *, const UpwardsMemoryQuery &);
 
 private:
   std::pair<MemoryAccess *, bool>
-  getClobberingMemoryAccess(MemoryPhi *Phi, struct MemoryQuery &);
+  getClobberingMemoryAccess(MemoryPhi *Phi, struct UpwardsMemoryQuery &);
   std::pair<MemoryAccess *, bool>
-  getClobberingMemoryAccess(MemoryAccess *, struct MemoryQuery &);
+  getClobberingMemoryAccess(MemoryAccess *, struct UpwardsMemoryQuery &);
 
   DenseMap<std::pair<const MemoryAccess *, AliasAnalysis::Location>,
-           MemoryAccess *> CachedClobberingAccess;
-  DenseMap<const MemoryAccess *, MemoryAccess *> CachedClobberingCall;
+           MemoryAccess *> CachedUpwardsClobberingAccess;
+  DenseMap<const MemoryAccess *, MemoryAccess *> CachedUpwardsClobberingCall;
   AliasAnalysis *AA;
 };
 }
