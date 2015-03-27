@@ -259,7 +259,7 @@ void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
     auto Next = std::next(AI);
     // If we have a phi, just remove it. We are going to replace all
     // users with live on entry.
-    if (MemoryPhi *P = dyn_cast<MemoryPhi>(&*AI)) {
+    if (isa<MemoryPhi>(&*AI)) {
       Accesses->erase(AI);
     } else if (MemoryUse *U = dyn_cast<MemoryUse>(&*AI)) {
       U->setDefiningAccess(LiveOnEntryDef);
