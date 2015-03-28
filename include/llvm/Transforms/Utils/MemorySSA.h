@@ -357,8 +357,9 @@ public:
 
   // Replace a MemorySSA access with a new access - this does not perform SSA
   // update, so it only works if the new access dominates the old accesses uses.
-  void replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
-                                        Instruction *Replacer);
+  // Returns the new access that was created
+  MemoryAccess *replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
+                                                 Instruction *Replacer);
 
 protected:
   // Used by memory ssa annotater, dumpers, and wrapper pass

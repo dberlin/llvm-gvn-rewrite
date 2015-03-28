@@ -275,6 +275,8 @@ MemorySSA::MemorySSA(Function &Func)
 MemorySSA::~MemorySSA() {
   InstructionToMemoryAccess.clear();
   // This will destroy and delete all the accesses
+  for (auto &BA : PerBlockAccesses)
+    delete BA.second;
   PerBlockAccesses.clear();
   delete LiveOnEntryDef;
 }
@@ -377,8 +379,9 @@ static void setDefiningAccess(MemoryAccess *Of, MemoryAccess *To) {
     MD->setDefiningAccess(To);
 }
 
-void MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
-                                                 Instruction *Replacer) {
+MemoryAccess *
+MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
+                                            Instruction *Replacer) {
 
   // There is no easy way to assert that you are replacing it with a memory
   // access, and this call will assert it for us
@@ -390,7 +393,7 @@ void MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
     use = true;
   // A memory instruction that doesn't affect memory. Okay ....
   if (!def && !use)
-    return;
+    return nullptr;
   bool DefinedByPhi = false;
   BasicBlock *ReplacerBlock = Replacer->getParent();
   MemoryAccess *MA = nullptr;
@@ -435,7 +438,9 @@ void MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
   Accesses->insert(AI, MA);
   InstructionToMemoryAccess.insert({Replacer, MA});
   replaceMemoryAccess(Replacee, MA);
+  return MA;
 }
+
 static Instruction *getMemoryInst(MemoryAccess *MA) {
   if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
     return MU->getMemoryInst();
