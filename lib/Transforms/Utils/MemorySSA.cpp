@@ -269,7 +269,8 @@ void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
 }
 
 MemorySSA::MemorySSA(Function &Func)
-    : F(Func), LiveOnEntryDef(nullptr), nextID(0), builtAlready(false) {}
+    : F(Func), LiveOnEntryDef(nullptr), nextID(0), builtAlready(false),
+      Walker(nullptr) {}
 
 MemorySSA::~MemorySSA() {
   InstructionToMemoryAccess.clear();
@@ -278,11 +279,12 @@ MemorySSA::~MemorySSA() {
   delete LiveOnEntryDef;
 }
 
-void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
-                               MemorySSAWalker *Walker) {
-  // We don't allow updating at the moment
-  // But we can't assert since the dumper does eager buildingas
-  assert(!builtAlready && "We don't support updating memory ssa at this time");
+MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
+                                           DominatorTree *DT) {
+  if (builtAlready)
+    return Walker;
+  else
+    Walker = new CachingMemorySSAWalker(this, AA);
 
   this->AA = AA;
   this->DT = DT;
@@ -357,6 +359,7 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
   }
 
   builtAlready = true;
+  return Walker;
 }
 
 static MemoryAccess *getDefiningAccess(MemoryAccess *MA) {
@@ -750,9 +753,7 @@ bool MemorySSAPrinterPass::runOnFunction(Function &F) {
   MSSA = new MemorySSA(F);
   AliasAnalysis *AA = &getAnalysis<AliasAnalysis>();
   DominatorTree *DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
-  Walker = new CachingMemorySSAWalker(MSSA, AA);
-
-  MSSA->buildMemorySSA(AA, DT, Walker);
+  Walker = MSSA->buildMemorySSA(AA, DT);
 
   if (VerifyMemorySSA) {
     MSSA->verifyDefUses(F);
@@ -813,8 +814,9 @@ void CachingMemorySSAWalker::doCacheInsert(const MemoryAccess *M,
         std::make_pair(std::make_pair(M, Q.Loc), Result));
 }
 
-MemoryAccess *CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
-                                                    const UpwardsMemoryQuery &Q) {
+MemoryAccess *
+CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
+                                      const UpwardsMemoryQuery &Q) {
 
   ++NumClobberCacheLookups;
   MemoryAccess *Result;
@@ -833,8 +835,8 @@ MemoryAccess *CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
 
 // Get the clobbering memory access for a phi node and alias location
 std::pair<MemoryAccess *, bool>
-CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryPhi *P,
-                                                  struct UpwardsMemoryQuery &Q) {
+CachingMemorySSAWalker::getClobberingMemoryAccess(
+    MemoryPhi *P, struct UpwardsMemoryQuery &Q) {
 
   bool HitVisited = false;
 
@@ -916,8 +918,8 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryPhi *P,
 // the MemoryAccess that actually clobbers Loc.  The second part of
 // the pair we return is whether we hit a cyclic phi node.
 std::pair<MemoryAccess *, bool>
-CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryAccess *MA,
-                                                  struct UpwardsMemoryQuery &Q) {
+CachingMemorySSAWalker::getClobberingMemoryAccess(
+    MemoryAccess *MA, struct UpwardsMemoryQuery &Q) {
   MemoryAccess *CurrAccess = MA;
   while (true) {
     // Should be either a Memory Def or a Phi node at this point
