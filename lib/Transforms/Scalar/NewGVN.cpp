@@ -1955,8 +1955,7 @@ bool NewGVN::runOnFunction(Function &F) {
   TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
   AA = &getAnalysis<AliasAnalysis>();
   MSSA = &getAnalysis<MemorySSALazy>().getMSSA();
-  MSSAWalker = new CachingMemorySSAWalker(MSSA, AA);
-  MSSA->buildMemorySSA(AA, DT, MSSAWalker);
+  MSSAWalker = MSSA->buildMemorySSA(AA, DT);
 
   unsigned ICount = 0;
   // Count number of instructions for sizing of hash tables, and come
