@@ -323,7 +323,7 @@ public:
   MemorySSA(Function &);
   ~MemorySSA();
   // Memory SSA related stuff
-  void buildMemorySSA(AliasAnalysis *, DominatorTree *, MemorySSAWalker *);
+  MemorySSAWalker *buildMemorySSA(AliasAnalysis *, DominatorTree *);
   // Given a memory using/clobbering/etc instruction, get the
   // MemorySSA access associaed with it.  If you hand it a basic block
   // it will give you the memory phi node that exists for that block,
@@ -409,6 +409,7 @@ private:
   AccessMap PerBlockAccesses;
   unsigned int nextID;
   bool builtAlready;
+  MemorySSAWalker *Walker;
 };
 
 // This pass does eager building and then printing of MemorySSA. It is used by
@@ -443,6 +444,7 @@ public:
   bool runOnFunction(Function &) override;
   void releaseMemory() override;
   MemorySSA &getMSSA() { return *MSSA; }
+
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesAll();
   }
@@ -497,7 +499,8 @@ public:
 protected:
   struct UpwardsMemoryQuery;
   MemoryAccess *doCacheLookup(const MemoryAccess *, const UpwardsMemoryQuery &);
-  void doCacheInsert(const MemoryAccess *, MemoryAccess *, const UpwardsMemoryQuery &);
+  void doCacheInsert(const MemoryAccess *, MemoryAccess *,
+                     const UpwardsMemoryQuery &);
 
 private:
   std::pair<MemoryAccess *, bool>
