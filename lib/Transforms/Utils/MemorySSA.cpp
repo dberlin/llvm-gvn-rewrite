@@ -379,6 +379,32 @@ static void setDefiningAccess(MemoryAccess *Of, MemoryAccess *To) {
     MD->setDefiningAccess(To);
 }
 
+static Instruction *getMemoryInst(MemoryAccess *MA) {
+  if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
+    return MU->getMemoryInst();
+  else if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
+    return MD->getMemoryInst();
+
+  return nullptr;
+}
+
+void MemorySSA::removeFromLookups(MemoryAccess *MA) {
+  assert(MA->use_empty() &&
+         "Trying to remove memory access that still has uses");
+  setDefiningAccess(MA, nullptr);
+  // The call below to erase will destroy MA, so we can't change the order we
+  // are doing things here
+  Instruction *MemoryInst = getMemoryInst(MA);
+  if (MemoryInst)
+    InstructionToMemoryAccess.erase(MemoryInst);
+  auto *Accesses = PerBlockAccesses[MA->getBlock()];
+  Accesses->erase(MA);
+  if (Accesses->empty()) {
+    delete Accesses;
+    PerBlockAccesses.erase(MA->getBlock());
+  }
+}
+
 MemoryAccess *
 MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
                                             Instruction *Replacer) {
@@ -441,15 +467,6 @@ MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
   return MA;
 }
 
-static Instruction *getMemoryInst(MemoryAccess *MA) {
-  if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
-    return MU->getMemoryInst();
-  else if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
-    return MD->getMemoryInst();
-
-  return nullptr;
-}
-
 bool MemorySSA::dominatesUse(MemoryAccess *Replacer,
                              MemoryAccess *Replacee) const {
   if (isa<MemoryUse>(Replacee) || isa<MemoryDef>(Replacee))
@@ -468,7 +485,8 @@ void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
   // If we are replacing a phi node, we may still actually use it, since we
   // may now be defined in terms of it.
   bool usedByReplacee = getDefiningAccess(Replacer) == Replacee;
-  // Just to note: We can replace the live on entry def, unlike removing it, so
+  // Just to note: We can replace the live on entry def, unlike removing it,
+  // so
   // we don't assert here, but it's almost always a bug, unless you are
   // inserting a load/store in a block that dominates the rest of the program.
   for (auto U : Replacee->uses()) {
@@ -491,15 +509,7 @@ void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
   }
   // Kill our dead replacee if it's dead
   if (replacedAllPhiEntries && !usedByReplacee) {
-    assert(Replacee->use_empty() &&
-           "Trying to remove memory access that still has uses");
-    setDefiningAccess(Replacee, nullptr);
-    // The call below to erase will destroy MA, so we can't change the order we
-    // are doing things here
-    Instruction *MemoryInst = getMemoryInst(Replacee);
-    if (MemoryInst)
-      InstructionToMemoryAccess.erase(MemoryInst);
-    PerBlockAccesses[Replacee->getBlock()]->erase(Replacee);
+    removeFromLookups(Replacee);
   }
 }
 
@@ -549,13 +559,7 @@ void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
 
   // The call below to erase will destroy MA, so we can't change the order we
   // are doing things here
-  Instruction *MemoryInst = getMemoryInst(MA);
-  if (MemoryInst)
-    InstructionToMemoryAccess.erase(MemoryInst);
-  assert(MA->use_empty() &&
-         "Trying to remove memory access that still has uses");
-  setDefiningAccess(MA, nullptr);
-  PerBlockAccesses[MA->getBlock()]->erase(MA);
+  removeFromLookups(MA);
 }
 
 void MemorySSA::print(raw_ostream &OS) const {
