@@ -378,6 +378,7 @@ private:
   void computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels);
   void markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses, BasicBlock *BB);
   bool dominatesUse(MemoryAccess *, MemoryAccess *) const;
+  void removeFromLookups(MemoryAccess *);
   struct RenamePassData {
     BasicBlock *BB;
     BasicBlock *Pred;
