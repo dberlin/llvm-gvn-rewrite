@@ -49,7 +49,8 @@ INITIALIZE_PASS_END(MemorySSAPrinterPass, "print-memoryssa", "Memory SSA", true,
 INITIALIZE_PASS(MemorySSALazy, "memoryssalazy", "Memory SSA", true, true);
 
 namespace llvm {
-// An annotator class to print memory ssa information in comments
+
+/// \brief An annotator class to print Memory SSA information in comments.
 class MemorySSAAnnotatedWriter : public AssemblyAnnotationWriter {
   friend class MemorySSA;
   const MemorySSA *MSSA;
@@ -73,9 +74,8 @@ public:
 };
 }
 
-// This is the same algorithm as PromoteMemoryToRegister's phi
-// placement algorithm.
-
+/// \brief This is the same algorithm as PromoteMemoryToRegister's phi
+/// placement algorithm. It is a linear time phi placement algorithm.
 void MemorySSA::determineInsertionPoint(
     AccessMap &BlockAccesses, const SmallPtrSetImpl<BasicBlock *> &DefBlocks) {
   // Compute dominator levels and BB numbers
@@ -158,9 +158,7 @@ void MemorySSA::determineInsertionPoint(
   }
 }
 
-// Standard SSA renaming pass. Same algorithm as
-// PromoteMemoryToRegisters
-
+/// \brief This is the standard SSA renaming algorithm.
 void MemorySSA::renamePass(BasicBlock *BB, BasicBlock *Pred,
                            MemoryAccess *IncomingVal, AccessMap &BlockAccesses,
                            std::vector<RenamePassData> &Worklist,
@@ -224,6 +222,7 @@ NextIteration:
   goto NextIteration;
 }
 
+/// \brief Compute dominator levels, used by the phi insertion algorithm above.
 void MemorySSA::computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels) {
   SmallVector<DomTreeNode *, 32> Worklist;
 
@@ -241,9 +240,9 @@ void MemorySSA::computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels) {
   }
 }
 
-// Handle unreachable block acccesses by deleting phi nodes in
-// unreachable blocks, and marking all other unreachable
-// memoryaccesses as being uses of the live on entry definition
+/// \brief This handles unreachable block acccesses by deleting phi nodes in
+/// unreachable blocks, and marking all other unreachable MemoryAccess's as
+/// being uses of the live on entry definition.
 void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
                                              BasicBlock *BB) {
   assert(!DT->isReachableFromEntry(BB) &&
@@ -373,6 +372,10 @@ static void setDefiningAccess(MemoryAccess *Of, MemoryAccess *To) {
     Of->setDefiningAccess(To);
 }
 
+/// \brief Properly remove \p MA from all of MemorySSA's lookup tables.
+///
+/// Because of the way the intrusive list and use lists work, it is important to
+/// do removal in the right order.
 void MemorySSA::removeFromLookups(MemoryAccess *MA) {
   assert(MA->use_empty() &&
          "Trying to remove memory access that still has uses");
@@ -402,9 +405,10 @@ MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
     def = true;
   if (ModRef & AliasAnalysis::Ref)
     use = true;
-  // A memory instruction that doesn't affect memory. Okay ....
-  if (!def && !use)
-    return nullptr;
+
+  assert((def || use) &&
+         "Trying to replace a memory access with a non-memory instruction");
+
   bool DefinedByPhi = false;
   BasicBlock *ReplacerBlock = Replacer->getParent();
   MemoryAccess *MA = nullptr;
@@ -452,26 +456,29 @@ MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
   return MA;
 }
 
+/// \brief Returns true if \p Replacer dominates \p Replacee .
 bool MemorySSA::dominatesUse(MemoryAccess *Replacer,
                              MemoryAccess *Replacee) const {
   if (isa<MemoryUse>(Replacee) || isa<MemoryDef>(Replacee))
     return DT->dominates(Replacer->getBlock(), Replacee->getBlock());
   MemoryPhi *MP = cast<MemoryPhi>(Replacee);
-  for (const auto &U : MP->args())
-    if (U.second == Replacee)
-      if (!DT->dominates(Replacer->getBlock(), U.first))
+  for (const auto &Arg : MP->args())
+    if (Arg.second == Replacee)
+      if (!DT->dominates(Replacer->getBlock(), Arg.first))
         return false;
   return true;
 }
 
 void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
                                     MemoryAccess *Replacer) {
+
+  // If we don't replace all phi node entries, we can't remove it.
   bool replacedAllPhiEntries = true;
   // If we are replacing a phi node, we may still actually use it, since we
   // may now be defined in terms of it.
   bool usedByReplacee = getDefiningAccess(Replacer) == Replacee;
-  // Just to note: We can replace the live on entry def, unlike removing it,
-  // so
+
+  // Just to note: We can replace the live on entry def, unlike removing it, so
   // we don't assert here, but it's almost always a bug, unless you are
   // inserting a load/store in a block that dominates the rest of the program.
   for (auto U : Replacee->uses()) {
@@ -490,13 +497,14 @@ void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
       U->setDefiningAccess(Replacer);
     }
   }
-  // Kill our dead replacee if it's dead
+  // Kill our dead replacee if it's really dead
   if (replacedAllPhiEntries && !usedByReplacee) {
     removeFromLookups(Replacee);
   }
 }
 
 #ifndef NDEBUG
+/// \brief Returns true if a phi is defined by the same value on all edges
 static bool onlySingleValue(MemoryPhi *MP) {
   MemoryAccess *MA = nullptr;
 
@@ -553,8 +561,8 @@ void MemorySSA::dump(Function &F) {
   F.print(dbgs(), &Writer);
 }
 
-// Verify the domination properties of MemorySSA
-// This means that each definition should dominate all of its uses
+/// \brief Verify the domination properties of MemorySSA by checking that each
+/// definition dominates all of its uses.
 void MemorySSA::verifyDomination(Function &F) {
   for (auto &B : F) {
     // Phi nodes are attached to basic blocks
@@ -563,7 +571,6 @@ void MemorySSA::verifyDomination(Function &F) {
       MemoryPhi *MP = cast<MemoryPhi>(MA);
       for (const auto &U : MP->uses()) {
         BasicBlock *UseBlock;
-
         // Phi operands are used on edges, we simulate the right domination by
         // acting as if the use occurred at the end of the predecessor block.
         if (MemoryPhi *P = dyn_cast<MemoryPhi>(U)) {
@@ -576,7 +583,6 @@ void MemorySSA::verifyDomination(Function &F) {
         } else {
           UseBlock = U->getBlock();
         }
-
         assert(DT->dominates(MP->getBlock(), UseBlock) &&
                "Memory PHI does not dominate it's uses");
       }
@@ -607,6 +613,8 @@ void MemorySSA::verifyDomination(Function &F) {
   }
 }
 
+/// \brief Verify the def-use lists in MemorySSA, by verifying that \p Use
+/// appears in the use list of \p Def.
 void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
   // The live on entry use may cause us to get a NULL def here
   if (Def == nullptr) {
@@ -617,10 +625,9 @@ void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
   assert(Def->findUse(Use) && "Did not find use in def's use list");
 }
 
-// Verify the immediate use information, by walking all the memory
-// accesses and verifying that, for each use, it appears in the
-// appropriate def's use list
-
+/// \brief Verify the immediate use information, by walking all the memory
+/// accesses and verifying that, for each use, it appears in the
+/// appropriate def's use list
 void MemorySSA::verifyDefUses(Function &F) {
   for (auto &B : F) {
     // Phi nodes are attached to basic blocks
@@ -646,7 +653,6 @@ void MemorySSA::verifyDefUses(Function &F) {
   }
 }
 
-// Get a memory access for an instruction
 MemoryAccess *MemorySSA::getMemoryAccess(const Value *I) const {
   return InstructionToMemoryAccess.lookup(I);
 }
@@ -805,7 +811,6 @@ void CachingMemorySSAWalker::doCacheInsert(const MemoryAccess *M,
 MemoryAccess *
 CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
                                       const UpwardsMemoryQuery &Q) {
-
   ++NumClobberCacheLookups;
   MemoryAccess *Result;
 
@@ -821,7 +826,11 @@ CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
   return nullptr;
 }
 
-// Get the clobbering memory access for a phi node and alias location
+/// \brief Walk the use-def chains starting at \p P and find
+/// the MemoryAccess that actually clobbers Loc.
+///
+/// \returns a pair of clobbering memory access and whether we hit a cyclic phi
+/// node.
 std::pair<MemoryAccess *, bool>
 CachingMemorySSAWalker::getClobberingMemoryAccess(
     MemoryPhi *P, struct UpwardsMemoryQuery &Q) {
@@ -841,12 +850,10 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
   // 1. One argument dominates the other, and the other's argument
   // defining memory access is non-aliasing with our location.
   // 2. All of the arguments are non-aliasing with our location, and
-  // eventually lead back to the same defining memory access
+  // eventually lead back to the same defining memory access.
   MemoryAccess *Result = nullptr;
 
   // Don't try to walk past an incomplete phi node during construction
-  // This can only occur during construction.
-
   if (P->getNumIncomingValues() != P->getNumPreds())
     return std::make_pair(P, false);
 
@@ -902,9 +909,11 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
   return std::make_pair(Result, HitVisited);
 }
 
-// For a given MemoryAccess, walk backwards using Memory SSA and find
-// the MemoryAccess that actually clobbers Loc.  The second part of
-// the pair we return is whether we hit a cyclic phi node.
+/// \brief Walk the use-def chains starting at \p MA and find
+/// the MemoryAccess that actually clobbers Loc.
+///
+/// \returns a pair of clobbering memory access and whether we hit a cyclic phi
+/// node.
 std::pair<MemoryAccess *, bool>
 CachingMemorySSAWalker::getClobberingMemoryAccess(
     MemoryAccess *MA, struct UpwardsMemoryQuery &Q) {
@@ -950,9 +959,6 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
   return std::make_pair(CurrAccess, false);
 }
 
-// For a given instruction, walk backwards using Memory SSA and find
-// the memory access that actually clobbers this one, skipping non-aliasing
-// ones along the way
 MemoryAccess *
 CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   MemoryAccess *StartingAccess = MSSA->getMemoryAccess(I);
