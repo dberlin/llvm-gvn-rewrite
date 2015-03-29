@@ -44,9 +44,9 @@ INITIALIZE_PASS_WITH_OPTIONS_BEGIN(MemorySSAPrinterPass, "print-memoryssa",
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(MemorySSAPrinterPass, "print-memoryssa", "Memory SSA", true,
-                    true);
+                    true)
 
-INITIALIZE_PASS(MemorySSALazy, "memoryssalazy", "Memory SSA", true, true);
+INITIALIZE_PASS(MemorySSALazy, "memoryssalazy", "Memory SSA", true, true)
 
 namespace llvm {
 
@@ -409,7 +409,6 @@ MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
   assert((def || use) &&
          "Trying to replace a memory access with a non-memory instruction");
 
-  bool DefinedByPhi = false;
   BasicBlock *ReplacerBlock = Replacer->getParent();
   MemoryAccess *MA = nullptr;
   MemoryAccess *DefiningAccess = getDefiningAccess(Replacee);
@@ -419,7 +418,6 @@ MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
   if (DefiningAccess == nullptr) {
     assert(isa<MemoryPhi>(Replacee) &&
            "Should have been a phi node if we can't get a defining access");
-    DefinedByPhi = true;
     assert(DT->dominates(Replacee->getBlock(), ReplacerBlock) &&
            "Need to reuse PHI for defining access, but it will not dominate "
            "replacing instruction");
