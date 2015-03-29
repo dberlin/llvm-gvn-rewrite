@@ -89,13 +89,16 @@ public:
   // dyn_cast
   static inline bool classof(const MemoryAccess *) { return true; }
 
-  virtual ~MemoryAccess() {}
+  virtual ~MemoryAccess();
   BasicBlock *getBlock() const { return Block; }
 
 
   /// \brief Get the instruction that this MemoryAccess represents.
   /// This may be null in the case of phi nodes.
-  virtual Instruction *getMemoryInst() const { return nullptr; }
+  virtual Instruction *getMemoryInst() const  = 0;
+
+  /// \brief Set the instruction that this MemoryUse represents.
+  virtual void setMemoryInst(Instruction *MI) = 0;
 
   /// \brief Get the access that produces the memory state used by this access.
   virtual MemoryAccess *getDefiningAccess() const = 0;
@@ -105,8 +108,6 @@ public:
   /// This function updates use lists.
   virtual void setDefiningAccess(MemoryAccess *) = 0;
 
-  /// \brief Set the instruction that this MemoryUse represents.
-  virtual void setMemoryInst(Instruction *MI) {}
 
   virtual void print(raw_ostream &OS) const {};
   virtual void dump() const;
