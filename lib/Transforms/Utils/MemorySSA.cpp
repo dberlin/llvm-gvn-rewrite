@@ -259,10 +259,8 @@ void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
     // users with live on entry.
     if (isa<MemoryPhi>(&*AI)) {
       Accesses->erase(AI);
-    } else if (MemoryUse *U = dyn_cast<MemoryUse>(&*AI)) {
-      U->setDefiningAccess(LiveOnEntryDef);
-    } else if (MemoryDef *D = dyn_cast<MemoryDef>(&*AI)) {
-      D->setDefiningAccess(LiveOnEntryDef);
+    } else {
+      AI->setDefiningAccess(LiveOnEntryDef);
     }
     AI = Next;
   }
@@ -365,27 +363,14 @@ MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
 }
 
 static MemoryAccess *getDefiningAccess(MemoryAccess *MA) {
-  if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
-    return MU->getDefiningAccess();
-  else if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
-    return MD->getDefiningAccess();
+  if (isa<MemoryUse>(MA) || isa<MemoryDef>(MA))
+    return MA->getDefiningAccess();
   else
     return nullptr;
 }
 static void setDefiningAccess(MemoryAccess *Of, MemoryAccess *To) {
-  if (MemoryUse *MU = dyn_cast<MemoryUse>(Of))
-    MU->setDefiningAccess(To);
-  else if (MemoryDef *MD = dyn_cast<MemoryDef>(Of))
-    MD->setDefiningAccess(To);
-}
-
-static Instruction *getMemoryInst(MemoryAccess *MA) {
-  if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
-    return MU->getMemoryInst();
-  else if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
-    return MD->getMemoryInst();
-
-  return nullptr;
+  if (isa<MemoryUse>(Of) || isa<MemoryDef>(Of))
+    Of->setDefiningAccess(To);
 }
 
 void MemorySSA::removeFromLookups(MemoryAccess *MA) {
@@ -394,7 +379,7 @@ void MemorySSA::removeFromLookups(MemoryAccess *MA) {
   setDefiningAccess(MA, nullptr);
   // The call below to erase will destroy MA, so we can't change the order we
   // are doing things here
-  Instruction *MemoryInst = getMemoryInst(MA);
+  Instruction *MemoryInst = MA->getMemoryInst();
   if (MemoryInst)
     InstructionToMemoryAccess.erase(MemoryInst);
   auto *Accesses = PerBlockAccesses[MA->getBlock()];
@@ -494,17 +479,15 @@ void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
       continue;
     assert(dominatesUse(Replacer, Replacee) &&
            "Definitions will not dominate uses in replacement!");
-    if (MemoryUse *MU = dyn_cast<MemoryUse>(U))
-      MU->setDefiningAccess(Replacer);
-    else if (MemoryDef *MD = dyn_cast<MemoryDef>(U))
-      MD->setDefiningAccess(Replacer);
-    else if (MemoryPhi *MP = dyn_cast<MemoryPhi>(U)) {
+    if (MemoryPhi *MP = dyn_cast<MemoryPhi>(U)) {
       for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i) {
         if (MP->getIncomingValue(i) == Replacee)
           MP->setIncomingValue(i, Replacer);
         else
           replacedAllPhiEntries = false;
       }
+    } else {
+      U->setDefiningAccess(Replacer);
     }
   }
   // Kill our dead replacee if it's dead
@@ -544,15 +527,13 @@ void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
     for (auto U : MA->uses()) {
       assert(dominatesUse(DefiningAccess, U) &&
              "Definitions will not dominate uses in removal!");
-      if (MemoryUse *MU = dyn_cast<MemoryUse>(U))
-        MU->setDefiningAccess(DefiningAccess);
-      else if (MemoryDef *MD = dyn_cast<MemoryDef>(U))
-        MD->setDefiningAccess(DefiningAccess);
-      else if (MemoryPhi *MP = dyn_cast<MemoryPhi>(U)) {
+      if (MemoryPhi *MP = dyn_cast<MemoryPhi>(U)) {
         for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i) {
           if (MP->getIncomingValue(i) == MA)
             MP->setIncomingValue(i, DefiningAccess);
         }
+      } else {
+        U->setDefiningAccess(DefiningAccess);
       }
     }
   }
@@ -607,7 +588,7 @@ void MemorySSA::verifyDomination(Function &F) {
           for (const auto &U : MD->uses()) {
             BasicBlock *UseBlock;
             // Things are allowed to flow to phi nodes over their predecessor
-            // edge, so we ignore phi node domination for the moment
+            // edge.
             if (MemoryPhi *P = dyn_cast<MemoryPhi>(U)) {
               for (const auto &Arg : P->args()) {
                 if (Arg.second == MD) {
@@ -654,13 +635,11 @@ void MemorySSA::verifyDefUses(Function &F) {
     for (auto &I : B) {
       MA = getMemoryAccess(&I);
       if (MA) {
-        if (MemoryUse *MU = dyn_cast<MemoryUse>(MA))
-          verifyUseInDefs(MU->getDefiningAccess(), MU);
-        else if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
-          verifyUseInDefs(MD->getDefiningAccess(), MD);
-        else if (MemoryPhi *MP = dyn_cast<MemoryPhi>(MA)) {
+        if (MemoryPhi *MP = dyn_cast<MemoryPhi>(MA)) {
           for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i)
             verifyUseInDefs(MP->getIncomingValue(i), MP);
+        } else {
+          verifyUseInDefs(MA->getDefiningAccess(), MA);
         }
       }
     }
@@ -1002,10 +981,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
     return CacheResult;
 
   // If we started with a heap use, walk to the def
-  if (MemoryUse *MU = dyn_cast<MemoryUse>(StartingAccess))
-    StartingAccess = MU->getDefiningAccess();
-  else if (MemoryDef *MD = dyn_cast<MemoryDef>(StartingAccess))
-    StartingAccess = MD->getDefiningAccess();
+  StartingAccess = StartingAccess->getDefiningAccess();
 
   SmallPtrSet<MemoryAccess *, 32> Visited;
   MemoryAccess *FinalAccess =
@@ -1029,6 +1005,5 @@ DoNothingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   MemoryAccess *MA = MSSA->getMemoryAccess(I);
   if (isa<MemoryDef>(MA) || isa<MemoryPhi>(MA))
     return MA;
-  MemoryUse *MU = cast<MemoryUse>(MA);
-  return MU->getDefiningAccess();
+  return MA->getDefiningAccess();
 }
