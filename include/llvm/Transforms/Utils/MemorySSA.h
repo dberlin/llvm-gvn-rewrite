@@ -92,17 +92,18 @@ public:
   virtual ~MemoryAccess() {}
   BasicBlock *getBlock() const { return Block; }
 
+
+  /// \brief Get the instruction that this MemoryAccess represents.
+  /// This may be null in the case of phi nodes.
+  virtual Instruction *getMemoryInst() const { return nullptr; }
+
   /// \brief Get the access that produces the memory state used by this access.
   virtual MemoryAccess *getDefiningAccess() const = 0;
 
   /// \brief Replace our defining access with a new one.
   ///
   /// This function updates use lists.
-  virtual void setDefiningAccess(MemoryAccess *);
-
-  /// \brief Get the instruction that this MemoryAccess represents.
-  /// This may be null in the case of phi nodes.
-  virtual Instruction *getMemoryInst() const { return nullptr; }
+  virtual void setDefiningAccess(MemoryAccess *) = 0;
 
   /// \brief Set the instruction that this MemoryUse represents.
   virtual void setMemoryInst(Instruction *MI) {}
