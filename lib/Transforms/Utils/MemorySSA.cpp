@@ -692,6 +692,9 @@ void MemoryPhi::print(raw_ostream &OS) const {
   OS << ")";
 }
 
+MemoryAccess::~MemoryAccess() {
+}
+
 void MemoryUse::print(raw_ostream &OS) const {
   MemoryAccess *UO = getDefiningAccess();
   OS << "MemoryUse(";
