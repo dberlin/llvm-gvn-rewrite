@@ -7,8 +7,9 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file exposes an interface to building/using memory SSA to walk memory
-// instructions using a use/def graph
+// \file
+// \brief This file exposes an interface to building/using memory SSA to
+// walk memory instructions using a use/def graph
 
 // Memory SSA class builds an SSA form that links together memory
 // access instructions such loads, stores, and clobbers (atomics,
@@ -78,8 +79,8 @@ class BasicBlock;
 class DominatorTree;
 class Function;
 
-// This is the base for all memory accesses. All memory accesses in a block are
-// linked together using an intrusive list
+// \brief The base for all memory accesses. All memory accesses in a
+// block are linked together using an intrusive list.
 class MemoryAccess : public ilist_node<MemoryAccess> {
 public:
   enum AccessType { AccessUse, AccessDef, AccessPhi };
@@ -88,9 +89,23 @@ public:
   // dyn_cast
   static inline bool classof(const MemoryAccess *) { return true; }
 
-  AccessType getAccessType() const { return AccessType; }
   virtual ~MemoryAccess() {}
   BasicBlock *getBlock() const { return Block; }
+
+  /// \brief Get the access that produces the memory state used by this access.
+  virtual MemoryAccess *getDefiningAccess() const = 0;
+
+  /// \brief Replace our defining access with a new one.
+  ///
+  /// This function updates use lists.
+  virtual void setDefiningAccess(MemoryAccess *);
+
+  /// \brief Get the instruction that this MemoryAccess represents.
+  /// This may be null in the case of phi nodes.
+  virtual Instruction *getMemoryInst() const { return nullptr; }
+
+  /// \brief Set the instruction that this MemoryUse represents.
+  virtual void setMemoryInst(Instruction *MI) {}
 
   virtual void print(raw_ostream &OS) const {};
   virtual void dump() const;
@@ -100,9 +115,7 @@ public:
   typedef UseListType::const_iterator const_iterator;
 
   unsigned use_size() const { return Uses.size(); }
-
   bool use_empty() const { return Uses.empty(); }
-
   iterator use_begin() { return Uses.begin(); }
   iterator use_end() { return Uses.end(); }
   iterator_range<iterator> uses() {
@@ -115,24 +128,29 @@ public:
     return iterator_range<const_iterator>(use_begin(), use_end());
   }
 
-  virtual unsigned int getID() const { return 0; }
-
 protected:
   friend class MemorySSA;
   friend class MemoryUse;
+  friend class MemoryDef;
   friend class MemoryPhi;
+  AccessType getAccessType() const { return AccessType; }
 
-  /// Add a use of this memory access to our list of uses.
-  // Note: We depend on being able to add the same use multiple times and not
-  // have it end up in our use list multiple times
+  /// \brief Add a use of this memory access to our list of uses.
+  ///
+  /// Note: We depend on being able to add the same use multiple times and not
+  /// have it end up in our use list multiple times.
   void addUse(MemoryAccess *Use) { Uses.insert(Use); }
 
-  /// Remove a use of this memory access from our list of uses
+  /// \brief Remove a use of this memory access from our list of uses.
   void removeUse(MemoryAccess *Use) { Uses.erase(Use); }
-  // Return true if Use is one of the uses of this memory access
+
+  /// \brief Return true if \p Use is one of the uses of this memory access.
   bool findUse(MemoryAccess *Use) { return Uses.count(Use); }
 
   MemoryAccess(AccessType AT, BasicBlock *BB) : AccessType(AT), Block(BB) {}
+
+  /// \brief Used internally to give IDs to MemoryAccesses for printing
+  virtual unsigned int getID() const { return 0; }
 
 private:
   MemoryAccess(const MemoryAccess &);
@@ -164,16 +182,17 @@ static inline raw_ostream &operator<<(raw_ostream &OS, MemoryAccess &MA) {
   return OS;
 }
 
-/// This class represents an instruction that uses memory
+/// \brief Represents read-only accesses to memory
 class MemoryUse : public MemoryAccess {
 public:
   MemoryUse(MemoryAccess *DMA, Instruction *MI, BasicBlock *BB)
       : MemoryUse(DMA, AccessUse, MI, BB) {}
 
-  MemoryAccess *getDefiningAccess() const { return DefiningAccess; }
-  /// Replace our defining access with a new one.
-  // This function updates use lists.
-  void setDefiningAccess(MemoryAccess *DMA) {
+  virtual MemoryAccess *getDefiningAccess() const final {
+    return DefiningAccess;
+  }
+
+  virtual void setDefiningAccess(MemoryAccess *DMA) final {
     if (DefiningAccess != DMA) {
       if (DefiningAccess)
         DefiningAccess->removeUse(this);
@@ -182,8 +201,9 @@ public:
     }
     DefiningAccess = DMA;
   }
-  Instruction *getMemoryInst() const { return MemoryInst; }
-  void setMemoryInst(Instruction *MI) { MemoryInst = MI; }
+  virtual Instruction *getMemoryInst() const final { return MemoryInst; }
+
+  virtual void setMemoryInst(Instruction *MI) final { MemoryInst = MI; }
 
   static inline bool classof(const MemoryUse *) { return true; }
   static inline bool classof(const MemoryAccess *MA) {
@@ -203,9 +223,12 @@ private:
   Instruction *MemoryInst;
 };
 
-/// This class represents an instruction that defines *or* clobbers memory
-// All defs also have a use
-class MemoryDef : public MemoryUse {
+/// \brief Represents a read-write access to memory, whether it is real, or a
+/// clobber.
+///
+/// Note that, in order to provide def-def chains, all defs also have a use
+/// associated with them.
+class MemoryDef final : public MemoryUse {
 public:
   MemoryDef(MemoryAccess *DMA, Instruction *MI, BasicBlock *BB, unsigned Ver)
       : MemoryUse(DMA, AccessDef, MI, BB), ID(Ver) {}
@@ -219,42 +242,60 @@ public:
     return MA->getAccessType() == AccessDef;
   }
   virtual void print(raw_ostream &OS) const;
-  typedef MemoryAccess **iterator;
-  typedef const MemoryAccess **const_iterator;
 
 protected:
   friend class MemorySSA;
   // For debugging only. This gets used to give memory accesses pretty numbers
   // when printing them out
 
-  virtual unsigned int getID() const { return ID; }
+  virtual unsigned int getID() const final { return ID; }
 
 private:
   const unsigned int ID;
 };
 
-/// This class represents Phis for memory accesses. These have the same
-/// semantics
-/// as regular Phis, except only one Phi will ever exist in a given basic block
-class MemoryPhi : public MemoryAccess {
+/// \brief Represents phi nodes for memory accesses.
+///
+/// These have the same semantic as regular phi nodes, with the exception that
+/// only one phi will ever exist in a given basic block.
+
+class MemoryPhi final : public MemoryAccess {
 public:
   MemoryPhi(BasicBlock *BB, unsigned int NP, unsigned int Ver)
       : MemoryAccess(AccessPhi, BB), ID(Ver), NumPreds(NP) {
     Args.reserve(NumPreds);
   }
-  // This is the number of actual predecessors
+
+  virtual Instruction *getMemoryInst() const final { return nullptr; }
+
+  virtual void setMemoryInst(Instruction *MI) final {}
+
+  virtual MemoryAccess *getDefiningAccess() const {
+    llvm_unreachable("MemoryPhi's do not have a single defining access");
+  }
+  virtual void setDefiningAccess(MemoryAccess *) final {
+    llvm_unreachable("MemoryPhi's do not have a single defining access");
+  }
+
+  /// \brief This is the number of actual predecessors this phi node has.
   unsigned int getNumPreds() const { return NumPreds; }
-  // This is the number of incoming values filled in right now
-  // During construction, we differentiate between this and NumPreds to know
-  // when the PHI node is fully constructed.
+
+  /// \brief This is the number of incoming values currently in use
+  ///
+  /// During SSA construction, we differentiate between this and NumPreds to
+  /// know when the PHI node is fully constructed.
   unsigned int getNumIncomingValues() const { return Args.size(); }
+
+  /// \brief Set the memory access of argument \p v of this phi node to be \p MA
+  ///
+  /// This function updates use lists.
   void setIncomingValue(unsigned int v, MemoryAccess *MA) {
     std::pair<BasicBlock *, MemoryAccess *> &Val = Args[v];
-    // We need to update use lists.  Because our Uses are not to specific
+    // We need to update use lists.  Because our uses are not to specific
     // operands, but instead to this MemoryAccess, and because a given memory
-    // access may appear multiple times in the Phi argument list, we need to be
+    // access may appear multiple times in the phi argument list, we need to be
     // careful not to remove the use of this phi, from MA, until we check to
-    // make sure MA does not appear elsewhere in the Phi argument list.
+    // make sure MA does not appear elsewhere in the phi argument list.
     if (Val.second != MA) {
       if (Val.second) {
         bool existsElsewhere = false;
@@ -271,6 +312,7 @@ public:
       Val.second = MA;
     }
   }
+
   MemoryAccess *getIncomingValue(unsigned int v) const {
     return Args[v].second;
   }
@@ -282,7 +324,6 @@ public:
 
   typedef SmallVector<std::pair<BasicBlock *, MemoryAccess *>, 8> ArgsType;
   typedef ArgsType::const_iterator const_arg_iterator;
-
   inline const_arg_iterator args_begin() const { return Args.begin(); }
   inline const_arg_iterator args_end() const { return Args.end(); }
   inline iterator_range<const_arg_iterator> args() const {
@@ -298,9 +339,9 @@ public:
 
 protected:
   friend class MemorySSA;
+
   // MemorySSA currently cannot handle edge additions or deletions (but can
   // handle direct replacement).  This is protected to ensure people don't try.
-
   void addIncoming(MemoryAccess *MA, BasicBlock *BB) {
     Args.push_back(std::make_pair(BB, MA));
     MA->addUse(this);
@@ -308,7 +349,7 @@ protected:
 
   // For debugging only. This gets used to give memory accesses pretty numbers
   // when printing them out
-  unsigned int getID() const { return ID; }
+  virtual unsigned int getID() const final { return ID; }
 
 private:
   // For debugging only
@@ -318,23 +359,36 @@ private:
 };
 
 class MemorySSAWalker;
+
+/// \brief Encapsulates MemorySSA, including all data associated with memory
+/// accesses.
 class MemorySSA {
 public:
   MemorySSA(Function &);
   ~MemorySSA();
-  // Memory SSA related stuff
+
+  /// \brief Build Memory SSA, and return the walker we used during building,
+  /// for later reuse.  If MemorySSA is already built, just return the walker.
   MemorySSAWalker *buildMemorySSA(AliasAnalysis *, DominatorTree *);
-  // Given a memory using/clobbering/etc instruction, get the
-  // MemorySSA access associaed with it.  If you hand it a basic block
-  // it will give you the memory phi node that exists for that block,
-  // if there is one.
+
+  /// \brief Given a memory using/clobbering/etc instruction, get the MemorySSA
+  /// access associaed with it.  If passed a basic block gets the memory phi
+  /// node that exists for that block, if there is one.
   MemoryAccess *getMemoryAccess(const Value *) const;
   void dump(Function &);
   void print(raw_ostream &) const;
 
+  /// \brief Return true if \p MA represents the live on entry value
+  ///
+  /// Loads and stores from pointer arguments and other global values may be
+  /// defined by memory operations that do not occur in the current function, so
+  /// they may be live on entry to the function.  MemorySSA represents such
+  /// memory state by the live on entry definition, which is guaranteed to
+  /// occurr before any other memory access in the function.
   inline bool isLiveOnEntryDef(const MemoryAccess *MA) const {
     return MA == LiveOnEntryDef;
   }
+
   inline const MemoryAccess *getLiveOnEntryDef() const {
     assert(LiveOnEntryDef && "Live on entry def not initialized yet");
     return LiveOnEntryDef;
@@ -342,27 +396,31 @@ public:
 
   typedef iplist<MemoryAccess> AccessListType;
 
-  // This function gives the list of memory accesses for basic block BB
-  // This list is not modifiable by the user
+  /// \brief Return the list of MemoryAccess's for a given basic block.
+  ///
+  /// This list is not modifiable by the user.
   const AccessListType *getBlockAccesses(const BasicBlock *BB) {
     return PerBlockAccesses[BB];
   }
 
-  // This function removes as a memory access that is going to be deleted, from
-  // Memory SSA.
+  /// \brief Remove a MemoryAccess from MemorySSA, including updating all
+  // definitions and uses.
   void removeMemoryAccess(MemoryAccess *);
 
-  // Replace a MemorySSA access with another.
+  /// \brief Replace one MemoryAccess with another, including updating all
+  /// definitions and uses.
   void replaceMemoryAccess(MemoryAccess *Replacee, MemoryAccess *Replacer);
 
-  // Replace a MemorySSA access with a new access - this does not perform SSA
-  // update, so it only works if the new access dominates the old accesses uses.
-  // Returns the new access that was created
+  /// \brief Replace a MemoryAccess with a new access, created based on
+  /// instruction \p Replacer - this does not perform generic SSA updates, so it
+  /// only works if the new access dominates the old accesses uses.
+  ///
+  /// \returns the new access that was created.
   MemoryAccess *replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
                                                  Instruction *Replacer);
 
 protected:
-  // Used by memory ssa annotater, dumpers, and wrapper pass
+  // Used by Memory SSA annotater, dumpers, and wrapper pass
   friend class MemorySSAAnnotatedWriter;
   friend class MemorySSAPrinterPass;
   void verifyDefUses(Function &F);
@@ -405,10 +463,10 @@ private:
 
   // Memory SSA mappings
   DenseMap<const Value *, MemoryAccess *> InstructionToMemoryAccess;
+  AccessMap PerBlockAccesses;
   MemoryAccess *LiveOnEntryDef;
 
   // Memory SSA building info
-  AccessMap PerBlockAccesses;
   unsigned int nextID;
   bool builtAlready;
   MemorySSAWalker *Walker;
@@ -455,21 +513,22 @@ private:
   MemorySSA *MSSA;
 };
 
-/// This is the generic walker interface for walkers of MemorySSA.  Walkers are
-/// used to be able to further disambiguate the def-use chains MemorySSA gives
-/// you.
+/// \brief This is the generic walker interface for walkers of MemorySSA.
+/// Walkers are used to be able to further disambiguate the def-use chains
+/// MemorySSA gives you.
 class MemorySSAWalker {
 public:
   MemorySSAWalker(MemorySSA *);
   virtual ~MemorySSAWalker() {}
 
   typedef SmallVector<MemoryAccess *, 8> MemoryAccessSet;
-  // Given a memory defining/using/clobbering instruction, calling this will
-  // give you the nearest dominating clobbering Memory Access (by skipping
-  // non-aliasing def links).  Note that this will return a single accesses, and
-  // it must dominate the Instruction, so if an argument of a MemoryPhi node
-  // clobbers Instruction, it will return the memoryphi node, *not* the
-  // argument.
+  /// \brief Given a memory defining/using/clobbering instruction, calling this
+  /// will give you the nearest dominating clobbering MemoryAccess (by skipping
+  /// non-aliasing def links).
+  ///
+  /// Note that this will return a single access, and it must dominate the
+  /// Instruction, so if an argument of a MemoryPhi node clobbers thenstruction,
+  /// it will return the memoryphi node, *not* the argument.
   virtual MemoryAccess *getClobberingMemoryAccess(const Instruction *) = 0;
 
   // Given a memory defining/using/clobbering instruction, calling this will
@@ -484,14 +543,14 @@ protected:
   MemorySSA *MSSA;
 };
 
-// This walker does no alias queries, or anything else. It simply returns the
-// links as they were constructed by the builder
+/// \brief A MemorySSAWalker that does no alias queries, or anything else. It
+/// simply returns the links as they were constructed by the builder.
 class DoNothingMemorySSAWalker final : public MemorySSAWalker {
 public:
   MemoryAccess *getClobberingMemoryAccess(const Instruction *) override;
 };
 
-// This walker does real AA walks, and caching of lookups.
+/// \brief A MemorySSAWalker that does real AA walks and caching of lookups.
 class CachingMemorySSAWalker final : public MemorySSAWalker {
 public:
   CachingMemorySSAWalker(MemorySSA *, AliasAnalysis *);
