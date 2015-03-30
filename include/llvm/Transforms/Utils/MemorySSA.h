@@ -92,10 +92,9 @@ public:
   virtual ~MemoryAccess();
   BasicBlock *getBlock() const { return Block; }
 
-
   /// \brief Get the instruction that this MemoryAccess represents.
   /// This may be null in the case of phi nodes.
-  virtual Instruction *getMemoryInst() const  = 0;
+  virtual Instruction *getMemoryInst() const = 0;
 
   /// \brief Set the instruction that this MemoryUse represents.
   virtual void setMemoryInst(Instruction *MI) = 0;
@@ -107,7 +106,6 @@ public:
   ///
   /// This function updates use lists.
   virtual void setDefiningAccess(MemoryAccess *) = 0;
-
 
   virtual void print(raw_ostream &OS) const {};
   virtual void dump() const;
