@@ -1289,13 +1289,7 @@ void NewGVN::markDominatedSingleUserEquivalences(Value *From, Value *To,
     // the
     // corresponding incoming block.  Otherwise it is the block containing the
     // user that must be dominated by Root.
-    BasicBlock *UsingBlock;
-    if (PHINode *PN = dyn_cast<PHINode>(U.getUser()))
-      UsingBlock = PN->getIncomingBlock(U);
-    else
-      UsingBlock = cast<Instruction>(U.getUser())->getParent();
-
-    if (DT->dominates(Root, UsingBlock)) {
+    if (DT->dominates(Root, U)) {
       SingleUserEquivalences[U.getUser()] = {U.getOperandNo(), To};
       // Mark the users as touched
       if (Instruction *I = dyn_cast<Instruction>(U.getUser()))
@@ -1761,6 +1755,9 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
     // For switches, propagate the case values into the case
     // destinations.
 
+    // Remember how many outgoing edges there are to every successor.
+    SmallDenseMap<BasicBlock *, unsigned, 16> SwitchEdges;
+
     Value *SwitchCond = SI->getCondition();
     Value *CondEvaluated = findConditionEquivalence(SwitchCond, B);
     // See if we were able to turn this switch statement into a constant
@@ -1772,17 +1769,21 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
       // Now get where it goes and mark it reachable
       BasicBlock *TargetBlock = CaseVal.getCaseSuccessor();
       updateReachableEdge(B, TargetBlock);
+      ++SwitchEdges[TargetBlock];
     } else {
       for (unsigned i = 0, e = SI->getNumSuccessors(); i != e; ++i) {
         BasicBlock *TargetBlock = SI->getSuccessor(i);
+        ++SwitchEdges[TargetBlock];
         updateReachableEdge(B, TargetBlock);
       }
     }
-
     // Regardless of answers, propagate equalities for case values
     for (auto i = SI->case_begin(), e = SI->case_end(); i != e; ++i) {
       BasicBlock *TargetBlock = i.getCaseSuccessor();
-      propagateEquality(SwitchCond, i.getCaseValue(), {B, TargetBlock});
+      if (SwitchEdges.lookup(TargetBlock) == 1) {
+        const BasicBlockEdge E(B, TargetBlock);
+        propagateEquality(SwitchCond, i.getCaseValue(), E);
+      }
     }
   } else {
     // Otherwise this is either unconditional, or a type we have no
@@ -1925,6 +1926,7 @@ void NewGVN::cleanupTables() {
   CoercionForwarding.clear();
   DominatedInstRange.clear();
   SingleUserEquivalences.clear();
+  PendingEquivalences.clear();
 }
 
 std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
