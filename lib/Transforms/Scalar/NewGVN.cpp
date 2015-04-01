@@ -1035,10 +1035,12 @@ NewGVN::performSymbolicLoadCoercion(LoadInst *LI, Instruction *DepInst,
 const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
                                                         BasicBlock *B) {
   LoadInst *LI = cast<LoadInst>(I);
-  bool SimpleLoad = LI->isSimple();
+  
   // We can eliminate in favor of non-simple loads, but we won't be able to
   // eliminate them
-
+  if (!LI->isSimple())
+    return nullptr;
+  
   Value *LoadAddressLeader =
       lookupOperandLeader(LI->getPointerOperand(), I, B).first;
   // Load of undef is undef
@@ -1099,10 +1101,7 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
       }
     }
   }
-
-  if (!SimpleLoad)
-    return nullptr;
-
+  
   const Expression *E = createLoadExpression(LI, DefiningAccess, B);
   return E;
 }
@@ -2742,6 +2741,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
   // When we find something not dominated, it becomes the new leader
   // for elimination purposes
 
+  bool AnythingReplaced = false;
   // First, figure out DFS numbers and get rid of unreachable phi node values
   for (auto &B : F) {
     if (!ReachableBlocks.count(&B)) {
@@ -2799,6 +2799,8 @@ bool NewGVN::eliminateInstructions(Function &F) {
         if (Instruction *I = dyn_cast<Instruction>(Member)) {
           assert(CC->leader != I && "About to accidentally remove our leader");
           replaceInstruction(I, CC->leader);
+          AnythingReplaced = true;
+
           continue;
         } else {
           MembersLeft.insert(I);
@@ -2913,19 +2915,30 @@ bool NewGVN::eliminateInstructions(Function &F) {
           DEBUG(dbgs() << "Found replacement " << *Result << " for "
                        << *MemberUse->get() << " in " << *(MemberUse->getUser())
                        << "\n");
-          if (Instruction *ReplacedInst =
-                  dyn_cast<Instruction>(MemberUse->get()))
+          if (Instruction *ReplacedInst = dyn_cast<Instruction>(MemberUse->get()))
             patchReplacementInstruction(ReplacedInst, Result);
           assert(isa<Instruction>(MemberUse->getUser()));
-          Value *OldVal = MemberUse->get();
           MemberUse->set(Result);
-          // If we are out of uses for this old instruction, get rid of it
-          if (Instruction *OldInst = dyn_cast<Instruction>(OldVal))
-            if (isInstructionTriviallyDead(OldInst, TLI))
-              markInstructionForDeletion(OldInst);
+          AnythingReplaced = true;
+          
         }
       }
     }
+    // Cleanup the congruence class
+    for (auto MI = CC->members.begin(), ME = CC->members.end(); MI != ME;)  {
+        auto CurrIter = MI;
+        ++MI;
+        Value *Member = *CurrIter;
+        if (Member->getType()->isVoidTy())
+          continue;
+        if (Instruction *MemberInst = dyn_cast<Instruction>(Member))
+          if (isInstructionTriviallyDead(MemberInst)){
+            //TODO: Don't mark loads of undefs.
+            markInstructionForDeletion(MemberInst);
+            CC->members.erase(Member);
+          }
+    }
+    
   }
   for (auto &Equivs : SingleUserEquivalences) {
     DEBUG(dbgs() << "Using single user equivalence to replace ");
@@ -2933,6 +2946,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
     DEBUG(dbgs() << "\n");
     Equivs.first->getOperandUse(Equivs.second.first).set(Equivs.second.second);
   }
+  
 
-  return true;
+  return AnythingReplaced;
 }
