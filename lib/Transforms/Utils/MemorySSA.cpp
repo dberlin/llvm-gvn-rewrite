@@ -147,7 +147,7 @@ void MemorySSA::determineInsertionPoint(
     // Insert phi node
     auto Accesses = BlockAccesses.lookup(BB);
     if (!Accesses) {
-      Accesses = new iplist<MemoryAccess>;
+      Accesses = new ilist<MemoryAccess>;
       BlockAccesses.insert(std::make_pair(BB, Accesses));
     }
     MemoryPhi *Phi = new MemoryPhi(
@@ -393,9 +393,30 @@ void MemorySSA::removeFromLookups(MemoryAccess *MA) {
   }
 }
 
-MemoryAccess *
-MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
-                                            Instruction *Replacer) {
+MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
+    MemoryAccess *Replacee, Instruction *Replacer, enum InsertionPlace Where) {
+  BasicBlock *ReplacerBlock = Replacer->getParent();
+
+  AccessListType *Accesses = nullptr;
+  auto Result = PerBlockAccesses.insert(std::make_pair(ReplacerBlock, nullptr));
+
+  if (!Result.second) {
+    Accesses = Result.first->second;
+  } else {
+    Accesses = new AccessListType();
+    Result.first->second = Accesses;
+  }
+  if (Where == Beginning)
+    return replaceMemoryAccessWithNewAccess(Replacee, Replacer,
+                                            Accesses->begin());
+  else
+    return replaceMemoryAccessWithNewAccess(Replacee, Replacer,
+                                            Accesses->end());
+}
+
+MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
+    MemoryAccess *Replacee, Instruction *Replacer,
+    const AccessListType::iterator &Where) {
 
   // There is no easy way to assert that you are replacing it with a memory
   // access, and this call will assert it for us
@@ -433,22 +454,9 @@ MemorySSA::replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
     MA = MU;
   }
 
-  // Insert our access after any phi nodes in the block
-  AccessListType *Accesses = nullptr;
-  auto Result = PerBlockAccesses.insert(std::make_pair(ReplacerBlock, nullptr));
-
-  if (!Result.second) {
-    Accesses = Result.first->second;
-  } else {
-    Accesses = new AccessListType();
-    Result.first->second = Accesses;
-  }
-  auto AI = Accesses->begin();
-  for (auto AE = Accesses->end(); AI != AE; ++AI) {
-    if (!isa<MemoryPhi>(AI))
-      break;
-  }
-  Accesses->insert(AI, MA);
+  AccessListType *Accesses = PerBlockAccesses.lookup(ReplacerBlock);
+  assert(Accesses && "Can't use iterator insertion for brand new block");
+  Accesses->insert(Where, MA);
   InstructionToMemoryAccess.insert({Replacer, MA});
   replaceMemoryAccess(Replacee, MA);
   return MA;
@@ -697,7 +705,10 @@ MemoryAccess::~MemoryAccess() {}
 void MemoryUse::print(raw_ostream &OS) const {
   MemoryAccess *UO = getDefiningAccess();
   OS << "MemoryUse(";
-  OS << UO->getID();
+  if (UO && UO->getID() != 0)
+    OS << UO->getID();
+  else
+    OS << "liveOnEntry";
   OS << ")";
 }
 
@@ -786,9 +797,8 @@ struct CachingMemorySSAWalker::UpwardsMemoryQuery {
   // The pointer location we are going to query about. This will be
   // empty if isCall is true
   AliasAnalysis::Location Loc;
-  // This is the call we were querying about. This will be null if
-  // isCall is false
-  const Instruction *Call;
+  // This is the instruction we were querying about.
+  const Instruction *Inst;
   // Set of visited Instructions for this query
   SmallPtrSet<const MemoryAccess *, 32> Visited;
   // Set of visited call accesses for this query This is separated out because
@@ -909,6 +919,22 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
   return std::make_pair(Result, HitVisited);
 }
 
+/// \brief Return true if \p QueryInst could possibly have a Mod result with \p
+/// DefInst.  This is false, if for example, \p DefInst is a volatile load, and
+/// \p QueryInst is not.
+static bool possiblyAffectedBy(const Instruction *QueryInst,
+                               const Instruction *DefInst) {
+  if (isa<LoadInst>(DefInst) && isa<LoadInst>(QueryInst)) {
+    const LoadInst *DefLI = cast<LoadInst>(DefInst);
+    const LoadInst *QueryLI = cast<LoadInst>(QueryInst);
+    // An unordered load can't be clobbered by an ordered one in any
+    // circumstances.
+    if (QueryLI->isUnordered() && !DefLI->isUnordered())
+      return false;
+  }
+  return true;
+}
+
 /// \brief Walk the use-def chains starting at \p MA and find
 /// the MemoryAccess that actually clobbers Loc.
 ///
@@ -938,15 +964,18 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
       if (auto CacheResult = doCacheLookup(CurrAccess, Q))
         return std::make_pair(CacheResult, false);
       if (!Q.isCall) {
-        // Check whether our memory location is modified by this instruction
-        if (AA->getModRefInfo(DefMemoryInst, Q.Loc) & AliasAnalysis::Mod)
-          break;
+        // Okay, well, see if it's a volatile load vs non-volatile load
+        // situation or smoething similar)
+        if (possiblyAffectedBy(Q.Inst, DefMemoryInst))
+          // Check whether our memory location is modified by this instruction
+          if (AA->getModRefInfo(DefMemoryInst, Q.Loc) & AliasAnalysis::Mod)
+            break;
       } else {
         // If this is a call, try then mark it for caching
         if (ImmutableCallSite(DefMemoryInst)) {
           Q.VisitedCalls.insert(MD);
         }
-        if (AA->instructionClobbersCall(DefMemoryInst, Q.Call))
+        if (AA->instructionClobbersCall(DefMemoryInst, Q.Inst))
           break;
       }
     }
@@ -978,9 +1007,10 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   } else if (!isa<CallInst>(I) && !isa<InvokeInst>(I)) {
     Q.isCall = false;
     Q.Loc = AA->getLocation(I);
+    Q.Inst = I;
   } else {
     Q.isCall = true;
-    Q.Call = I;
+    Q.Inst = I;
   }
   auto CacheResult = doCacheLookup(StartingAccess, Q);
   if (CacheResult)
