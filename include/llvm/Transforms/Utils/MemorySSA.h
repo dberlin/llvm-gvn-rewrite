@@ -394,7 +394,7 @@ public:
     return LiveOnEntryDef;
   }
 
-  typedef iplist<MemoryAccess> AccessListType;
+  typedef ilist<MemoryAccess> AccessListType;
 
   /// \brief Return the list of MemoryAccess's for a given basic block.
   ///
@@ -411,13 +411,28 @@ public:
   /// definitions and uses.
   void replaceMemoryAccess(MemoryAccess *Replacee, MemoryAccess *Replacer);
 
+  enum InsertionPlace { Beginning, End };
+
   /// \brief Replace a MemoryAccess with a new access, created based on
   /// instruction \p Replacer - this does not perform generic SSA updates, so it
   /// only works if the new access dominates the old accesses uses.
   ///
+  /// This version places the access at either the end or the beginning of \p
+  /// Replacer's block, depending on the value of \p Where.
+  ///
   /// \returns the new access that was created.
   MemoryAccess *replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
-                                                 Instruction *Replacer);
+                                                 Instruction *Replacer,
+                                                 enum InsertionPlace Where);
+  /// \brief Replace a MemoryAccess with a new access, created based on
+  /// instruction \p Replacer - this does not perform generic SSA updates, so it
+  /// only works if the new access dominates the old accesses uses.
+  ///
+  /// This version places the access before the place that \p Where points to.
+  MemoryAccess *
+  replaceMemoryAccessWithNewAccess(MemoryAccess *Replacee,
+                                   Instruction *Replacer,
+                                   const AccessListType::iterator &Where);
 
 protected:
   // Used by Memory SSA annotater, dumpers, and wrapper pass
