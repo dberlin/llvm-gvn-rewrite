@@ -389,7 +389,7 @@ public:
     return MA == LiveOnEntryDef;
   }
 
-  inline const MemoryAccess *getLiveOnEntryDef() const {
+  inline MemoryAccess *getLiveOnEntryDef() const {
     assert(LiveOnEntryDef && "Live on entry def not initialized yet");
     return LiveOnEntryDef;
   }
