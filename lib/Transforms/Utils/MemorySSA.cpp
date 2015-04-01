@@ -991,6 +991,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
 MemoryAccess *
 CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   MemoryAccess *StartingAccess = MSSA->getMemoryAccess(I);
+
   struct UpwardsMemoryQuery Q;
 
   // First extract our location, then start walking until it is
@@ -1015,6 +1016,13 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   auto CacheResult = doCacheLookup(StartingAccess, Q);
   if (CacheResult)
     return CacheResult;
+
+  // Short circuit invariant loads
+  if (const LoadInst *LI = dyn_cast<LoadInst>(I))
+    if (LI->getMetadata(LLVMContext::MD_invariant_load) != nullptr) {
+      doCacheInsert(StartingAccess, MSSA->getLiveOnEntryDef(), Q);
+      return MSSA->getLiveOnEntryDef();
+    }
 
   // If we started with a heap use, walk to the def
   StartingAccess = StartingAccess->getDefiningAccess();
