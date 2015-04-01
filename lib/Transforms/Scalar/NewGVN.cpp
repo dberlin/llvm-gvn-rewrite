@@ -216,7 +216,6 @@ class NewGVN : public FunctionPass {
   DenseMap<const BasicBlock *, std::pair<unsigned, unsigned>> BlockInstRange;
   DenseMap<const DomTreeNode *, std::pair<unsigned, unsigned>>
       DominatedInstRange;
-  SmallPtrSet<const BasicBlock *, 16> ConfluenceBlocks;
   DenseMap<const Instruction *, unsigned> ProcessedCount;
   DenseMap<const BasicBlock *, unsigned> ProcessedBlockCount;
   CongruenceClass *InitialClass;
@@ -974,6 +973,12 @@ const Expression *
 NewGVN::performSymbolicLoadCoercion(LoadInst *LI, Instruction *DepInst,
                                     MemoryAccess *DefiningAccess,
                                     BasicBlock *B) {
+  // We can't coerce a non-simple load and replace it's uses with anything else
+  // in most cases, though non-simple loads can be sources for coercion.
+
+  if (!LI->isSimple())
+    return nullptr;
+
   Type *LoadType = LI->getType();
   if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
     Value *LoadAddressLeader =
@@ -1030,10 +1035,9 @@ NewGVN::performSymbolicLoadCoercion(LoadInst *LI, Instruction *DepInst,
 const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
                                                         BasicBlock *B) {
   LoadInst *LI = cast<LoadInst>(I);
-
-  // We really can't do anything with non-simple loads
-  if (!LI->isSimple())
-    return NULL;
+  bool SimpleLoad = LI->isSimple();
+  // We can eliminate in favor of non-simple loads, but we won't be able to
+  // eliminate them
 
   Value *LoadAddressLeader =
       lookupOperandLeader(LI->getPointerOperand(), I, B).first;
@@ -1063,35 +1067,41 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
     for (const MemoryAccess *MA : DefiningAccess->uses()) {
       if (MA == LoadAccess)
         continue;
-      if (const MemoryUse *MU = dyn_cast<MemoryUse>(MA)) {
-        Instruction *DefiningInst = MU->getMemoryInst();
-        if (LoadInst *DepLI = dyn_cast<LoadInst>(DefiningInst)) {
-          BasicBlock *DefiningBlock = DefiningInst->getParent();
-          if (!DT->dominates(DefiningBlock, LoadBlock))
-            continue;
+      if (isa<MemoryPhi>(MA))
+        continue;
+      Instruction *DefiningInst = MA->getMemoryInst();
+      if (LoadInst *DepLI = dyn_cast<LoadInst>(DefiningInst)) {
+        BasicBlock *DefiningBlock = DefiningInst->getParent();
+        if (!DT->dominates(DefiningBlock, LoadBlock))
+          continue;
 
-          // Make sure the dependent load comes before the load we are trying
-          // to coerce if they are in the same block
-          if (InstrDFS[DepLI] >= InstrDFS[LI])
-            continue;
+        // Make sure the dependent load comes before the load we are trying
+        // to coerce if they are in the same block
+        if (InstrDFS[DepLI] >= InstrDFS[LI])
+          continue;
 
-          // Now, first make sure they really aren't identical loads, and if
-          // they aren't see if the dominating one can be coerced.
-          // We don't want to mark identical loads coercible, since coercible
-          // loads don't value number with normal loads.
-          if (LI->getType() != DepLI->getType() ||
-              (lookupOperandLeader(DepLI->getPointerOperand(), DepLI, B)
-                   .first != LoadAddressLeader)) {
-            int Offset = analyzeLoadFromClobberingLoad(
-                LI->getType(), LI->getPointerOperand(), DepLI);
-            if (Offset >= 0)
-              return createCoercibleLoadExpression(LI, DefiningAccess,
-                                                   (unsigned)Offset, DepLI, B);
-          }
+        // Now, first make sure they really aren't identical loads, and if
+        // they aren't see if the dominating one can be coerced.
+        // We don't want to mark identical loads coercible, since coercible
+        // loads don't value number with normal loads.
+        Value *DepAddressLeader =
+            lookupOperandLeader(DepLI->getPointerOperand(), DepLI, B).first;
+
+        if (LI->getType() != DepLI->getType() ||
+            DepAddressLeader != LoadAddressLeader ||
+            LI->isSimple() != DepLI->isSimple()) {
+          int Offset = analyzeLoadFromClobberingLoad(
+              LI->getType(), LI->getPointerOperand(), DepLI);
+          if (Offset >= 0)
+            return createCoercibleLoadExpression(LI, DefiningAccess,
+                                                 (unsigned)Offset, DepLI, B);
         }
       }
     }
   }
+
+  if (!SimpleLoad)
+    return nullptr;
 
   const Expression *E = createLoadExpression(LI, DefiningAccess, B);
   return E;
@@ -1917,7 +1927,7 @@ void NewGVN::cleanupTables() {
   DFSBBMap.clear();
   InstrDFS.clear();
   InstructionsToErase.clear();
-  ConfluenceBlocks.clear();
+
   DFSToInstr.clear();
   BlockInstRange.clear();
   TouchedInstructions.clear();
@@ -1979,8 +1989,7 @@ bool NewGVN::runOnFunction(Function &F) {
       const auto &BlockRange = assignDFSNumbers(&B, ICount);
       BlockInstRange.insert({&B, BlockRange});
       ICount += BlockRange.second - BlockRange.first;
-    } else if (B.getUniquePredecessor() == nullptr)
-      ConfluenceBlocks.insert(&B);
+    }
   }
 
   TouchedInstructions.resize(ICount + 1);
@@ -2177,6 +2186,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
       llvm_unreachable("Should have been an instruction");
 
     DFSOrderedSet.emplace_back(VD);
+
     // Now add the users
     for (auto &U : D->uses()) {
       if (Instruction *I = dyn_cast<Instruction>(U.getUser())) {
@@ -2900,11 +2910,11 @@ bool NewGVN::eliminateInstructions(Function &F) {
           if (MemberUse->get() == Result)
             continue;
 
-          Value *User = MemberUse->getUser();
           DEBUG(dbgs() << "Found replacement " << *Result << " for "
                        << *MemberUse->get() << " in " << *(MemberUse->getUser())
                        << "\n");
-          if (Instruction *ReplacedInst = dyn_cast<Instruction>(User))
+          if (Instruction *ReplacedInst =
+                  dyn_cast<Instruction>(MemberUse->get()))
             patchReplacementInstruction(ReplacedInst, Result);
           assert(isa<Instruction>(MemberUse->getUser()));
           Value *OldVal = MemberUse->get();
