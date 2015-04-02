@@ -409,11 +409,15 @@ MemoryAccess *MemorySSA::createNewAccess(Instruction *I) {
 
   if (def) {
     MemoryDef *MD = new MemoryDef(nullptr, I, I->getParent(), nextID++);
+    InstructionToMemoryAccess.insert(std::make_pair(I, MD));
+
     return MD;
   } else if (use) {
     MemoryUse *MU = new MemoryUse(nullptr, I, I->getParent());
+    InstructionToMemoryAccess.insert(std::make_pair(I, MU));
     return MU;
   }
+
   llvm_unreachable("should have been a def or a use!");
 }
 
@@ -459,6 +463,7 @@ MemoryAccess *MemorySSA::addNewMemoryUse(Instruction *Use,
     Result.first->second = Accesses;
   }
   MemoryAccess *MA = createNewAccess(Use);
+
   // Set starting point, then optimize
   MA->setDefiningAccess(DefiningDef);
   auto RealVal = Walker->getClobberingMemoryAccess(MA->getMemoryInst());
@@ -525,7 +530,6 @@ MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
   AccessListType *Accesses = PerBlockAccesses.lookup(ReplacerBlock);
   assert(Accesses && "Can't use iterator insertion for brand new block");
   Accesses->insert(Where, MA);
-  InstructionToMemoryAccess.insert({Replacer, MA});
   replaceMemoryAccess(Replacee, MA);
   return MA;
 }

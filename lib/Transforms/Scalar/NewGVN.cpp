@@ -156,6 +156,10 @@ class NewGVN : public FunctionPass {
   ArrayRecycler<Value *> ArgRecycler;
 
   // Congruence class info
+  CongruenceClass *InitialClass;
+  std::vector<CongruenceClass *> CongruenceClasses;
+
+  // Value Mappings
   DenseMap<Value *, CongruenceClass *> ValueToClass;
   DenseMap<Value *, const Expression *> ValueToExpression;
 
@@ -199,6 +203,7 @@ class NewGVN : public FunctionPass {
   // a standard dominator (and not postdominator) tree.
   SmallDenseMap<User *, std::pair<unsigned, Value *>> SingleUserEquivalences;
 
+  // Expression to class mapping
   typedef DenseMap<const Expression *, CongruenceClass *,
                    ComparingExpressionInfo> ExpressionClassMap;
   ExpressionClassMap ExpressionToClass;
@@ -206,8 +211,11 @@ class NewGVN : public FunctionPass {
   // occurring as often.
   ExpressionClassMap MemoryExpressionToClass;
 
+  // Uniquifying expressions
   DenseSet<const Expression *, ComparingExpressionInfo> UniquedExpressions;
   SmallPtrSet<Value *, 8> ChangedValues;
+
+  // Reachability info
   DenseSet<std::pair<BasicBlock *, BasicBlock *>> ReachableEdges;
   SmallPtrSet<const BasicBlock *, 8> ReachableBlocks;
   // This is a bitvector because, on larger functions, we may have
@@ -226,13 +234,16 @@ class NewGVN : public FunctionPass {
   DenseMap<const BasicBlock *, std::pair<unsigned, unsigned>> BlockInstRange;
   DenseMap<const DomTreeNode *, std::pair<unsigned, unsigned>>
       DominatedInstRange;
+  // Debugging for how many times each block and instruction got processed
   DenseMap<const Instruction *, unsigned> ProcessedCount;
   DenseMap<const BasicBlock *, unsigned> ProcessedBlockCount;
-  CongruenceClass *InitialClass;
-  std::vector<CongruenceClass *> CongruenceClasses;
+
+  // DFS info
   DenseMap<const BasicBlock *, std::pair<int, int>> DFSBBMap;
   DenseMap<const Instruction *, unsigned> InstrDFS;
   std::vector<Instruction *> DFSToInstr;
+
+  // Deletion info
   SmallPtrSet<Instruction *, 8> InstructionsToErase;
   // This is a mapping from Load to (offset into source, coercion source)
   DenseMap<const Value *, std::pair<unsigned, Value *>> CoercionInfo;
@@ -240,6 +251,11 @@ class NewGVN : public FunctionPass {
   // we coerce from the new widened load, instead of the old one. Otherwise, we
   // may try to widen the same old load multiple times.
   DenseMap<const Value *, Value *> CoercionForwarding;
+
+  // This is used by PRE to forward values when they get replaced
+  // Because we don't update the expressions, ValueToExpression will point to
+  // expressions which have the old arguments in them
+  DenseMap<const Value *, Value *> PREValueForwarding;
 
 public:
   static char ID; // Pass identification, replacement for typeid
@@ -2206,12 +2222,21 @@ bool NewGVN::runOnFunction(Function &F) {
   }
 
   Changed |= eliminateInstructions(F);
-  for (auto &CC : CongruenceClasses) {
-    if (CC == InitialClass || CC->dead)
-      continue;
 
-    Changed |= performPREOnClass(CC);
+  // FIXME: Topo sort the congruence classes
+  bool PREChanged = true;
+  while (PREChanged) {
+    PREChanged = false;
+    for (auto &CC : CongruenceClasses) {
+      if (CC == InitialClass || CC->dead)
+        continue;
+
+      PREChanged |= performPREOnClass(CC);
+    }
   }
+  PREValueForwarding.clear();
+
+  Changed |= PREChanged;
 
   // Delete all instructions marked for deletion.
   for (Instruction *ToErase : InstructionsToErase) {
@@ -3276,9 +3301,9 @@ SpeculationFailure:
 
 void NewGVN::valueNumberNewInstruction(Value *V) {
   ValueToClass[V] = InitialClass;
-  /* const Expression *NewExpr =
+  const Expression *NewExpr =
       performSymbolicEvaluation(V, cast<Instruction>(V)->getParent());
-      performCongruenceFinding(V, NewExpr);*/
+  performCongruenceFinding(V, NewExpr);
 }
 
 bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
@@ -3455,6 +3480,7 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
 
     // Transfer DebugLoc.
     NewLoad->setDebugLoc(LI->getDebugLoc());
+    MSSA->addNewMemoryUse(NewLoad, MemorySSA::InsertionPlace::End);
     valueNumberNewInstruction(NewLoad);
 
     // Add the newly created load.
@@ -3468,7 +3494,10 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
   // Perform PHI construction.
   Value *V = constructSSAForSet(LI, ValuesPerBlock);
   LI->replaceAllUsesWith(V);
+  PREValueForwarding[LI] = V;
   valueNumberNewInstruction(V);
+
+  ValueToExpression[LI] = ValueToExpression[V];
   ValueToClass[LI]->members.erase(LI);
   if (isa<PHINode>(V))
     V->takeName(LI);
@@ -3489,8 +3518,12 @@ void NewGVN::analyzeAvailability(Instruction *I,
     }
 
     const Expression *E = phiTranslateExpression(ValueToExpression[I], P);
-    E = trySimplifyPREExpression(E);
-    Value *V = findPRELeader(E, P);
+    Value *V = nullptr;
+    if (E) {
+      E = trySimplifyPREExpression(E);
+      V = findPRELeader(E, P);
+    }
+
     if (!V)
       UnavailableBlocks.push_back(P);
     else
@@ -3530,8 +3563,10 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
         // Perform PHI construction.
         Value *V = constructSSAForSet(I, ValuesPerBlock);
         I->replaceAllUsesWith(V);
+        PREValueForwarding[I] = V;
         valueNumberNewInstruction(V);
         ValueToClass[I]->members.erase(I);
+        ValueToExpression[I] = ValueToExpression[V];
         if (isa<PHINode>(V))
           V->takeName(I);
         if (MD && V->getType()->getScalarType()->isPointerTy())
@@ -3547,7 +3582,7 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
       Changed |= performPRE(I, ValuesPerBlock, UnavailableBlocks);
     }
   }
-  return true;
+  return Changed;
 }
 
 // Find a leader for OP in BB.
@@ -3619,6 +3654,9 @@ bool NewGVN::phiTranslateArguments(const BasicExpression *From,
                                    const BasicBlock *Pred) {
   for (auto &A : From->arguments()) {
     Value *Arg = A;
+    Value *Forwarded = PREValueForwarding.lookup(Arg);
+    if (Forwarded)
+      Arg = Forwarded;
     // Back translate
     if (PHINode *P = dyn_cast<PHINode>(Arg)) {
       int Index = P->getBasicBlockIndex(Pred);
@@ -3636,7 +3674,7 @@ bool NewGVN::phiTranslateArguments(const BasicExpression *From,
 
 const Expression *NewGVN::phiTranslateExpression(const Expression *E,
                                                  const BasicBlock *Pred) {
-  const Expression *ResultExpr = E;
+  const Expression *ResultExpr = nullptr;
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
     MemoryAccess *MA = phiTranslateMemoryAccess(LE->getDefiningAccess(), Pred);
     LoadExpression *NLE =
@@ -3645,7 +3683,7 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     NLE->setType(LE->getType());
     NLE->setOpcode(0);
     if (!phiTranslateArguments(LE, NLE, Pred))
-      return E;
+      return nullptr;
     ResultExpr = NLE;
   } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
     BasicExpression *NBE =
@@ -3654,7 +3692,7 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     NBE->setOpcode(BE->getOpcode());
     NBE->allocateArgs(ArgRecycler, ExpressionAllocator);
     if (!phiTranslateArguments(BE, NBE, Pred))
-      return E;
+      return nullptr;
     ResultExpr = NBE;
   }
 
