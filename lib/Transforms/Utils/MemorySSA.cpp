@@ -393,6 +393,89 @@ void MemorySSA::removeFromLookups(MemoryAccess *MA) {
   }
 }
 
+/// \brief Helper function to create new memory accesses
+MemoryAccess *MemorySSA::createNewAccess(Instruction *I) {
+  // There is no easy way to assert that you are replacing it with a memory
+  // access, and this call will assert it for us
+  AliasAnalysis::ModRefResult ModRef = AA->getModRefInfo(I);
+  bool def = false, use = false;
+  if (ModRef & AliasAnalysis::Mod)
+    def = true;
+  if (ModRef & AliasAnalysis::Ref)
+    use = true;
+
+  assert((def || use) &&
+         "Trying to replace a memory access with a non-memory instruction");
+
+  if (def) {
+    MemoryDef *MD = new MemoryDef(nullptr, I, I->getParent(), nextID++);
+    return MD;
+  } else if (use) {
+    MemoryUse *MU = new MemoryUse(nullptr, I, I->getParent());
+    return MU;
+  }
+  llvm_unreachable("should have been a def or a use!");
+}
+
+MemoryAccess *MemorySSA::findDominatingDef(Instruction *Use,
+                                           enum InsertionPlace Where) {
+  BasicBlock *UseBlock = Use->getParent();
+
+  // Handle the initial case
+  if (Where == Beginning)
+    // The only thing that could define us at the beginning is a phi node
+    if (MemoryAccess *Phi = getMemoryAccess(UseBlock))
+      return Phi;
+
+  DomTreeNode *CurrNode = DT->getNode(UseBlock);
+  // Need to be defined by our dominator
+  if (Where == Beginning)
+    CurrNode = CurrNode->getIDom();
+  Where = End;
+  while (CurrNode) {
+    AccessListType *Accesses = PerBlockAccesses.lookup(CurrNode->getBlock());
+    if (Accesses) {
+      for (auto RAI = Accesses->rbegin(), RAE = Accesses->rend(); RAI != RAE;
+           ++RAI) {
+        if (isa<MemoryDef>(*RAI) || isa<MemoryPhi>(*RAI))
+          return &*RAI;
+      }
+    }
+    CurrNode = CurrNode->getIDom();
+  }
+  return LiveOnEntryDef;
+}
+
+MemoryAccess *MemorySSA::addNewMemoryUse(Instruction *Use,
+                                         enum InsertionPlace Where) {
+  BasicBlock *UseBlock = Use->getParent();
+  AccessListType *Accesses = nullptr;
+  auto Result = PerBlockAccesses.insert(std::make_pair(UseBlock, nullptr));
+  MemoryAccess *DefiningDef = findDominatingDef(Use, Where);
+  if (!Result.second) {
+    Accesses = Result.first->second;
+  } else {
+    Accesses = new AccessListType();
+    Result.first->second = Accesses;
+  }
+  MemoryAccess *MA = createNewAccess(Use);
+  // Set starting point, then optimize
+  MA->setDefiningAccess(DefiningDef);
+  auto RealVal = Walker->getClobberingMemoryAccess(MA->getMemoryInst());
+  MA->setDefiningAccess(RealVal);
+
+  // Easy case
+  if (Where == Beginning) {
+    auto AI = Accesses->begin();
+    while (isa<MemoryPhi>(AI))
+      ++AI;
+    Accesses->insert(AI, MA);
+  } else {
+    Accesses->push_back(MA);
+  }
+  return MA;
+}
+
 MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
     MemoryAccess *Replacee, Instruction *Replacer, enum InsertionPlace Where) {
   BasicBlock *ReplacerBlock = Replacer->getParent();
@@ -406,9 +489,13 @@ MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
     Accesses = new AccessListType();
     Result.first->second = Accesses;
   }
-  if (Where == Beginning)
-    return replaceMemoryAccessWithNewAccess(Replacee, Replacer,
-                                            Accesses->begin());
+  if (Where == Beginning) {
+    auto AI = Accesses->begin();
+    while (isa<MemoryPhi>(AI))
+      ++AI;
+    return replaceMemoryAccessWithNewAccess(Replacee, Replacer, AI);
+  }
+
   else
     return replaceMemoryAccessWithNewAccess(Replacee, Replacer,
                                             Accesses->end());
@@ -417,18 +504,6 @@ MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
 MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
     MemoryAccess *Replacee, Instruction *Replacer,
     const AccessListType::iterator &Where) {
-
-  // There is no easy way to assert that you are replacing it with a memory
-  // access, and this call will assert it for us
-  AliasAnalysis::ModRefResult ModRef = AA->getModRefInfo(Replacer);
-  bool def = false, use = false;
-  if (ModRef & AliasAnalysis::Mod)
-    def = true;
-  if (ModRef & AliasAnalysis::Ref)
-    use = true;
-
-  assert((def || use) &&
-         "Trying to replace a memory access with a non-memory instruction");
 
   BasicBlock *ReplacerBlock = Replacer->getParent();
   MemoryAccess *MA = nullptr;
@@ -445,15 +520,8 @@ MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
     DefiningAccess = Replacee;
   }
 
-  if (def) {
-    MemoryDef *MD =
-        new MemoryDef(DefiningAccess, Replacer, ReplacerBlock, nextID++);
-    MA = MD;
-  } else if (use) {
-    MemoryUse *MU = new MemoryUse(DefiningAccess, Replacer, ReplacerBlock);
-    MA = MU;
-  }
-
+  MA = createNewAccess(Replacer);
+  MA->setDefiningAccess(DefiningAccess);
   AccessListType *Accesses = PerBlockAccesses.lookup(ReplacerBlock);
   assert(Accesses && "Can't use iterator insertion for brand new block");
   Accesses->insert(Where, MA);

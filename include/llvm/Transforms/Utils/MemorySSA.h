@@ -434,6 +434,11 @@ public:
                                    Instruction *Replacer,
                                    const AccessListType::iterator &Where);
 
+  /// \brief Add a new MemoryUse for \p Use at the beginning or end of a block.
+  ///
+  /// \returns The new memory access that was created.
+  MemoryAccess *addNewMemoryUse(Instruction *Use, enum InsertionPlace Where);
+
 protected:
   // Used by Memory SSA annotater, dumpers, and wrapper pass
   friend class MemorySSAAnnotatedWriter;
@@ -452,6 +457,9 @@ private:
   void markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses, BasicBlock *BB);
   bool dominatesUse(MemoryAccess *, MemoryAccess *) const;
   void removeFromLookups(MemoryAccess *);
+  MemoryAccess *createNewAccess(Instruction *);
+  MemoryAccess *findDominatingDef(Instruction *, enum InsertionPlace);
+
   struct RenamePassData {
     BasicBlock *BB;
     BasicBlock *Pred;
