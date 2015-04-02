@@ -74,8 +74,8 @@ public:
       return false;
     if (Opcode == ~0U || Opcode == ~1U)
       return true;
-    if (EType != Other.EType)
-      return false;
+    // We do not compare expression types because opcode takes care of it, and
+    // we want stores and loads to be the same
     return equals(Other);
   }
   bool usedEquivalence() const { return UsedEquivalence; }
