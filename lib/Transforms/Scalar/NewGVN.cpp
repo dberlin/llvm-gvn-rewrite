@@ -74,6 +74,15 @@ STATISTIC(NumPRELoad, "Number of loads PRE'd");
 STATISTIC(NumGVNOpsSimplified, "Number of Expressions simplified");
 STATISTIC(NumGVNPhisAllSame, "Number of PHIs whos arguments are all the same");
 
+static cl::opt<bool> EnablePRE("enable-pre2", cl::init(true), cl::Hidden);
+static cl::opt<bool> EnableLoadPRE("enable-load-pre2", cl::init(true));
+
+// Maximum allowed recursion depth.
+static cl::opt<uint32_t>
+    MaxRecurseDepth("max-recurse-depth2", cl::Hidden, cl::init(1000),
+                    cl::ZeroOrMore,
+                    cl::desc("Max recurse depth (default = 1000)"));
+
 //===----------------------------------------------------------------------===//
 //                                GVN Pass
 //===----------------------------------------------------------------------===//
@@ -457,18 +466,20 @@ private:
                                     uint32_t);
   Value *findPRELeader(Value *, const BasicBlock *);
   Value *findPRELeader(const Expression *Op, const BasicBlock *BB);
+  bool phiTranslateArguments(const BasicExpression *, BasicExpression *,
+                             const BasicBlock *);
+  MemoryAccess *phiTranslateMemoryAccess(MemoryAccess *, const BasicBlock *);
   const Expression *phiTranslateExpression(const Expression *E,
-                                           BasicBlock *Pred);
-  void discoverAvailability(Instruction *I, BasicBlock *, FullyAvailableMap &,
-                            AvailValInBlkMap &);
-
+                                           const BasicBlock *);
   BasicBlock *splitCriticalEdges(BasicBlock *, BasicBlock *);
   void analyzeAvailability(Instruction *, AvailValInBlkVect &,
                            UnavailBlkVect &);
   bool performPRE(Instruction *, AvailValInBlkVect &, UnavailBlkVect &);
   bool performPREOnClass(CongruenceClass *);
-  Value *constructSSAForSet(Instruction *I,
+  Value *constructSSAForSet(Instruction *,
                             SmallVectorImpl<AvailableValueInBlock> &);
+  void valueNumberNewInstruction(Value *);
+  const Expression *trySimplifyPREExpression(const Expression *);
 };
 
 char NewGVN::ID = 0;
@@ -589,8 +600,8 @@ const Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
   E->args_push_back(BinaryLeader.first);
 
   Value *V = SimplifyBinOp(Opcode, E->Args[0], E->Args[1], *DL, TLI, DT, AC);
-  if (const Expression *simplifiedE = checkSimplificationResults(E, nullptr, V))
-    return simplifiedE;
+  if (const Expression *SimplifiedE = checkSimplificationResults(E, nullptr, V))
+    return SimplifiedE;
   return E;
 }
 
@@ -692,8 +703,8 @@ const Expression *NewGVN::createExpression(Instruction *I,
          E->Args[1]->getType() == I->getOperand(1)->getType())) {
       Value *V =
           SimplifyCmpInst(Predicate, E->Args[0], E->Args[1], *DL, TLI, DT, AC);
-      if (const Expression *simplifiedE = checkSimplificationResults(E, I, V))
-        return simplifiedE;
+      if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
+        return SimplifiedE;
     }
 
   } else if (isa<SelectInst>(I)) {
@@ -702,24 +713,24 @@ const Expression *NewGVN::createExpression(Instruction *I,
          E->Args[2]->getType() == I->getOperand(2)->getType())) {
       Value *V = SimplifySelectInst(E->Args[0], E->Args[1], E->Args[2], *DL,
                                     TLI, DT, AC);
-      if (const Expression *simplifiedE = checkSimplificationResults(E, I, V))
-        return simplifiedE;
+      if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
+        return SimplifiedE;
     }
   } else if (I->isBinaryOp()) {
     Value *V =
         SimplifyBinOp(E->getOpcode(), E->Args[0], E->Args[1], *DL, TLI, DT, AC);
-    if (const Expression *simplifiedE = checkSimplificationResults(E, I, V))
-      return simplifiedE;
+    if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
+      return SimplifiedE;
   } else if (BitCastInst *BI = dyn_cast<BitCastInst>(I)) {
     Value *V = SimplifyInstruction(BI, *DL, TLI, DT, AC);
-    if (const Expression *simplifiedE = checkSimplificationResults(E, I, V))
-      return simplifiedE;
+    if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
+      return SimplifiedE;
   } else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
     if (GEP->getPointerOperandType() == E->Args[0]->getType()) {
       Value *V = SimplifyGEPInst(ArrayRef<Value *>(E->Args, E->args_size()),
                                  *DL, TLI, DT, AC);
-      if (const Expression *simplifiedE = checkSimplificationResults(E, I, V))
-        return simplifiedE;
+      if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
+        return SimplifiedE;
     }
   } else if (AllConstant) {
     // We don't bother trying to simplify unless all of the operands
@@ -736,8 +747,8 @@ const Expression *NewGVN::createExpression(Instruction *I,
     Value *V =
         ConstantFoldInstOperands(E->getOpcode(), E->getType(), C, *DL, TLI);
     if (V) {
-      if (const Expression *simplifiedE = checkSimplificationResults(E, I, V))
-        return simplifiedE;
+      if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
+        return SimplifiedE;
     }
   }
   return E;
@@ -3260,6 +3271,13 @@ SpeculationFailure:
   return false;
 }
 
+void NewGVN::valueNumberNewInstruction(Value *V) {
+  ValueToClass[V] = InitialClass;
+  /* const Expression *NewExpr =
+      performSymbolicEvaluation(V, cast<Instruction>(V)->getParent());
+      performCongruenceFinding(V, NewExpr);*/
+}
+
 bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
                         UnavailBlkVect &UnavailableBlocks) {
   // Okay, we have *some* definitions of the value.  This means that the value
@@ -3270,11 +3288,6 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
   // prefer to not increase code size.  As such, we only do this when we know
   // that we only have to insert *one* load (which means we're basically moving
   // the load, not inserting a new one).
-
-  // FIXME: Yeah yeah
-  LoadInst *LI = dyn_cast<LoadInst>(I);
-  if (!LI)
-    return false;
 
   SmallPtrSet<const BasicBlock *, 4> Blockers;
   for (unsigned i = 0, e = UnavailableBlocks.size(); i != e; ++i)
@@ -3366,6 +3379,10 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
 
   // Check if the load can safely be moved to all the unavailable predecessors.
   bool CanDoPRE = true;
+  LoadInst *LI = dyn_cast<LoadInst>(I);
+
+  if (!LI)
+    return false;
 
   SmallVector<Instruction *, 8> NewInsts;
   for (auto &PredLoad : PredLoads) {
@@ -3416,10 +3433,7 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
 
   // Assign value numbers to the new instructions.
   for (unsigned i = 0, e = NewInsts.size(); i != e; ++i) {
-    Instruction *I = NewInsts[i];
-    ValueToClass[I] = InitialClass;
-    const Expression *NewExpr = performSymbolicEvaluation(I, I->getParent());
-    performCongruenceFinding(I, NewExpr);
+    valueNumberNewInstruction(NewInsts[i]);
   }
 
   for (const auto &PredLoad : PredLoads) {
@@ -3438,6 +3452,7 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
 
     // Transfer DebugLoc.
     NewLoad->setDebugLoc(LI->getDebugLoc());
+    valueNumberNewInstruction(NewLoad);
 
     // Add the newly created load.
     ValuesPerBlock.push_back(
@@ -3450,10 +3465,7 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
   // Perform PHI construction.
   Value *V = constructSSAForSet(LI, ValuesPerBlock);
   LI->replaceAllUsesWith(V);
-  ValueToClass[V] = InitialClass;
-  const Expression *NewExpr =
-      performSymbolicEvaluation(V, cast<Instruction>(V)->getParent());
-  performCongruenceFinding(V, NewExpr);
+  valueNumberNewInstruction(V);
   ValueToClass[LI]->members.erase(LI);
   if (isa<PHINode>(V))
     V->takeName(LI);
@@ -3468,6 +3480,11 @@ void NewGVN::analyzeAvailability(Instruction *I,
                                  AvailValInBlkVect &ValuesPerBlock,
                                  UnavailBlkVect &UnavailableBlocks) {
   for (const auto &P : predecessors(I->getParent())) {
+    if (!ReachableBlocks.count(P)) {
+      ValuesPerBlock.push_back(AvailableValueInBlock::getUndef(P));
+      continue;
+    }
+
     const Expression *E = phiTranslateExpression(ValueToExpression[I], P);
     Value *V = findPRELeader(E, P);
     if (!V)
@@ -3506,10 +3523,7 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
         // Perform PHI construction.
         Value *V = constructSSAForSet(I, ValuesPerBlock);
         I->replaceAllUsesWith(V);
-        ValueToClass[V] = InitialClass;
-        const Expression *NewExpr =
-            performSymbolicEvaluation(V, cast<Instruction>(V)->getParent());
-        performCongruenceFinding(V, NewExpr);
+        valueNumberNewInstruction(V);
         ValueToClass[I]->members.erase(I);
         if (isa<PHINode>(V))
           V->takeName(I);
@@ -3521,9 +3535,8 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
         continue;
       }
       // Step 4: Eliminate partial redundancy.
-      // FIXME: Use the GVN ones
-      // if (!EnablePRE || !EnableLoadPRE)
-      // continue;
+      if (!EnablePRE || !EnableLoadPRE)
+        continue;
       Changed |= performPRE(I, ValuesPerBlock, UnavailableBlocks);
     }
   }
@@ -3532,12 +3545,14 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
 
 // Find a leader for OP in BB.
 Value *NewGVN::findPRELeader(Value *Op, const BasicBlock *BB) {
+  if (alwaysAvailable(Op))
+    return Op;
+
   CongruenceClass *CC = ValueToClass[Op];
   if (!CC || CC == InitialClass)
     return 0;
 
-  if (CC->leader && (isa<Argument>(CC->leader) || isa<Constant>(CC->leader) ||
-                     isa<GlobalValue>(CC->leader)))
+  if (CC->leader && alwaysAvailable(CC->leader))
     return CC->leader;
   Value *Equiv = findDominatingEquivalent(CC, nullptr, BB);
   if (Equiv)
@@ -3553,6 +3568,9 @@ Value *NewGVN::findPRELeader(Value *Op, const BasicBlock *BB) {
 
 // Find a leader for OP in BB.
 Value *NewGVN::findPRELeader(const Expression *E, const BasicBlock *BB) {
+  if (const ConstantExpression *CE = dyn_cast<ConstantExpression>(E))
+    return CE->getConstantValue();
+
   ExpressionClassMap &lookupMap = ExpressionToClass;
   if (isa<StoreExpression>(E) || isa<LoadExpression>(E))
     lookupMap = MemoryExpressionToClass;
@@ -3577,8 +3595,8 @@ Value *NewGVN::findPRELeader(const Expression *E, const BasicBlock *BB) {
   return 0;
 }
 
-static MemoryAccess *phiTranslateMemoryAccess(MemoryAccess *MA,
-                                              BasicBlock *Pred) {
+MemoryAccess *NewGVN::phiTranslateMemoryAccess(MemoryAccess *MA,
+                                               const BasicBlock *Pred) {
   if (MemoryPhi *MP = dyn_cast<MemoryPhi>(MA)) {
     for (auto A : MP->args()) {
       if (A.first == Pred) {
@@ -3589,8 +3607,20 @@ static MemoryAccess *phiTranslateMemoryAccess(MemoryAccess *MA,
   return MA;
 }
 
+bool NewGVN::phiTranslateArguments(const BasicExpression *From,
+                                   BasicExpression *To,
+                                   const BasicBlock *Pred) {
+  for (auto &A : From->arguments()) {
+    Value *Leader = findPRELeader(A, Pred);
+    if (Leader == nullptr)
+      return false;
+    To->args_push_back(Leader);
+  }
+  return true;
+}
+
 const Expression *NewGVN::phiTranslateExpression(const Expression *E,
-                                                 BasicBlock *Pred) {
+                                                 const BasicBlock *Pred) {
   const Expression *ResultExpr = E;
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
     MemoryAccess *MA = phiTranslateMemoryAccess(LE->getDefiningAccess(), Pred);
@@ -3599,21 +3629,33 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     NLE->allocateArgs(ArgRecycler, ExpressionAllocator);
     NLE->setType(LE->getType());
     NLE->setOpcode(0);
-    for (auto &A : LE->arguments())
-      NLE->args_push_back(findPRELeader(A, Pred));
+    if (!phiTranslateArguments(LE, NLE, Pred))
+      return E;
     ResultExpr = NLE;
-
   } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
     BasicExpression *NBE =
         new (ExpressionAllocator) BasicExpression(BE->args_size());
     NBE->setType(BE->getType());
     NBE->setOpcode(BE->getOpcode());
     NBE->allocateArgs(ArgRecycler, ExpressionAllocator);
-
-    for (auto &A : BE->arguments())
-      NBE->args_push_back(findPRELeader(A, Pred));
+    if (!phiTranslateArguments(BE, NBE, Pred))
+      return E;
     ResultExpr = NBE;
   }
 
+  return ResultExpr;
+}
+
+const Expression *NewGVN::trySimplifyPREExpression(const Expression *E) {
+  const Expression *ResultExpr = E;
+  if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
+    unsigned Opcode = BE->getOpcode();
+    if (Instruction::isBinaryOp(Opcode)) {
+      Value *V =
+          SimplifyBinOp(Opcode, BE->Args[0], BE->Args[1], *DL, TLI, DT, AC);
+      if (Constant *C = dyn_cast<Constant>(V))
+        ResultExpr = createConstantExpression(C, false);
+    }
+  }
   return ResultExpr;
 }
