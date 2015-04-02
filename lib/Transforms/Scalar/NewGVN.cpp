@@ -3090,8 +3090,11 @@ bool NewGVN::eliminateInstructions(Function &F) {
 Value *
 NewGVN::AvailableValueInBlock::MaterializeAdjustedValue(Instruction *I,
                                                         NewGVN &gvn) const {
-  if (!isa<LoadInst>(I))
-    return I;
+  if (!isa<LoadInst>(I)) {
+    assert(isSimpleValue() &&
+           "Should have been a simple value for a non-load!");
+    return getSimpleValue();
+  }
 
   Value *Res;
   Type *LoadTy = I->getType();
@@ -3486,6 +3489,7 @@ void NewGVN::analyzeAvailability(Instruction *I,
     }
 
     const Expression *E = phiTranslateExpression(ValueToExpression[I], P);
+    E = trySimplifyPREExpression(E);
     Value *V = findPRELeader(E, P);
     if (!V)
       UnavailableBlocks.push_back(P);
@@ -3501,6 +3505,9 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
   AvailValInBlkVect ValuesPerBlock;
 
   for (auto M : CC->members) {
+    if (isa<PHINode>(M))
+      continue;
+
     if (Instruction *I = dyn_cast<Instruction>(M)) {
       UnavailBlkVect UnavailableBlocks;
 
@@ -3611,7 +3618,15 @@ bool NewGVN::phiTranslateArguments(const BasicExpression *From,
                                    BasicExpression *To,
                                    const BasicBlock *Pred) {
   for (auto &A : From->arguments()) {
-    Value *Leader = findPRELeader(A, Pred);
+    Value *Arg = A;
+    // Back translate
+    if (PHINode *P = dyn_cast<PHINode>(Arg)) {
+      int Index = P->getBasicBlockIndex(Pred);
+      if (Index != -1) {
+        Arg = P->getIncomingValue(Index);
+      }
+    }
+    Value *Leader = findPRELeader(Arg, Pred);
     if (Leader == nullptr)
       return false;
     To->args_push_back(Leader);
@@ -3653,8 +3668,10 @@ const Expression *NewGVN::trySimplifyPREExpression(const Expression *E) {
     if (Instruction::isBinaryOp(Opcode)) {
       Value *V =
           SimplifyBinOp(Opcode, BE->Args[0], BE->Args[1], *DL, TLI, DT, AC);
-      if (Constant *C = dyn_cast<Constant>(V))
-        ResultExpr = createConstantExpression(C, false);
+      if (V) {
+        if (Constant *C = dyn_cast<Constant>(V))
+          ResultExpr = createConstantExpression(C, false);
+      }
     }
   }
   return ResultExpr;
