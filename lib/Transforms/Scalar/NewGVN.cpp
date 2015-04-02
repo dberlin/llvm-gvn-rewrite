@@ -512,7 +512,7 @@ static std::string getBlockName(const BasicBlockEdge &B) {
 
 INITIALIZE_PASS_BEGIN(NewGVN, "newgvn", "Global Value Numbering", false, false)
 INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
-INITIALIZE_PASS_DEPENDENCY(MemoryDependenceAnalysis)
+INITIALIZE_PASS_DEPENDENCY(MemorySSALazy)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
@@ -2112,6 +2112,7 @@ bool NewGVN::runOnFunction(Function &F) {
   AC = &getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
   TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
   AA = &getAnalysis<AliasAnalysis>();
+  SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(AA, DT));
   MSSA = &getAnalysis<MemorySSALazy>().getMSSA();
   MSSAWalker = MSSA->buildMemorySSA(AA, DT);
 
@@ -3087,19 +3088,26 @@ bool NewGVN::eliminateInstructions(Function &F) {
       }
     }
     // Cleanup the congruence class
+    SmallPtrSet<Value *, 4> MembersLeft;
     for (auto MI = CC->members.begin(), ME = CC->members.end(); MI != ME;) {
       auto CurrIter = MI;
       ++MI;
       Value *Member = *CurrIter;
-      if (Member->getType()->isVoidTy())
-        continue;
-      if (Instruction *MemberInst = dyn_cast<Instruction>(Member))
+      if (Member->getType()->isVoidTy()) {
+          MembersLeft.insert(Member);
+          continue;
+        }
+      
+      if (Instruction *MemberInst = dyn_cast<Instruction>(Member)) {
         if (isInstructionTriviallyDead(MemberInst)) {
           // TODO: Don't mark loads of undefs.
           markInstructionForDeletion(MemberInst);
-          CC->members.erase(Member);
+          continue;
         }
+      }
+      MembersLeft.insert(Member);
     }
+    CC->members.swap(MembersLeft);
     CC->coercible_members.clear();
   }
   for (auto &Equivs : SingleUserEquivalences) {
@@ -3116,9 +3124,12 @@ Value *
 NewGVN::AvailableValueInBlock::MaterializeAdjustedValue(Instruction *I,
                                                         NewGVN &gvn) const {
   if (!isa<LoadInst>(I)) {
-    assert(isSimpleValue() &&
-           "Should have been a simple value for a non-load!");
-    return getSimpleValue();
+    assert((isSimpleValue() || isUndefValue()) &&
+           "Should have been a simple or undef value for a non-load!");
+    if (isSimpleValue())
+      return getSimpleValue();
+    else
+      return UndefValue::get(I->getType());
   }
 
   Value *Res;
@@ -3399,6 +3410,7 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
   // Split critical edges, and update the unavailable predecessors accordingly.
   for (BasicBlock *OrigPred : CriticalEdgePred) {
     BasicBlock *NewPred = splitCriticalEdges(OrigPred, LoadBB);
+    ReachableBlocks.insert(NewPred);
     assert(!PredLoads.count(OrigPred) && "Split edges shouldn't be in map!");
     PredLoads[NewPred] = nullptr;
     DEBUG(dbgs() << "Split critical edge " << OrigPred->getName() << "->"
@@ -3522,6 +3534,13 @@ void NewGVN::analyzeAvailability(Instruction *I,
     if (E) {
       E = trySimplifyPREExpression(E);
       V = findPRELeader(E, P);
+      // If we got a store, we can rip out the source value.
+      // Otherwise, void type stuff is not acceptable
+      if (V && V->getType()->isVoidTy()) {
+        if (StoreInst *SI = dyn_cast<StoreInst>(V))
+          V = SI->getValueOperand();
+      } else
+        V = nullptr;
     }
 
     if (!V)
@@ -3538,7 +3557,7 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
   AvailValInBlkVect ValuesPerBlock;
 
   for (auto M : CC->members) {
-    if (isa<PHINode>(M))
+    if (isa<PHINode>(M) || M->getType()->isVoidTy())
       continue;
 
     if (Instruction *I = dyn_cast<Instruction>(M)) {
@@ -3645,6 +3664,8 @@ MemoryAccess *NewGVN::phiTranslateMemoryAccess(MemoryAccess *MA,
         return A.second;
       }
     }
+    // We should have found something
+    return nullptr;
   }
   return MA;
 }
@@ -3676,7 +3697,10 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
                                                  const BasicBlock *Pred) {
   const Expression *ResultExpr = nullptr;
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
+
     MemoryAccess *MA = phiTranslateMemoryAccess(LE->getDefiningAccess(), Pred);
+    if (!MA)
+      return nullptr;
     LoadExpression *NLE =
         new (ExpressionAllocator) LoadExpression(LE->args_size(), nullptr, MA);
     NLE->allocateArgs(ArgRecycler, ExpressionAllocator);
