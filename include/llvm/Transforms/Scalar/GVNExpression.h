@@ -196,7 +196,7 @@ public:
                         hash_combine_range(args_begin(), args_end()));
   }
 };
-class CallExpression : public BasicExpression {
+class CallExpression final : public BasicExpression {
 private:
   void operator=(const CallExpression &) = delete;
   CallExpression(const CallExpression &) = delete;
@@ -269,17 +269,11 @@ public:
 
   virtual ~LoadExpression() {}
 
-  virtual bool equals(const Expression &Other) const {
-    if (!this->BasicExpression::equals(Other))
-      return false;
-    const LoadExpression &OE = cast<LoadExpression>(Other);
-    if (DefiningAccess != OE.DefiningAccess)
-      return false;
-    return true;
-  }
+  virtual bool equals(const Expression &Other) const;
 
   virtual hash_code getHashValue() const {
-    return hash_combine(this->BasicExpression::getHashValue(), DefiningAccess);
+    return hash_combine(Opcode, ValueType, DefiningAccess,
+                        hash_combine_range(args_begin(), args_end()));
   }
 
   virtual void printInternal(raw_ostream &OS, bool printEType) const {
@@ -289,7 +283,7 @@ public:
     OS << " represents Load at " << Load;
   }
 };
-class CoercibleLoadExpression : public LoadExpression {
+class CoercibleLoadExpression final : public LoadExpression {
 private:
   void operator=(const CoercibleLoadExpression &) = delete;
   CoercibleLoadExpression(const CoercibleLoadExpression &) = delete;
@@ -345,7 +339,7 @@ public:
   }
 };
 
-class StoreExpression : public BasicExpression {
+class StoreExpression final : public BasicExpression {
 private:
   void operator=(const StoreExpression &) = delete;
   StoreExpression(const StoreExpression &) = delete;
@@ -370,14 +364,7 @@ public:
 
   virtual ~StoreExpression() {}
 
-  virtual bool equals(const Expression &Other) const {
-    if (!this->BasicExpression::equals(Other))
-      return false;
-    const StoreExpression &OE = cast<StoreExpression>(Other);
-    if (DefiningAccess != OE.DefiningAccess)
-      return false;
-    return true;
-  }
+  virtual bool equals(const Expression &Other) const;
 
   virtual void printInternal(raw_ostream &OS, bool printEType) const {
     if (printEType)
@@ -387,11 +374,12 @@ public:
   }
 
   virtual hash_code getHashValue() const {
-    return hash_combine(this->BasicExpression::getHashValue(), DefiningAccess);
+    return hash_combine(Opcode, ValueType, DefiningAccess,
+                        hash_combine_range(args_begin(), args_end()));
   }
 };
 
-class AggregateValueExpression : public BasicExpression {
+class AggregateValueExpression final : public BasicExpression {
 private:
   void operator=(const AggregateValueExpression &) = delete;
   AggregateValueExpression(const AggregateValueExpression &) = delete;
@@ -579,6 +567,36 @@ private:
 
   Constant *ConstantValue;
 };
+
+bool LoadExpression::equals(const Expression &Other) const {
+  if (!this->BasicExpression::equals(Other))
+    return false;
+  if (const LoadExpression *OtherL = dyn_cast<LoadExpression>(&Other)) {
+    if (DefiningAccess != OtherL->getDefiningAccess())
+      return false;
+  } else if (const StoreExpression *OtherS =
+                 dyn_cast<StoreExpression>(&Other)) {
+    if (DefiningAccess != OtherS->getDefiningAccess())
+      return false;
+  }
+
+  return true;
+}
+bool StoreExpression::equals(const Expression &Other) const {
+  if (!this->BasicExpression::equals(Other))
+    return false;
+  if (const LoadExpression *OtherL = dyn_cast<LoadExpression>(&Other)) {
+    if (DefiningAccess != OtherL->getDefiningAccess())
+      return false;
+  } else if (const StoreExpression *OtherS =
+                 dyn_cast<StoreExpression>(&Other)) {
+    if (DefiningAccess != OtherS->getDefiningAccess())
+      return false;
+  }
+
+  return true;
 }
 }
+}
+
 #endif
