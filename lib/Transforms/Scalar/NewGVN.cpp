@@ -46,6 +46,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/PredIteratorCache.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -256,6 +257,7 @@ class NewGVN : public FunctionPass {
   // Because we don't update the expressions, ValueToExpression will point to
   // expressions which have the old arguments in them
   DenseMap<const Value *, Value *> PREValueForwarding;
+  PredIteratorCache PredCache;
 
 public:
   static char ID; // Pass identification, replacement for typeid
@@ -2085,6 +2087,7 @@ void NewGVN::cleanupTables() {
   DominatedInstRange.clear();
   SingleUserEquivalences.clear();
   PendingEquivalences.clear();
+  PredCache.clear();
 }
 
 std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
@@ -3320,28 +3323,47 @@ void NewGVN::valueNumberNewInstruction(Value *V) {
 }
 
 Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
+  // FIXME: TRack debug location and AA metadata
   Value *V = findPRELeader(E, BB);
   if (V)
     return V;
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
     LoadInst *LI =
         new LoadInst(LE->Args[0], LE->getLoadInst()->getName() + ".pre", false,
-                     LE->getLoadInst()->getAlignment(), BB);
+                     LE->getLoadInst()->getAlignment(), BB->getTerminator());
+    // FIXME: Track alignment, etc
     return LI;
   } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
-    if (Instruction::isBinaryOp(BE->getOpcode())) {
+    unsigned Opcode = BE->getOpcode();
+    if (Instruction::isBinaryOp(Opcode)) {
       BinaryOperator *BO =
-          BinaryOperator::Create(Instruction::BinaryOps(BE->getOpcode()),
-                                 BE->Args[0], BE->Args[1], "binaryop", BB);
+          BinaryOperator::Create(Instruction::BinaryOps(Opcode), BE->Args[0],
+                                 BE->Args[1], "binaryop", BB->getTerminator());
+      // FIXME: Track NSW/NUW
       return BO;
-    } else if (BE->getOpcode() == Instruction::MemoryOps::GetElementPtr) {
-      SmallVector<Value *, 8> Indices(BE->args_begin() + 1, BE->args_end());
+    } else if (Opcode == Instruction::MemoryOps::GetElementPtr) {
+      // It wants the pointee type, which is complex, and not equivalent to
+      // getType on the original GEP
+      Type *PointeeType =
+          cast<SequentialType>(BE->Args[0]->getType()->getScalarType())
+              ->getElementType();
       GetElementPtrInst *GEP = GetElementPtrInst::Create(
-          BE->getType(), BE->Args[0], Indices, "gep", BB);
+          PointeeType, BE->Args[0],
+          makeArrayRef(BE->args_begin(), BE->args_end()).slice(1), "gep",
+          BB->getTerminator());
+      // FIXME: Track inbounds
       return GEP;
-    }
-
-    else
+    } else if (((Opcode & 0xff00) >> 8) == Instruction::ICmp) {
+      CmpInst::Predicate Pred = (CmpInst::Predicate)(Opcode & 0xff);
+      ICmpInst *Cmp = new ICmpInst(BB->getTerminator(), Pred, BE->Args[0],
+                                   BE->Args[1], "icmp");
+      return Cmp;
+    } else if (((Opcode & 0xff00) >> 8) == Instruction::FCmp) {
+      CmpInst::Predicate Pred = (CmpInst::Predicate)(Opcode & 0xff);
+      FCmpInst *Cmp = new FCmpInst(BB->getTerminator(), Pred, BE->Args[0],
+                                   BE->Args[1], "fcmp");
+      return Cmp;
+    } else
       llvm_unreachable("What!");
   }
   llvm_unreachable("What!");
@@ -3532,7 +3554,8 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
 void NewGVN::analyzeAvailability(Instruction *I,
                                  AvailValInBlkVect &ValuesPerBlock,
                                  UnavailBlkVect &UnavailableBlocks) {
-  for (const auto &P : predecessors(I->getParent())) {
+  for (BasicBlock **PI = PredCache.GetPreds(I->getParent()); *PI; ++PI) {
+    BasicBlock *P = *PI;
     if (!ReachableBlocks.count(P)) {
       ValuesPerBlock.push_back(AvailableValueInBlock::getUndef(P));
       continue;
@@ -3550,6 +3573,15 @@ void NewGVN::analyzeAvailability(Instruction *I,
           V = SI->getValueOperand();
         else
           V = nullptr;
+      }
+      // Short circuit a common case. If this isn't a side-effecting
+      // instruction, and we dominate the predecessor, *we* must be a leader for
+      // this expression, regardless of what value numbering thinks.  If we
+      // weren't, we couldn't produce our own value over the backedge.  This
+      // handles interesting loop carried value cases.
+      if (!V && isa<BasicExpression>(E)) {
+        if (DT->dominates(I->getParent(), P))
+          V = I;
       }
     }
 
@@ -3572,8 +3604,14 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
 
     if (Instruction *I = dyn_cast<Instruction>(M)) {
       UnavailBlkVect UnavailableBlocks;
-
+      BasicBlock *IBlock = I->getParent();
+      if (PredCache.GetNumPreds(IBlock) == 0)
+        continue;
       analyzeAvailability(I, ValuesPerBlock, UnavailableBlocks);
+
+      if ((UnavailableBlocks.size() + ValuesPerBlock.size()) !=
+          PredCache.GetNumPreds(IBlock))
+        continue;
 
       // If we have no predecessors that produce a known value for this load,
       // exit early.
