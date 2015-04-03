@@ -473,7 +473,8 @@ private:
     Value *MaterializeAdjustedValue(Instruction *I, NewGVN &) const;
   };
   typedef SmallVector<AvailableValueInBlock, 64> AvailValInBlkVect;
-  typedef SmallVector<const BasicBlock *, 64> UnavailBlkVect;
+  typedef SmallVector<std::pair<BasicBlock *, const Expression *>, 64>
+      UnavailBlkVect;
   typedef SmallDenseMap<const BasicBlock *, AvailableValueInBlock>
       AvailValInBlkMap;
   typedef DenseMap<const BasicBlock *, char> FullyAvailableMap;
@@ -496,6 +497,7 @@ private:
                             SmallVectorImpl<AvailableValueInBlock> &);
   void valueNumberNewInstruction(Value *);
   const Expression *trySimplifyPREExpression(const Expression *);
+  Value *regenerateExpression(const Expression *, BasicBlock *);
 };
 
 char NewGVN::ID = 0;
@@ -3094,10 +3096,10 @@ bool NewGVN::eliminateInstructions(Function &F) {
       ++MI;
       Value *Member = *CurrIter;
       if (Member->getType()->isVoidTy()) {
-          MembersLeft.insert(Member);
-          continue;
-        }
-      
+        MembersLeft.insert(Member);
+        continue;
+      }
+
       if (Instruction *MemberInst = dyn_cast<Instruction>(Member)) {
         if (isInstructionTriviallyDead(MemberInst)) {
           // TODO: Don't mark loads of undefs.
@@ -3317,8 +3319,37 @@ void NewGVN::valueNumberNewInstruction(Value *V) {
   performCongruenceFinding(V, NewExpr);
 }
 
+Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
+  Value *V = findPRELeader(E, BB);
+  if (V)
+    return V;
+  if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
+    LoadInst *LI =
+        new LoadInst(LE->Args[0], LE->getLoadInst()->getName() + ".pre", false,
+                     LE->getLoadInst()->getAlignment(), BB);
+    return LI;
+  } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
+    if (Instruction::isBinaryOp(BE->getOpcode())) {
+      BinaryOperator *BO =
+          BinaryOperator::Create(Instruction::BinaryOps(BE->getOpcode()),
+                                 BE->Args[0], BE->Args[1], "binaryop", BB);
+      return BO;
+    } else if (BE->getOpcode() == Instruction::MemoryOps::GetElementPtr) {
+      SmallVector<Value *, 8> Indices(BE->args_begin() + 1, BE->args_end());
+      GetElementPtrInst *GEP = GetElementPtrInst::Create(
+          BE->getType(), BE->Args[0], Indices, "gep", BB);
+      return GEP;
+    }
+
+    else
+      llvm_unreachable("What!");
+  }
+  llvm_unreachable("What!");
+}
+
 bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
                         UnavailBlkVect &UnavailableBlocks) {
+  bool Changed = false;
   // Okay, we have *some* definitions of the value.  This means that the value
   // is available in some of our (transitive) predecessors.  Lets think about
   // doing PRE of this instruction.  This will involve inserting a new
@@ -3330,7 +3361,7 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
 
   SmallPtrSet<const BasicBlock *, 4> Blockers;
   for (unsigned i = 0, e = UnavailableBlocks.size(); i != e; ++i)
-    Blockers.insert(UnavailableBlocks[i]);
+    Blockers.insert(UnavailableBlocks[i].first);
 
   // Let's find the first basic block with more than one predecessor.  Walk
   // backwards through predecessors if needed.
@@ -3355,15 +3386,15 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
 
   assert(TmpBB);
   LoadBB = TmpBB;
-
+#if 0
   // Check to see how many predecessors have the loaded value fully
   // available.
-  MapVector<BasicBlock *, Value *> PredLoads;
+  MapVector<BasicBlock *, std::pair<Value *, const Expression *>> PredLoads;
   FullyAvailableMap FullyAvailableBlocks;
   for (unsigned i = 0, e = ValuesPerBlock.size(); i != e; ++i)
     FullyAvailableBlocks[ValuesPerBlock[i].BB] = true;
   for (unsigned i = 0, e = UnavailableBlocks.size(); i != e; ++i)
-    FullyAvailableBlocks[UnavailableBlocks[i]] = false;
+    FullyAvailableBlocks[UnavailableBlocks[i].first] = false;
 
   SmallVector<BasicBlock *, 4> CriticalEdgePred;
   for (pred_iterator PI = pred_begin(LoadBB), E = pred_end(LoadBB); PI != E;
@@ -3387,16 +3418,15 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
                      << '\n');
         return false;
       }
-
       CriticalEdgePred.push_back(Pred);
     } else {
       // Only add the predecessors that will not be split for now.
-      PredLoads[Pred] = nullptr;
+      PredLoads[Pred] = {nullptr, nullptr};
     }
   }
-
+#endif
   // Decide whether PRE is profitable for this load.
-  unsigned NumUnavailablePreds = PredLoads.size() + CriticalEdgePred.size();
+  unsigned NumUnavailablePreds = UnavailableBlocks.size();
   assert(NumUnavailablePreds != 0 &&
          "Fully available value should already be eliminated!");
 
@@ -3407,6 +3437,7 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
   if (NumUnavailablePreds != 1)
     return false;
 
+#if 0
   // Split critical edges, and update the unavailable predecessors accordingly.
   for (BasicBlock *OrigPred : CriticalEdgePred) {
     BasicBlock *NewPred = splitCriticalEdges(OrigPred, LoadBB);
@@ -3416,41 +3447,12 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
     DEBUG(dbgs() << "Split critical edge " << OrigPred->getName() << "->"
                  << LoadBB->getName() << '\n');
   }
-
+#endif
   // Check if the load can safely be moved to all the unavailable predecessors.
   bool CanDoPRE = true;
-  LoadInst *LI = dyn_cast<LoadInst>(I);
-
-  if (!LI)
-    return false;
 
   SmallVector<Instruction *, 8> NewInsts;
-  for (auto &PredLoad : PredLoads) {
-    BasicBlock *UnavailablePred = PredLoad.first;
-
-    // Do PHI translation to get its value in the predecessor if necessary.  The
-    // returned pointer (if non-null) is guaranteed to dominate UnavailablePred.
-
-    // If all preds have a single successor, then we know it is safe to insert
-    // the load on the pred (?!?), so we can insert code to materialize the
-    // pointer if it is not available.
-    PHITransAddr Address(LI->getPointerOperand(), *DL, AC);
-    Value *LoadPtr = nullptr;
-    LoadPtr = Address.PHITranslateWithInsertion(LoadBB, UnavailablePred, *DT,
-                                                NewInsts);
-
-    // If we couldn't find or insert a computation of this phi translated value,
-    // we fail PRE.
-    if (!LoadPtr) {
-      DEBUG(dbgs() << "COULDN'T INSERT PHI TRANSLATED VALUE OF: "
-                   << *LI->getPointerOperand() << "\n");
-      CanDoPRE = false;
-      break;
-    }
-
-    PredLoad.second = LoadPtr;
-  }
-
+  // FIXME: Insert Can Be Avail stuff here
   if (!CanDoPRE) {
     while (!NewInsts.empty()) {
       Instruction *I = NewInsts.pop_back_val();
@@ -3460,13 +3462,13 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
     }
     // HINT: Don't revert the edge-splitting as following transformation may
     // also need to split these critical edges.
-    return !CriticalEdgePred.empty();
+    return Changed;
   }
 
   // Okay, we can eliminate this load by inserting a reload in the predecessor
   // and using PHI construction to get the value in the other predecessors, do
   // it.
-  DEBUG(dbgs() << "GVN REMOVING PRE INSTRUCTION: " << *LI << '\n');
+  DEBUG(dbgs() << "GVN REMOVING PRE INSTRUCTION: " << *I << '\n');
   DEBUG(if (!NewInsts.empty()) dbgs() << "INSERTED " << NewInsts.size()
                                       << " INSTS: " << *NewInsts.back()
                                       << '\n');
@@ -3476,10 +3478,14 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
     valueNumberNewInstruction(NewInsts[i]);
   }
 
-  for (const auto &PredLoad : PredLoads) {
-    BasicBlock *UnavailablePred = PredLoad.first;
-    Value *LoadPtr = PredLoad.second;
+  for (auto &UnavailInfo : UnavailableBlocks)
+    if (!UnavailInfo.second)
+      return false;
 
+  for (auto &UnavailInfo : UnavailableBlocks) {
+    BasicBlock *UnavailablePred = UnavailInfo.first;
+
+#if 0
     Instruction *NewLoad =
         new LoadInst(LoadPtr, LI->getName() + ".pre", false, LI->getAlignment(),
                      UnavailablePred->getTerminator());
@@ -3492,30 +3498,33 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
 
     // Transfer DebugLoc.
     NewLoad->setDebugLoc(LI->getDebugLoc());
+
     MSSA->addNewMemoryUse(NewLoad, MemorySSA::InsertionPlace::End);
     valueNumberNewInstruction(NewLoad);
-
-    // Add the newly created load.
-    ValuesPerBlock.push_back(
-        AvailableValueInBlock::get(UnavailablePred, NewLoad));
     if (MD)
       MD->invalidateCachedPointerInfo(LoadPtr);
-    DEBUG(dbgs() << "GVN INSERTED " << *NewLoad << '\n');
+
+#endif
+    Value *NewInst = regenerateExpression(UnavailInfo.second, UnavailablePred);
+    // Add the newly created load.
+    ValuesPerBlock.push_back(
+        AvailableValueInBlock::get(UnavailablePred, NewInst));
+    DEBUG(dbgs() << "GVN INSERTED " << *NewInst << '\n');
   }
 
   // Perform PHI construction.
-  Value *V = constructSSAForSet(LI, ValuesPerBlock);
-  LI->replaceAllUsesWith(V);
-  PREValueForwarding[LI] = V;
+  Value *V = constructSSAForSet(I, ValuesPerBlock);
+  I->replaceAllUsesWith(V);
+  PREValueForwarding[I] = V;
   valueNumberNewInstruction(V);
 
-  ValueToExpression[LI] = ValueToExpression[V];
-  ValueToClass[LI]->members.erase(LI);
+  ValueToExpression[I] = ValueToExpression[V];
+  ValueToClass[I]->members.erase(I);
   if (isa<PHINode>(V))
-    V->takeName(LI);
+    V->takeName(I);
   if (MD && V->getType()->getScalarType()->isPointerTy())
     MD->invalidateCachedPointerInfo(V);
-  markInstructionForDeletion(LI);
+  markInstructionForDeletion(I);
   ++NumPRELoad;
   return true;
 }
@@ -3539,12 +3548,13 @@ void NewGVN::analyzeAvailability(Instruction *I,
       if (V && V->getType()->isVoidTy()) {
         if (StoreInst *SI = dyn_cast<StoreInst>(V))
           V = SI->getValueOperand();
-      } else
-        V = nullptr;
+        else
+          V = nullptr;
+      }
     }
 
     if (!V)
-      UnavailableBlocks.push_back(P);
+      UnavailableBlocks.push_back({P, E});
     else
       ValuesPerBlock.push_back(AvailableValueInBlock::get(P, V));
   }
