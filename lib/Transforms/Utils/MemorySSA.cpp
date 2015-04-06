@@ -141,7 +141,7 @@ void MemorySSA::determineInsertionPoint(
       }
 
       for (auto &C : *Node)
-        if (!VisitedWorklist.count(C))
+        if (VisitedWorklist.insert(C).second)
           Worklist.push_back(C);
     }
   }
