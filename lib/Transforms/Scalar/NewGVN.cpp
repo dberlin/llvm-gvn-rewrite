@@ -488,8 +488,8 @@ private:
   bool phiTranslateArguments(const BasicExpression *, BasicExpression *,
                              const BasicBlock *);
   MemoryAccess *phiTranslateMemoryAccess(MemoryAccess *, const BasicBlock *);
-  const Expression *phiTranslateExpression(const Expression *E,
-                                           const BasicBlock *);
+  const Expression *phiTranslateExpression(const Expression *E, BasicBlock *,
+                                           BasicBlock *);
   BasicBlock *splitCriticalEdges(BasicBlock *, BasicBlock *);
   void analyzeAvailability(Instruction *, AvailValInBlkVect &,
                            UnavailBlkVect &);
@@ -907,6 +907,7 @@ const LoadExpression *NewGVN::createLoadExpression(LoadInst *LI,
   E->setOpcode(0);
   auto Operand = lookupOperandLeader(LI->getPointerOperand(), LI, B);
   E->args_push_back(Operand.first);
+  E->setAlignment(LI->getAlignment());
   E->setUsedEquivalence(Operand.second);
 
   // TODO: Value number heap versions. We may be able to discover
@@ -3328,17 +3329,19 @@ Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
   if (V)
     return V;
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
-    LoadInst *LI =
-        new LoadInst(LE->Args[0], LE->getLoadInst()->getName() + ".pre", false,
-                     LE->getLoadInst()->getAlignment(), BB->getTerminator());
+    LoadInst *LI = new LoadInst(LE->Args[0], "loadpre", false,
+                                LE->getAlignment(), BB->getTerminator());
     // FIXME: Track alignment, etc
+    const_cast<LoadExpression *>(LE)->setLoadInst(LI);
+    MSSA->addNewMemoryUse(LI, MemorySSA::InsertionPlace::End);
+
     return LI;
   } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
     unsigned Opcode = BE->getOpcode();
     if (Instruction::isBinaryOp(Opcode)) {
-      BinaryOperator *BO =
-          BinaryOperator::Create(Instruction::BinaryOps(Opcode), BE->Args[0],
-                                 BE->Args[1], "binaryop", BB->getTerminator());
+      BinaryOperator *BO = BinaryOperator::Create(
+          Instruction::BinaryOps(Opcode), BE->Args[0], BE->Args[1],
+          "binaryoppre", BB->getTerminator());
       // FIXME: Track NSW/NUW
       return BO;
     } else if (Opcode == Instruction::MemoryOps::GetElementPtr) {
@@ -3349,19 +3352,19 @@ Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
               ->getElementType();
       GetElementPtrInst *GEP = GetElementPtrInst::Create(
           PointeeType, BE->Args[0],
-          makeArrayRef(BE->args_begin(), BE->args_end()).slice(1), "gep",
+          makeArrayRef(BE->args_begin(), BE->args_end()).slice(1), "geppre",
           BB->getTerminator());
       // FIXME: Track inbounds
       return GEP;
     } else if (((Opcode & 0xff00) >> 8) == Instruction::ICmp) {
       CmpInst::Predicate Pred = (CmpInst::Predicate)(Opcode & 0xff);
       ICmpInst *Cmp = new ICmpInst(BB->getTerminator(), Pred, BE->Args[0],
-                                   BE->Args[1], "icmp");
+                                   BE->Args[1], "icmppre");
       return Cmp;
     } else if (((Opcode & 0xff00) >> 8) == Instruction::FCmp) {
       CmpInst::Predicate Pred = (CmpInst::Predicate)(Opcode & 0xff);
       FCmpInst *Cmp = new FCmpInst(BB->getTerminator(), Pred, BE->Args[0],
-                                   BE->Args[1], "fcmp");
+                                   BE->Args[1], "fcmppre");
       return Cmp;
     } else
       llvm_unreachable("What!");
@@ -3456,7 +3459,7 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
   // FIXME: If we could restructure the CFG, we could make a common pred with
   // all the preds that don't have an available LI and insert a new load into
   // that one block.
-  if (NumUnavailablePreds != 1)
+  if (NumUnavailablePreds > 2)
     return false;
 
 #if 0
@@ -3528,6 +3531,8 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
 
 #endif
     Value *NewInst = regenerateExpression(UnavailInfo.second, UnavailablePred);
+    valueNumberNewInstruction(NewInst);
+
     // Add the newly created load.
     ValuesPerBlock.push_back(
         AvailableValueInBlock::get(UnavailablePred, NewInst));
@@ -3561,7 +3566,8 @@ void NewGVN::analyzeAvailability(Instruction *I,
       continue;
     }
 
-    const Expression *E = phiTranslateExpression(ValueToExpression[I], P);
+    const Expression *E =
+        phiTranslateExpression(ValueToExpression[I], I->getParent(), P);
     Value *V = nullptr;
     if (E) {
       E = trySimplifyPREExpression(E);
@@ -3574,6 +3580,7 @@ void NewGVN::analyzeAvailability(Instruction *I,
         else
           V = nullptr;
       }
+#if 0
       // Short circuit a common case. If this isn't a side-effecting
       // instruction, and we dominate the predecessor, *we* must be a leader for
       // this expression, regardless of what value numbering thinks.  If we
@@ -3583,6 +3590,7 @@ void NewGVN::analyzeAvailability(Instruction *I,
         if (DT->dominates(I->getParent(), P))
           V = I;
       }
+#endif
     }
 
     if (!V)
@@ -3612,12 +3620,12 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
       if ((UnavailableBlocks.size() + ValuesPerBlock.size()) !=
           PredCache.GetNumPreds(IBlock))
         continue;
-
+#if 0
       // If we have no predecessors that produce a known value for this load,
       // exit early.
       if (ValuesPerBlock.empty())
         continue;
-
+#endif
       // Step 3: Eliminate fully redundancy.
       //
       // If all of the instructions we depend on produce a known value for this
@@ -3685,7 +3693,12 @@ Value *NewGVN::findPRELeader(const Expression *E, const BasicBlock *BB) {
     lookupMap = MemoryExpressionToClass;
   DEBUG(dbgs() << "Hash value was " << E->getHashValue() << "\n");
 
-  CongruenceClass *CC = lookupMap[E];
+  auto Result = lookupMap.find(E);
+  if (Result == lookupMap.end())
+    return 0;
+
+  CongruenceClass *CC = Result->second;
+
   if (!CC || CC == InitialClass)
     return 0;
 
@@ -3742,7 +3755,8 @@ bool NewGVN::phiTranslateArguments(const BasicExpression *From,
 }
 
 const Expression *NewGVN::phiTranslateExpression(const Expression *E,
-                                                 const BasicBlock *Pred) {
+                                                 BasicBlock *Curr,
+                                                 BasicBlock *Pred) {
   const Expression *ResultExpr = nullptr;
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
 
@@ -3754,6 +3768,7 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     NLE->allocateArgs(ArgRecycler, ExpressionAllocator);
     NLE->setType(LE->getType());
     NLE->setOpcode(0);
+    NLE->setAlignment(LE->getAlignment());
     if (!phiTranslateArguments(LE, NLE, Pred))
       return nullptr;
     ResultExpr = NLE;

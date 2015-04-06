@@ -247,15 +247,22 @@ private:
 protected:
   LoadInst *Load;
   MemoryAccess *DefiningAccess;
+  unsigned Alignment;
 
   LoadExpression(enum ExpressionType EType, unsigned int NumArgs, LoadInst *L,
                  MemoryAccess *DA)
-      : BasicExpression(NumArgs, EType), Load(L), DefiningAccess(DA) {}
+      : BasicExpression(NumArgs, EType), Load(L), DefiningAccess(DA) {
+    Alignment = L ? L->getAlignment() : 0;
+  }
 
 public:
   LoadInst *getLoadInst() const { return Load; }
+  void setLoadInst(LoadInst *L) { L = Load; }
 
   MemoryAccess *getDefiningAccess() const { return DefiningAccess; }
+  void setDefiningAccess(MemoryAccess *MA) { DefiningAccess = MA; }
+  unsigned getAlignment() const { return Alignment; }
+  void setAlignment(unsigned Align) { Alignment = Align; }
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const LoadExpression *) { return true; }
