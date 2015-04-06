@@ -95,8 +95,10 @@ void MemorySSA::determineInsertionPoint(
   }
 
   SmallVector<BasicBlock *, 32> DFBlocks;
-  SmallPtrSet<DomTreeNode *, 32> Visited;
   SmallVector<DomTreeNode *, 32> Worklist;
+  SmallPtrSet<DomTreeNode *, 32> VisitedPQ;
+  SmallPtrSet<DomTreeNode *, 32> VisitedWorklist;
+
   while (!PQ.empty()) {
     DomTreeNodePair RootPair = PQ.top();
     PQ.pop();
@@ -110,6 +112,7 @@ void MemorySSA::determineInsertionPoint(
 
     Worklist.clear();
     Worklist.push_back(Root);
+    VisitedWorklist.insert(Root);
 
     while (!Worklist.empty()) {
       DomTreeNode *Node = Worklist.pop_back_val();
@@ -127,7 +130,7 @@ void MemorySSA::determineInsertionPoint(
         if (SuccLevel > RootLevel)
           continue;
 
-        if (!Visited.insert(SuccNode).second)
+        if (!VisitedPQ.insert(SuccNode).second)
           continue;
 
         BasicBlock *SuccBB = SuccNode->getBlock();
@@ -138,7 +141,7 @@ void MemorySSA::determineInsertionPoint(
       }
 
       for (auto &C : *Node)
-        if (!Visited.count(C))
+        if (!VisitedWorklist.count(C))
           Worklist.push_back(C);
     }
   }
