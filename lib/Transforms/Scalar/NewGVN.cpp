@@ -1102,7 +1102,8 @@ int NewGVN::analyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
       ConstantExpr::getBitCast(Src, Type::getInt8PtrTy(Src->getContext(), AS));
   Constant *OffsetCst =
       ConstantInt::get(Type::getInt64Ty(Src->getContext()), (unsigned)Offset);
-  Src = ConstantExpr::getGetElementPtr(Src, OffsetCst);
+  Src = ConstantExpr::getGetElementPtr(Type::getInt8Ty(Src->getContext()), Src,
+                                       OffsetCst);
   Src = ConstantExpr::getBitCast(Src, PointerType::get(LoadTy, AS));
   if (ConstantFoldLoadFromConstPtr(Src, *DL))
     return Offset;
@@ -2343,6 +2344,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
     ValueDFS VD;
 
     std::pair<int, int> DFSPair = DFSBBMap[BB];
+    assert(DFSPair.first != -1 && DFSPair.second != -1 && "Invalid DFS Pair");
     VD.DFSIn = DFSPair.first;
     VD.DFSOut = DFSPair.second;
     VD.Val = D;
@@ -2398,6 +2400,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &Dense,
     if (D.EdgeOnly)
       continue;
     std::pair<int, int> &DFSPair = DFSBBMap[D.Edge.getEnd()];
+    assert(DFSPair.first != -1 && DFSPair.second != -1 && "Invalid DFS Pair");
     ValueDFS VD;
     VD.DFSIn = DFSPair.first;
     VD.DFSOut = DFSPair.second;
@@ -2852,7 +2855,8 @@ Value *NewGVN::getMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
       Src, llvm::Type::getInt8PtrTy(Src->getContext(), AS));
   Constant *OffsetCst =
       ConstantInt::get(Type::getInt64Ty(Src->getContext()), (unsigned)Offset);
-  Src = ConstantExpr::getGetElementPtr(Src, OffsetCst);
+  Src = ConstantExpr::getGetElementPtr(Type::getInt8Ty(Src->getContext()), Src,
+                                       OffsetCst);
   Src = ConstantExpr::getBitCast(Src, PointerType::get(LoadTy, AS));
   return ConstantFoldLoadFromConstPtr(Src, *DL);
 }
@@ -2911,25 +2915,47 @@ bool NewGVN::eliminateInstructions(Function &F) {
   // for elimination purposes
 
   bool AnythingReplaced = false;
-  // First, figure out DFS numbers and get rid of unreachable phi node values
-  for (auto &B : F) {
-    if (!ReachableBlocks.count(&B)) {
-      for (auto S : successors(&B)) {
+  unsigned DFSNum = 0;
+  // Since we are going to walk the domtree anyway, and we can't guarantee the
+  // DFS numbers are updated, we compute some ourselves.
+  SmallVector<std::pair<const DomTreeNode *, DomTreeNode::const_iterator>, 32>
+      WorkStack;
+
+  WorkStack.emplace_back(DT->getRootNode(), DT->getRootNode()->begin());
+  DFSBBMap[DT->getRoot()].first = DFSNum++;
+
+  while (!WorkStack.empty()) {
+    const DomTreeNode *Node = WorkStack.back().first;
+    DomTreeNode::const_iterator ChildIt = WorkStack.back().second;
+    BasicBlock *BB = Node->getBlock();
+
+    if (!ReachableBlocks.count(BB)) {
+      for (const auto S : successors(BB)) {
         for (auto II = S->begin(); isa<PHINode>(II); ++II) {
           PHINode &Phi = cast<PHINode>(*II);
           DEBUG(dbgs() << "Replacing incoming value of " << *II << " for block "
-                       << getBlockName(&B)
+                       << getBlockName(BB)
                        << " with undef due to it being unreachable\n");
           for (auto &Operand : Phi.incoming_values())
-            if (Phi.getIncomingBlock(Operand) == &B)
+            if (Phi.getIncomingBlock(Operand) == BB)
               Operand.set(UndefValue::get(Phi.getType()));
         }
       }
     }
-    DomTreeNode *DTN = DT->getNode(&B);
-    if (!DTN)
-      continue;
-    DFSBBMap[&B] = {DTN->getDFSNumIn(), DTN->getDFSNumOut()};
+
+    // If we visited all of the children of this node, "recurse" back up the
+    // stack setting the DFOutNum.
+    if (ChildIt == Node->end()) {
+      DFSBBMap[BB].second = DFSNum++;
+      WorkStack.pop_back();
+    } else {
+      // Otherwise, recursively visit this child.
+      const DomTreeNode *Child = *ChildIt;
+      ++WorkStack.back().second;
+
+      WorkStack.emplace_back(Child, Child->begin());
+      DFSBBMap[Child->getBlock()].first = DFSNum++;
+    }
   }
 
   for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
