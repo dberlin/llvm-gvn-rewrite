@@ -3598,6 +3598,8 @@ void NewGVN::analyzeAvailability(Instruction *I,
     Value *V = nullptr;
     if (E) {
       E = trySimplifyPREExpression(E);
+      DEBUG(dbgs() << "After simplification, expression is " << *E << "\n");
+
       V = findPRELeader(E, P, I);
       // If we got a store, we can rip out the source value.
       // Otherwise, void type stuff is not acceptable
@@ -3607,17 +3609,6 @@ void NewGVN::analyzeAvailability(Instruction *I,
         else
           V = nullptr;
       }
-#if 0
-      // Short circuit a common case. If this isn't a side-effecting
-      // instruction, and we dominate the predecessor, *we* must be a leader for
-      // this expression, regardless of what value numbering thinks.  If we
-      // weren't, we couldn't produce our own value over the backedge.  This
-      // handles interesting loop carried value cases.
-      if (!V && isa<BasicExpression>(E)) {
-        if (DT->dominates(I->getParent(), P))
-          V = I;
-      }
-#endif
     }
 
     if (!V)
@@ -3821,7 +3812,6 @@ bool NewGVN::phiTranslateArguments(const BasicExpression *From,
   }
   return true;
 }
-
 const Expression *NewGVN::phiTranslateExpression(const Expression *E,
                                                  BasicBlock *Curr,
                                                  BasicBlock *Pred,
@@ -3840,6 +3830,17 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     NLE->setAlignment(LE->getAlignment());
     if (!phiTranslateArguments(LE, NLE, Pred, MustDominate))
       return nullptr;
+    LoadInst *LI = LE->getLoadInst();
+    AliasAnalysis::Location Loc;
+    if (LI) {
+      Loc = AA->getLocation(LI);
+      Loc = Loc.getWithNewPtr(NLE->Args[0]);
+    } else {
+      Loc.Ptr = NLE->Args[0];
+    }
+    MA = MSSAWalker->getClobberingMemoryAccess(MA, Loc);
+    NLE->setDefiningAccess(MA);
+
     ResultExpr = NLE;
   } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
     BasicExpression *NBE =

@@ -288,6 +288,7 @@ public:
       OS << "ExpressionTypeLoad, ";
     this->BasicExpression::printInternal(OS, false);
     OS << " represents Load at " << Load;
+    OS << " with DefiningAccess " << DefiningAccess;
   }
 };
 class CoercibleLoadExpression final : public LoadExpression {
