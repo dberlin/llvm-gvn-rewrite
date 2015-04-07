@@ -554,6 +554,20 @@ public:
   /// it will return the memoryphi node, *not* the argument.
   virtual MemoryAccess *getClobberingMemoryAccess(const Instruction *) = 0;
 
+  /// \brief Given a potentially clobbering memory access and a new location,
+  /// calling this will give you the nearest dominating clobbering MemoryAccess
+  /// (by skipping non-aliasing def links).
+  ///
+  /// This version of the function is mainly used to disambiguate phi translated
+  /// pointers, where the value of a pointer may have changed from the initial
+  /// memory access.  Note that this expects to be handed either a memory use,
+  /// or an already potentially clobbering access.  Unlike the above API, if
+  /// given a MemoryDef that clobbers the pointer as the starting access, it
+  /// will return that MemoryDef, whereas the above would return the clobber
+  /// starting from the use side of  the memory def.
+  virtual MemoryAccess *
+  getClobberingMemoryAccess(MemoryAccess *, AliasAnalysis::Location &) = 0;
+
   // Given a memory defining/using/clobbering instruction, calling this will
   // give you the set of nearest clobbering accesses.  They are not guaranteed
   // to dominate an instruction.  The main difference between this and the above
@@ -571,6 +585,8 @@ protected:
 class DoNothingMemorySSAWalker final : public MemorySSAWalker {
 public:
   MemoryAccess *getClobberingMemoryAccess(const Instruction *) override;
+  MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
+                                          AliasAnalysis::Location &) override;
 };
 
 /// \brief A MemorySSAWalker that does real AA walks and caching of lookups.
@@ -579,6 +595,8 @@ public:
   CachingMemorySSAWalker(MemorySSA *, AliasAnalysis *);
   virtual ~CachingMemorySSAWalker();
   MemoryAccess *getClobberingMemoryAccess(const Instruction *) override;
+  MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
+                                          AliasAnalysis::Location &) override;
 
 protected:
   struct UpwardsMemoryQuery;
