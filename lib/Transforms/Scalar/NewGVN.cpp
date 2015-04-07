@@ -483,13 +483,13 @@ private:
 
   bool isValueFullyAvailableInBlock(BasicBlock *, FullyAvailableMap &,
                                     uint32_t);
-  Value *findPRELeader(Value *, const BasicBlock *);
-  Value *findPRELeader(const Expression *Op, const BasicBlock *BB);
+  Value *findPRELeader(Value *, const BasicBlock *, const Value *);
+  Value *findPRELeader(const Expression *, const BasicBlock *, const Value *);
   bool phiTranslateArguments(const BasicExpression *, BasicExpression *,
-                             const BasicBlock *);
+                             const BasicBlock *, const Value *);
   MemoryAccess *phiTranslateMemoryAccess(MemoryAccess *, const BasicBlock *);
   const Expression *phiTranslateExpression(const Expression *E, BasicBlock *,
-                                           BasicBlock *);
+                                           BasicBlock *, const Value *);
   BasicBlock *splitCriticalEdges(BasicBlock *, BasicBlock *);
   void analyzeAvailability(Instruction *, AvailValInBlkVect &,
                            UnavailBlkVect &);
@@ -1706,6 +1706,10 @@ void NewGVN::markUsersTouched(Value *V) {
 /// performCongruenceFinding - Perform congruence finding on a given
 /// value numbering expression
 void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
+  ExpressionClassMap *lookupMap = &ExpressionToClass;
+  if (E && (isa<StoreExpression>(E) || isa<LoadExpression>(E)))
+    lookupMap = &MemoryExpressionToClass;
+
   ValueToExpression[V] = E;
   // This is guaranteed to return something, since it will at least find
   // INITIAL
@@ -1731,11 +1735,6 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
   } else if (const VariableExpression *VE = dyn_cast<VariableExpression>(E)) {
     EClass = ValueToClass[VE->getVariableValue()];
   } else {
-
-    ExpressionClassMap *lookupMap = &ExpressionToClass;
-    if (isa<StoreExpression>(E) || isa<LoadExpression>(E))
-      lookupMap = &MemoryExpressionToClass;
-
     auto lookupResult = lookupMap->insert({E, nullptr});
 
     // If it's not in the value table, create a new congruence class
@@ -1804,9 +1803,10 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
           VClass->dead = true;
 
           DEBUG(dbgs() << "Erasing expression " << *E << " from table\n");
-
-          ExpressionToClass.erase(VClass->expression);
-          MemoryExpressionToClass.erase(VClass->expression);
+          // bool wasE = *E == *VClass->expression;
+          lookupMap->erase(VClass->expression);
+          // if (wasE)
+          //   lookupMap->insert({E, EClass});
         }
         // delete VClass;
       } else if (VClass->leader == V) {
@@ -3343,7 +3343,8 @@ SpeculationFailure:
 }
 
 void NewGVN::valueNumberNewInstruction(Value *V) {
-  ValueToClass[V] = InitialClass;
+  if (!ValueToClass.count(V))
+    ValueToClass[V] = InitialClass;
   const Expression *NewExpr =
       performSymbolicEvaluation(V, cast<Instruction>(V)->getParent());
   performCongruenceFinding(V, NewExpr);
@@ -3351,7 +3352,7 @@ void NewGVN::valueNumberNewInstruction(Value *V) {
 
 Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
   // FIXME: TRack debug location and AA metadata
-  Value *V = findPRELeader(E, BB);
+  Value *V = findPRELeader(E, BB, nullptr);
   if (V)
     return V;
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
@@ -3494,7 +3495,7 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
     BasicBlock *NewPred = splitCriticalEdges(OrigPred, LoadBB);
     ReachableBlocks.insert(NewPred);
     assert(!PredLoads.count(OrigPred) && "Split edges shouldn't be in map!");
-    PredLoads[NewPred] = nullptr;
+    PredLoads[NewPred] = {nullptr, nullptr};
     DEBUG(dbgs() << "Split critical edge " << OrigPred->getName() << "->"
                  << LoadBB->getName() << '\n');
   }
@@ -3593,11 +3594,11 @@ void NewGVN::analyzeAvailability(Instruction *I,
     }
 
     const Expression *E =
-        phiTranslateExpression(ValueToExpression[I], I->getParent(), P);
+        phiTranslateExpression(ValueToExpression[I], I->getParent(), P, I);
     Value *V = nullptr;
     if (E) {
       E = trySimplifyPREExpression(E);
-      V = findPRELeader(E, P);
+      V = findPRELeader(E, P, I);
       // If we got a store, we can rip out the source value.
       // Otherwise, void type stuff is not acceptable
       if (V && V->getType()->isVoidTy()) {
@@ -3635,6 +3636,8 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
   for (auto M : CC->members) {
     if (isa<PHINode>(M) || M->getType()->isVoidTy())
       continue;
+    if (!isa<GetElementPtrInst>(M) && !isa<LoadInst>(M))
+      continue;
 
     if (Instruction *I = dyn_cast<Instruction>(M)) {
       UnavailBlkVect UnavailableBlocks;
@@ -3646,7 +3649,7 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
       if ((UnavailableBlocks.size() + ValuesPerBlock.size()) !=
           PredCache.GetNumPreds(IBlock))
         continue;
-#if 0
+#if 1
       // If we have no predecessors that produce a known value for this load,
       // exit early.
       if (ValuesPerBlock.empty())
@@ -3687,7 +3690,8 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
 }
 
 // Find a leader for OP in BB.
-Value *NewGVN::findPRELeader(Value *Op, const BasicBlock *BB) {
+Value *NewGVN::findPRELeader(Value *Op, const BasicBlock *BB,
+                             const Value *MustDominate) {
   if (alwaysAvailable(Op))
     return Op;
 
@@ -3702,6 +3706,8 @@ Value *NewGVN::findPRELeader(Value *Op, const BasicBlock *BB) {
     return Equiv;
 
   for (auto M : CC->members) {
+    if (M == MustDominate)
+      continue;
     if (Instruction *I = dyn_cast<Instruction>(M))
       if (DT->dominates(I->getParent(), BB))
         return I;
@@ -3710,17 +3716,18 @@ Value *NewGVN::findPRELeader(Value *Op, const BasicBlock *BB) {
 }
 
 // Find a leader for OP in BB.
-Value *NewGVN::findPRELeader(const Expression *E, const BasicBlock *BB) {
+Value *NewGVN::findPRELeader(const Expression *E, const BasicBlock *BB,
+                             const Value *MustDominate) {
   if (const ConstantExpression *CE = dyn_cast<ConstantExpression>(E))
     return CE->getConstantValue();
 
-  ExpressionClassMap &lookupMap = ExpressionToClass;
+  const ExpressionClassMap *lookupMap = &ExpressionToClass;
   if (isa<StoreExpression>(E) || isa<LoadExpression>(E))
-    lookupMap = MemoryExpressionToClass;
+    lookupMap = &MemoryExpressionToClass;
   DEBUG(dbgs() << "Hash value was " << E->getHashValue() << "\n");
 
-  auto Result = lookupMap.find(E);
-  if (Result == lookupMap.end())
+  const auto Result = lookupMap->find(E);
+  if (Result == lookupMap->end())
     return 0;
 
   CongruenceClass *CC = Result->second;
@@ -3736,6 +3743,8 @@ Value *NewGVN::findPRELeader(const Expression *E, const BasicBlock *BB) {
     return Equiv;
 
   for (auto M : CC->members) {
+    if (M == MustDominate)
+      continue;
     if (Instruction *I = dyn_cast<Instruction>(M))
       if (DT->dominates(I->getParent(), BB))
         return I;
@@ -3757,22 +3766,55 @@ MemoryAccess *NewGVN::phiTranslateMemoryAccess(MemoryAccess *MA,
   return MA;
 }
 
+static Value *phiTranslateValue(Value *Incoming, const BasicBlock *Pred) {
+  // Back translate if defined by a phi in this block
+  PHINode *P = dyn_cast<PHINode>(Incoming);
+  int Index = P->getBasicBlockIndex(Pred);
+  if (Index != -1) {
+    return P->getIncomingValue(Index);
+  }
+  // Not defined by a phi in this block
+  return Incoming;
+}
+
 bool NewGVN::phiTranslateArguments(const BasicExpression *From,
-                                   BasicExpression *To,
-                                   const BasicBlock *Pred) {
+                                   BasicExpression *To, const BasicBlock *Pred,
+                                   const Value *MustDominate) {
   for (auto &A : From->arguments()) {
     Value *Arg = A;
     Value *Forwarded = PREValueForwarding.lookup(Arg);
     if (Forwarded)
       Arg = Forwarded;
-    // Back translate
-    if (PHINode *P = dyn_cast<PHINode>(Arg)) {
-      int Index = P->getBasicBlockIndex(Pred);
-      if (Index != -1) {
-        Arg = P->getIncomingValue(Index);
+    if (isa<PHINode>(Arg))
+      Arg = phiTranslateValue(Arg, Pred);
+    // Fold in immediate adds
+    if (Instruction *I = dyn_cast<Instruction>(Arg)) {
+      if (I->getOpcode() == Instruction::Add &&
+          isa<PHINode>(I->getOperand(0)) &&
+          isa<ConstantInt>(I->getOperand(1))) {
+
+        Constant *RHS = cast<ConstantInt>(I->getOperand(1));
+        bool isNSW = cast<BinaryOperator>(I)->hasNoSignedWrap();
+        bool isNUW = cast<BinaryOperator>(I)->hasNoUnsignedWrap();
+        Value *LHS = phiTranslateValue(I->getOperand(0), Pred);
+        // If the PHI translated LHS is an add of a constant, fold the
+        // immediates.
+        if (BinaryOperator *BOp = dyn_cast<BinaryOperator>(LHS))
+          if (BOp->getOpcode() == Instruction::Add)
+            if (ConstantInt *CI = dyn_cast<ConstantInt>(BOp->getOperand(1))) {
+              LHS = BOp->getOperand(0);
+              RHS = ConstantExpr::getAdd(RHS, CI);
+              isNSW = isNUW = false;
+            }
+        const Expression *BinExpr = createBinaryExpression(
+            I->getOpcode(), I->getType(), LHS, RHS, Pred);
+        Value *Leader = findPRELeader(BinExpr, Pred, MustDominate);
+        if (Leader)
+          Arg = Leader;
       }
     }
-    Value *Leader = findPRELeader(Arg, Pred);
+
+    Value *Leader = findPRELeader(Arg, Pred, MustDominate);
     if (Leader == nullptr)
       return false;
     To->args_push_back(Leader);
@@ -3782,7 +3824,8 @@ bool NewGVN::phiTranslateArguments(const BasicExpression *From,
 
 const Expression *NewGVN::phiTranslateExpression(const Expression *E,
                                                  BasicBlock *Curr,
-                                                 BasicBlock *Pred) {
+                                                 BasicBlock *Pred,
+                                                 const Value *MustDominate) {
   const Expression *ResultExpr = nullptr;
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
 
@@ -3795,7 +3838,7 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     NLE->setType(LE->getType());
     NLE->setOpcode(0);
     NLE->setAlignment(LE->getAlignment());
-    if (!phiTranslateArguments(LE, NLE, Pred))
+    if (!phiTranslateArguments(LE, NLE, Pred, MustDominate))
       return nullptr;
     ResultExpr = NLE;
   } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
@@ -3804,7 +3847,7 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     NBE->setType(BE->getType());
     NBE->setOpcode(BE->getOpcode());
     NBE->allocateArgs(ArgRecycler, ExpressionAllocator);
-    if (!phiTranslateArguments(BE, NBE, Pred))
+    if (!phiTranslateArguments(BE, NBE, Pred, MustDominate))
       return nullptr;
     ResultExpr = NBE;
   }
