@@ -1063,9 +1063,44 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
   return std::make_pair(CurrAccess, false);
 }
 
+MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
+    MemoryAccess *StartingAccess, AliasAnalysis::Location &Loc) {
+  if (isa<MemoryPhi>(StartingAccess))
+    return StartingAccess;
+  if (MSSA->isLiveOnEntryDef(StartingAccess))
+    return StartingAccess;
+
+  Instruction *I = StartingAccess->getMemoryInst();
+
+  struct UpwardsMemoryQuery Q;
+  if (isa<FenceInst>(I))
+    return StartingAccess;
+
+  Q.Loc = Loc;
+  Q.Inst = StartingAccess->getMemoryInst();
+  Q.isCall = false;
+
+  auto CacheResult = doCacheLookup(StartingAccess, Q);
+  if (CacheResult)
+    return CacheResult;
+
+  // Unlike below, do not walk to the def, because we are handed something we
+  // already believe is the clobbering access.
+  if (isa<MemoryUse>(StartingAccess))
+    StartingAccess = StartingAccess->getDefiningAccess();
+
+  MemoryAccess *FinalAccess =
+      getClobberingMemoryAccess(StartingAccess, Q).first;
+  doCacheInsert(StartingAccess, FinalAccess, Q);
+  return FinalAccess;
+}
+
 MemoryAccess *
 CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   MemoryAccess *StartingAccess = MSSA->getMemoryAccess(I);
+
+  if (isa<MemoryPhi>(StartingAccess))
+    return StartingAccess;
 
   struct UpwardsMemoryQuery Q;
 
@@ -1102,7 +1137,6 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   // If we started with a heap use, walk to the def
   StartingAccess = StartingAccess->getDefiningAccess();
 
-  SmallPtrSet<MemoryAccess *, 32> Visited;
   MemoryAccess *FinalAccess =
       getClobberingMemoryAccess(StartingAccess, Q).first;
   doCacheInsert(StartingAccess, FinalAccess, Q);
@@ -1122,7 +1156,14 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
 MemoryAccess *
 DoNothingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   MemoryAccess *MA = MSSA->getMemoryAccess(I);
-  if (isa<MemoryDef>(MA) || isa<MemoryPhi>(MA))
+  if (isa<MemoryPhi>(MA))
     return MA;
   return MA->getDefiningAccess();
+}
+
+MemoryAccess *DoNothingMemorySSAWalker::getClobberingMemoryAccess(
+    MemoryAccess *StartingAccess, AliasAnalysis::Location &) {
+  if (isa<MemoryPhi>(StartingAccess))
+    return StartingAccess;
+  return StartingAccess->getDefiningAccess();
 }
