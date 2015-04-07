@@ -296,8 +296,9 @@ private:
   const LoadExpression *createLoadExpression(LoadInst *, MemoryAccess *,
                                              const BasicBlock *);
   const CoercibleLoadExpression *
-  createCoercibleLoadExpression(LoadInst *, MemoryAccess *, unsigned, Value *,
-                                const BasicBlock *);
+  createCoercibleLoadExpression(Type *, Value *, LoadInst *, MemoryAccess *,
+                                unsigned, Value *, const BasicBlock *);
+
   const CallExpression *createCallExpression(CallInst *, MemoryAccess *,
                                              const BasicBlock *);
   const AggregateValueExpression *
@@ -326,8 +327,8 @@ private:
   const Expression *checkSimplificationResults(Expression *, Instruction *,
                                                Value *);
   const Expression *performSymbolicEvaluation(Value *, const BasicBlock *);
-  const Expression *performSymbolicLoadCoercion(LoadInst *, Instruction *,
-                                                MemoryAccess *,
+  const Expression *performSymbolicLoadCoercion(Type *, Value *, LoadInst *,
+                                                Instruction *, MemoryAccess *,
                                                 const BasicBlock *);
   const Expression *performSymbolicLoadEvaluation(Instruction *,
                                                   const BasicBlock *);
@@ -498,7 +499,8 @@ private:
   Value *constructSSAForSet(Instruction *,
                             SmallVectorImpl<AvailableValueInBlock> &);
   void valueNumberNewInstruction(Value *);
-  const Expression *trySimplifyPREExpression(const Expression *);
+  const Expression *trySimplifyPREExpression(const Expression *,
+                                             const BasicBlock *);
   Value *regenerateExpression(const Expression *, BasicBlock *);
 };
 
@@ -916,17 +918,16 @@ const LoadExpression *NewGVN::createLoadExpression(LoadInst *LI,
   return E;
 }
 
-const CoercibleLoadExpression *
-NewGVN::createCoercibleLoadExpression(LoadInst *LI, MemoryAccess *DA,
-                                      unsigned Offset, Value *SrcVal,
-                                      const BasicBlock *B) {
+const CoercibleLoadExpression *NewGVN::createCoercibleLoadExpression(
+    Type *LoadType, Value *PtrOperand, LoadInst *Original, MemoryAccess *DA,
+    unsigned Offset, Value *SrcVal, const BasicBlock *B) {
   CoercibleLoadExpression *E = new (ExpressionAllocator)
-      CoercibleLoadExpression(LI->getNumOperands(), LI, DA, Offset, SrcVal);
+      CoercibleLoadExpression(1, Original, DA, Offset, SrcVal);
   E->allocateArgs(ArgRecycler, ExpressionAllocator);
-  E->setType(LI->getType());
+  E->setType(LoadType);
   // Give store and loads same opcode so they value number together
   E->setOpcode(0);
-  auto Operand = lookupOperandLeader(LI->getPointerOperand(), LI, B);
+  auto Operand = lookupOperandLeader(PtrOperand, Original, B);
   E->args_push_back(Operand.first);
   E->setUsedEquivalence(Operand.second);
   // TODO: Value number heap versions. We may be able to discover
@@ -1117,20 +1118,17 @@ const Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
   return E;
 }
 
-const Expression *
-NewGVN::performSymbolicLoadCoercion(LoadInst *LI, Instruction *DepInst,
-                                    MemoryAccess *DefiningAccess,
-                                    const BasicBlock *B) {
-  // We can't coerce a non-simple load and replace it's uses with anything else
-  // in most cases, though non-simple loads can be sources for coercion.
+const Expression *NewGVN::performSymbolicLoadCoercion(
+    Type *LoadType, Value *LoadPtr, LoadInst *LI, Instruction *DepInst,
+    MemoryAccess *DefiningAccess, const BasicBlock *B) {
+  // // We can't coerce a non-simple load and replace it's uses with anything
+  // else
+  // // in most cases, though non-simple loads can be sources for coercion.
+  // if (!LI->isSimple())
+  //   return nullptr;
 
-  if (!LI->isSimple())
-    return nullptr;
-
-  Type *LoadType = LI->getType();
   if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
-    Value *LoadAddressLeader =
-        lookupOperandLeader(LI->getPointerOperand(), LI, B).first;
+    Value *LoadAddressLeader = lookupOperandLeader(LoadPtr, LI, B).first;
     Value *StoreAddressLeader =
         lookupOperandLeader(DepSI->getPointerOperand(), DepSI, B).first;
     Value *StoreVal = DepSI->getValueOperand();
@@ -1138,24 +1136,21 @@ NewGVN::performSymbolicLoadCoercion(LoadInst *LI, Instruction *DepInst,
         LoadAddressLeader == StoreAddressLeader) {
       return createVariableOrConstant(DepSI->getValueOperand(), B);
     } else {
-      int Offset = analyzeLoadFromClobberingStore(
-          LoadType, LI->getPointerOperand(), DepSI);
+      int Offset = analyzeLoadFromClobberingStore(LoadType, LoadPtr, DepSI);
       if (Offset >= 0)
-        return createCoercibleLoadExpression(LI, DefiningAccess,
-                                             (unsigned)Offset, DepSI, B);
+        return createCoercibleLoadExpression(
+            LoadType, LoadPtr, LI, DefiningAccess, (unsigned)Offset, DepSI, B);
     }
   } else if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInst)) {
-    int Offset =
-        analyzeLoadFromClobberingLoad(LoadType, LI->getPointerOperand(), DepLI);
+    int Offset = analyzeLoadFromClobberingLoad(LoadType, LoadPtr, DepLI);
     if (Offset >= 0)
-      return createCoercibleLoadExpression(LI, DefiningAccess, (unsigned)Offset,
-                                           DepLI, B);
+      return createCoercibleLoadExpression(
+          LoadType, LoadPtr, LI, DefiningAccess, (unsigned)Offset, DepLI, B);
   } else if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(DepInst)) {
-    int Offset = analyzeLoadFromClobberingMemInst(
-        LoadType, LI->getPointerOperand(), DepMI);
+    int Offset = analyzeLoadFromClobberingMemInst(LoadType, LoadPtr, DepMI);
     if (Offset >= 0)
-      return createCoercibleLoadExpression(LI, DefiningAccess, (unsigned)Offset,
-                                           DepMI, B);
+      return createCoercibleLoadExpression(
+          LoadType, LoadPtr, LI, DefiningAccess, (unsigned)Offset, DepMI, B);
   }
   // If this load really doesn't depend on anything, then we must be loading
   // an
@@ -1205,7 +1200,8 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
       if (!ReachableBlocks.count(DefiningInst->getParent()))
         return createConstantExpression(UndefValue::get(LI->getType()), false);
       const Expression *CoercionResult =
-          performSymbolicLoadCoercion(LI, DefiningInst, DefiningAccess, B);
+          performSymbolicLoadCoercion(LI->getType(), LI->getPointerOperand(),
+                                      LI, DefiningInst, DefiningAccess, B);
       if (CoercionResult)
         return CoercionResult;
     }
@@ -1243,8 +1239,9 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
           int Offset = analyzeLoadFromClobberingLoad(
               LI->getType(), LI->getPointerOperand(), DepLI);
           if (Offset >= 0)
-            return createCoercibleLoadExpression(LI, DefiningAccess,
-                                                 (unsigned)Offset, DepLI, B);
+            return createCoercibleLoadExpression(
+                LI->getType(), LI->getPointerOperand(), LI, DefiningAccess,
+                (unsigned)Offset, DepLI, B);
         }
       }
     }
@@ -3597,7 +3594,7 @@ void NewGVN::analyzeAvailability(Instruction *I,
         phiTranslateExpression(ValueToExpression[I], I->getParent(), P, I);
     Value *V = nullptr;
     if (E) {
-      E = trySimplifyPREExpression(E);
+      E = trySimplifyPREExpression(E, P);
       DEBUG(dbgs() << "After simplification, expression is " << *E << "\n");
 
       V = findPRELeader(E, P, I);
@@ -3776,9 +3773,8 @@ bool NewGVN::phiTranslateArguments(const BasicExpression *From,
     Value *Forwarded = PREValueForwarding.lookup(Arg);
     if (Forwarded)
       Arg = Forwarded;
-    if (isa<PHINode>(Arg))
-      Arg = phiTranslateValue(Arg, Pred);
     // Fold in immediate adds
+    bool processedAdd = false;
     if (Instruction *I = dyn_cast<Instruction>(Arg)) {
       if (I->getOpcode() == Instruction::Add &&
           isa<PHINode>(I->getOperand(0)) &&
@@ -3800,10 +3796,16 @@ bool NewGVN::phiTranslateArguments(const BasicExpression *From,
         const Expression *BinExpr = createBinaryExpression(
             I->getOpcode(), I->getType(), LHS, RHS, Pred);
         Value *Leader = findPRELeader(BinExpr, Pred, MustDominate);
-        if (Leader)
+        if (Leader) {
           Arg = Leader;
+          processedAdd = true;
+        }
       }
     }
+    // If arg is still a phi node, and wasn't processed by the add processing
+    // above, translate it now
+    if (!processedAdd && isa<PHINode>(Arg))
+      Arg = phiTranslateValue(Arg, Pred);
 
     Value *Leader = findPRELeader(Arg, Pred, MustDominate);
     if (Leader == nullptr)
@@ -3840,7 +3842,6 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     }
     MA = MSSAWalker->getClobberingMemoryAccess(MA, Loc);
     NLE->setDefiningAccess(MA);
-
     ResultExpr = NLE;
   } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
     BasicExpression *NBE =
@@ -3856,7 +3857,8 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
   return ResultExpr;
 }
 
-const Expression *NewGVN::trySimplifyPREExpression(const Expression *E) {
+const Expression *NewGVN::trySimplifyPREExpression(const Expression *E,
+                                                   const BasicBlock *B) {
   const Expression *ResultExpr = E;
   if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
     unsigned Opcode = BE->getOpcode();
@@ -3866,6 +3868,18 @@ const Expression *NewGVN::trySimplifyPREExpression(const Expression *E) {
       if (V) {
         if (Constant *C = dyn_cast<Constant>(V))
           ResultExpr = createConstantExpression(C, false);
+      }
+    }
+  } else if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
+    MemoryAccess *MA = LE->getDefiningAccess();
+    // If we got defined by a store, see if we can pull the value
+    if (isa<MemoryDef>(MA)) {
+      Instruction *DepInst = MA->getMemoryInst();
+      if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
+        // If they are the same type and pointer, pull the source operand
+        if (DepSI->getType() == LE->getType() &&
+            LE->Args[0] == DepSI->getPointerOperand())
+          ResultExpr = createVariableOrConstant(DepSI->getValueOperand(), B);
       }
     }
   }
