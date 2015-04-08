@@ -3708,6 +3708,8 @@ Value *NewGVN::findPRELeader(const Expression *E, const BasicBlock *BB,
                              const Value *MustDominate) {
   if (const ConstantExpression *CE = dyn_cast<ConstantExpression>(E))
     return CE->getConstantValue();
+  else if (const VariableExpression *VE = dyn_cast<VariableExpression>(E))
+    return findPRELeader(VE->getVariableValue(), BB, MustDominate);
 
   const ExpressionClassMap *lookupMap = &ExpressionToClass;
   if (isa<StoreExpression>(E) || isa<LoadExpression>(E))
@@ -3860,7 +3862,14 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
 const Expression *NewGVN::trySimplifyPREExpression(const Expression *E,
                                                    const BasicBlock *B) {
   const Expression *ResultExpr = E;
-  if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
+  // This must come first, because LoadExpression's are BasicExpressions
+  if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
+    MemoryAccess *MA = LE->getDefiningAccess();
+    if (isa<MemoryDef>(MA) && !MSSA->isLiveOnEntryDef(MA))
+      ResultExpr = performSymbolicLoadCoercion(LE->getType(), LE->Args[0],
+                                               LE->getLoadInst(),
+                                               MA->getMemoryInst(), MA, B);
+  } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
     unsigned Opcode = BE->getOpcode();
     if (Instruction::isBinaryOp(Opcode)) {
       Value *V =
@@ -3868,18 +3877,6 @@ const Expression *NewGVN::trySimplifyPREExpression(const Expression *E,
       if (V) {
         if (Constant *C = dyn_cast<Constant>(V))
           ResultExpr = createConstantExpression(C, false);
-      }
-    }
-  } else if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
-    MemoryAccess *MA = LE->getDefiningAccess();
-    // If we got defined by a store, see if we can pull the value
-    if (isa<MemoryDef>(MA)) {
-      Instruction *DepInst = MA->getMemoryInst();
-      if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
-        // If they are the same type and pointer, pull the source operand
-        if (DepSI->getType() == LE->getType() &&
-            LE->Args[0] == DepSI->getPointerOperand())
-          ResultExpr = createVariableOrConstant(DepSI->getValueOperand(), B);
       }
     }
   }
