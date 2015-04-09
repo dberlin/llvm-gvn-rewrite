@@ -498,9 +498,12 @@ MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
     Result.first->second = Accesses;
   }
   if (Where == Beginning) {
+    // Access must go after the first phi
     auto AI = Accesses->begin();
-    while (isa<MemoryPhi>(AI))
-      ++AI;
+    while (AI != Accesses->end())
+      if (!isa<MemoryPhi>(AI))
+        break;
+
     return replaceMemoryAccessWithNewAccess(Replacee, Replacer, AI);
   }
 
