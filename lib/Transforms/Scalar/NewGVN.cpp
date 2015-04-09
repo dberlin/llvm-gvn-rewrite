@@ -25,6 +25,7 @@
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/SparseBitVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/Analysis/AliasAnalysis.h"
@@ -240,7 +241,7 @@ class NewGVN : public FunctionPass {
   DenseMap<const BasicBlock *, unsigned> ProcessedBlockCount;
 
   // DFS info
-  DenseMap<const BasicBlock *, std::pair<int, int>> DFSBBMap;
+  DenseMap<const BasicBlock *, std::pair<int, int>> DFSDomMap;
   DenseMap<const Instruction *, unsigned> InstrDFS;
   std::vector<Instruction *> DFSToInstr;
 
@@ -502,6 +503,23 @@ private:
   const Expression *trySimplifyPREExpression(const Expression *,
                                              const BasicBlock *);
   Value *regenerateExpression(const Expression *, BasicBlock *);
+  bool performRealPRE(Function &F, CongruenceClass *);
+  bool computeSPANT(CongruenceClass *, BitVector &, BitVector &, BitVector &,
+                    BitVector &, BitVector &, BitVector &);
+  bool computeSPAV(CongruenceClass *, BitVector &, BitVector &, BitVector &,
+                   BitVector &, BitVector &, BitVector &);
+  bool computeANT(CongruenceClass *, BitVector &, BitVector &, BitVector &,
+                  BitVector &, BitVector &);
+  bool computeAV(CongruenceClass *, BitVector &, BitVector &, BitVector &,
+                 BitVector &);
+  void dumpBitVectorByBB(Function &, const BitVector &, raw_ostream &,
+                         std::string);
+  SmallVector<BasicBlock *, 32> PostOrder;
+  DenseMap<unsigned, BasicBlock *> PostOrderToBlocks;
+  DenseMap<BasicBlock *, unsigned> BlocksToPostOrder;
+  SmallVector<BasicBlock *, 32> ReversePostOrder;
+  DenseMap<unsigned, BasicBlock *> ReversePostOrderToBlocks;
+  DenseMap<BasicBlock *, unsigned> BlocksToReversePostOrder;
 };
 
 char NewGVN::ID = 0;
@@ -529,7 +547,7 @@ PHIExpression *NewGVN::createPHIExpression(Instruction *I) {
   PHIExpression *E = new (ExpressionAllocator)
       PHIExpression(PN->getNumOperands(), I->getParent());
 
-  E->allocateArgs(ArgRecycler, ExpressionAllocator);
+  E->allocateOperands(ArgRecycler, ExpressionAllocator);
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
   bool UsedEquiv = false;
@@ -543,10 +561,10 @@ PHIExpression *NewGVN::createPHIExpression(Instruction *I) {
     if (I->getOperand(i) != I) {
       const BasicBlockEdge BBE(B, PhiBlock);
       auto Operand = lookupOperandLeader(I->getOperand(i), I, BBE);
-      E->args_push_back(Operand.first);
+      E->ops_push_back(Operand.first);
       UsedEquiv |= Operand.second;
     } else {
-      E->args_push_back(I->getOperand(i));
+      E->ops_push_back(I->getOperand(i));
     }
   }
   E->setUsedEquivalence(UsedEquiv);
@@ -562,14 +580,14 @@ bool NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
   bool UsedEquiv = false;
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
-  E->allocateArgs(ArgRecycler, ExpressionAllocator);
+  E->allocateOperands(ArgRecycler, ExpressionAllocator);
 
   for (auto &O : I->operands()) {
     auto Operand = lookupOperandLeader(O, I, B);
     UsedEquiv |= Operand.second;
     if (!isa<Constant>(Operand.first))
       AllConstant = false;
-    E->args_push_back(Operand.first);
+    E->ops_push_back(Operand.first);
   }
   E->setUsedEquivalence(UsedEquiv);
   return AllConstant;
@@ -583,15 +601,15 @@ const BasicExpression *NewGVN::createCmpExpression(unsigned Opcode, Type *Type,
                                                    const BasicBlock *B) {
   BasicExpression *E = new (ExpressionAllocator) BasicExpression(2);
   bool UsedEquiv = false;
-  E->allocateArgs(ArgRecycler, ExpressionAllocator);
+  E->allocateOperands(ArgRecycler, ExpressionAllocator);
   E->setType(Type);
   E->setOpcode((Opcode << 8) | Predicate);
   auto Result = lookupOperandLeader(LHS, nullptr, B);
   UsedEquiv |= Result.second;
-  E->args_push_back(Result.first);
+  E->ops_push_back(Result.first);
   Result = lookupOperandLeader(RHS, nullptr, B);
   UsedEquiv |= Result.second;
-  E->args_push_back(Result.first);
+  E->ops_push_back(Result.first);
   E->setUsedEquivalence(UsedEquiv);
   return E;
 }
@@ -603,7 +621,7 @@ const Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
 
   E->setType(T);
   E->setOpcode(Opcode);
-  E->allocateArgs(ArgRecycler, ExpressionAllocator);
+  E->allocateOperands(ArgRecycler, ExpressionAllocator);
   if (Instruction::isCommutative(Opcode)) {
     // Ensure that commutative instructions that only differ by a permutation
     // of their operands get the same value number by sorting the operand value
@@ -615,13 +633,14 @@ const Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
   bool UsedEquiv = false;
   auto BinaryLeader = lookupOperandLeader(Arg1, nullptr, B);
   UsedEquiv |= BinaryLeader.second;
-  E->args_push_back(BinaryLeader.first);
+  E->ops_push_back(BinaryLeader.first);
 
   BinaryLeader = lookupOperandLeader(Arg2, nullptr, B);
   UsedEquiv |= BinaryLeader.second;
-  E->args_push_back(BinaryLeader.first);
+  E->ops_push_back(BinaryLeader.first);
 
-  Value *V = SimplifyBinOp(Opcode, E->Args[0], E->Args[1], *DL, TLI, DT, AC);
+  Value *V = SimplifyBinOp(Opcode, E->getOperand(0), E->getOperand(1), *DL, TLI,
+                           DT, AC);
   if (const Expression *SimplifiedE = checkSimplificationResults(E, nullptr, V))
     return SimplifiedE;
   return E;
@@ -646,7 +665,7 @@ const Expression *NewGVN::checkSimplificationResults(Expression *E,
     assert(isa<BasicExpression>(E) &&
            "We should always have had a basic expression here");
 
-    cast<BasicExpression>(E)->deallocateArgs(ArgRecycler);
+    cast<BasicExpression>(E)->deallocateOperands(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
     return createConstantExpression(C, E->usedEquivalence());
   } else if (isa<Argument>(V) || isa<GlobalVariable>(V)) {
@@ -655,7 +674,7 @@ const Expression *NewGVN::checkSimplificationResults(Expression *E,
       DEBUG(dbgs() << "Simplified " << *I << " to "
                    << " variable " << *V << "\n");
 #endif
-    cast<BasicExpression>(E)->deallocateArgs(ArgRecycler);
+    cast<BasicExpression>(E)->deallocateOperands(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
     return createVariableExpression(V, E->usedEquivalence());
   }
@@ -671,7 +690,7 @@ const Expression *NewGVN::checkSimplificationResults(Expression *E,
     NumGVNOpsSimplified++;
     assert(isa<BasicExpression>(E) &&
            "We should always have had a basic expression here");
-    cast<BasicExpression>(E)->deallocateArgs(ArgRecycler);
+    cast<BasicExpression>(E)->deallocateOperands(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
     return CC->expression;
   }
@@ -692,8 +711,8 @@ const Expression *NewGVN::createExpression(Instruction *I,
     // numbers.  Since all commutative instructions have two operands it is more
     // efficient to sort by hand rather than using, say, std::sort.
     assert(I->getNumOperands() == 2 && "Unsupported commutative instruction!");
-    if (E->Args[0] > E->Args[1])
-      std::swap(E->Args[0], E->Args[1]);
+    if (E->getOperand(0) > E->getOperand(1))
+      E->swapOperands(0, 1);
   }
 
   // Perform simplificaiton
@@ -708,8 +727,8 @@ const Expression *NewGVN::createExpression(Instruction *I,
     // Sort the operand value numbers so x<y and y>x get the same value
     // number.
     CmpInst::Predicate Predicate = CI->getPredicate();
-    if (E->Args[0] > E->Args[1]) {
-      std::swap(E->Args[0], E->Args[1]);
+    if (E->getOperand(0) > E->getOperand(1)) {
+      E->swapOperands(0, 1);
       Predicate = CmpInst::getSwappedPredicate(Predicate);
     }
     E->setOpcode((CI->getOpcode() << 8) | Predicate);
@@ -721,26 +740,26 @@ const Expression *NewGVN::createExpression(Instruction *I,
 
     assert(I->getOperand(0)->getType() == I->getOperand(1)->getType() &&
            "Wrong types on cmp instruction");
-    if ((E->Args[0]->getType() == I->getOperand(0)->getType() &&
-         E->Args[1]->getType() == I->getOperand(1)->getType())) {
-      Value *V =
-          SimplifyCmpInst(Predicate, E->Args[0], E->Args[1], *DL, TLI, DT, AC);
+    if ((E->getOperand(0)->getType() == I->getOperand(0)->getType() &&
+         E->getOperand(1)->getType() == I->getOperand(1)->getType())) {
+      Value *V = SimplifyCmpInst(Predicate, E->getOperand(0), E->getOperand(1),
+                                 *DL, TLI, DT, AC);
       if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
         return SimplifiedE;
     }
 
   } else if (isa<SelectInst>(I)) {
-    if (isa<Constant>(E->Args[0]) ||
-        (E->Args[1]->getType() == I->getOperand(1)->getType() &&
-         E->Args[2]->getType() == I->getOperand(2)->getType())) {
-      Value *V = SimplifySelectInst(E->Args[0], E->Args[1], E->Args[2], *DL,
-                                    TLI, DT, AC);
+    if (isa<Constant>(E->getOperand(0)) ||
+        (E->getOperand(1)->getType() == I->getOperand(1)->getType() &&
+         E->getOperand(2)->getType() == I->getOperand(2)->getType())) {
+      Value *V = SimplifySelectInst(E->getOperand(0), E->getOperand(1),
+                                    E->getOperand(2), *DL, TLI, DT, AC);
       if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
         return SimplifiedE;
     }
   } else if (I->isBinaryOp()) {
-    Value *V =
-        SimplifyBinOp(E->getOpcode(), E->Args[0], E->Args[1], *DL, TLI, DT, AC);
+    Value *V = SimplifyBinOp(E->getOpcode(), E->getOperand(0), E->getOperand(1),
+                             *DL, TLI, DT, AC);
     if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
       return SimplifiedE;
   } else if (BitCastInst *BI = dyn_cast<BitCastInst>(I)) {
@@ -748,9 +767,9 @@ const Expression *NewGVN::createExpression(Instruction *I,
     if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
       return SimplifiedE;
   } else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
-    if (GEP->getPointerOperandType() == E->Args[0]->getType()) {
-      Value *V = SimplifyGEPInst(ArrayRef<Value *>(E->Args, E->args_size()),
-                                 *DL, TLI, DT, AC);
+    if (GEP->getPointerOperandType() == E->getOperand(0)->getType()) {
+      Value *V = SimplifyGEPInst(
+          ArrayRef<Value *>(E->ops_begin(), E->ops_end()), *DL, TLI, DT, AC);
       if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
         return SimplifiedE;
     }
@@ -763,7 +782,7 @@ const Expression *NewGVN::createExpression(Instruction *I,
     // simplify (IE there is no SimplifyZExt)
 
     SmallVector<Constant *, 8> C;
-    for (Value *Arg : E->arguments())
+    for (Value *Arg : E->operands())
       C.emplace_back(cast<Constant>(Arg));
 
     Value *V =
@@ -790,20 +809,20 @@ NewGVN::createAggregateValueExpression(Instruction *I, const BasicBlock *B) {
     AggregateValueExpression *E = new (ExpressionAllocator)
         AggregateValueExpression(I->getNumOperands(), II->getNumIndices());
     setBasicExpressionInfo(I, E, B);
-    E->allocateIntArgs(ExpressionAllocator);
+    E->allocateIntOperands(ExpressionAllocator);
 
     for (auto &Index : II->indices())
-      E->int_args_push_back(Index);
+      E->int_ops_push_back(Index);
     return E;
 
   } else if (ExtractValueInst *EI = dyn_cast<ExtractValueInst>(I)) {
     AggregateValueExpression *E = new (ExpressionAllocator)
         AggregateValueExpression(I->getNumOperands(), EI->getNumIndices());
     setBasicExpressionInfo(EI, E, B);
-    E->allocateIntArgs(ExpressionAllocator);
+    E->allocateIntOperands(ExpressionAllocator);
 
     for (auto &Index : EI->indices())
-      E->int_args_push_back(Index);
+      E->int_ops_push_back(Index);
     return E;
   }
   llvm_unreachable("Unhandled type of aggregate value operation");
@@ -903,12 +922,12 @@ const LoadExpression *NewGVN::createLoadExpression(LoadInst *LI,
                                                    const BasicBlock *B) {
   LoadExpression *E =
       new (ExpressionAllocator) LoadExpression(LI->getNumOperands(), LI, DA);
-  E->allocateArgs(ArgRecycler, ExpressionAllocator);
+  E->allocateOperands(ArgRecycler, ExpressionAllocator);
   E->setType(LI->getType());
   // Give store and loads same opcode so they value number together
   E->setOpcode(0);
   auto Operand = lookupOperandLeader(LI->getPointerOperand(), LI, B);
-  E->args_push_back(Operand.first);
+  E->ops_push_back(Operand.first);
   E->setAlignment(LI->getAlignment());
   E->setUsedEquivalence(Operand.second);
 
@@ -923,12 +942,12 @@ const CoercibleLoadExpression *NewGVN::createCoercibleLoadExpression(
     unsigned Offset, Value *SrcVal, const BasicBlock *B) {
   CoercibleLoadExpression *E = new (ExpressionAllocator)
       CoercibleLoadExpression(1, Original, DA, Offset, SrcVal);
-  E->allocateArgs(ArgRecycler, ExpressionAllocator);
+  E->allocateOperands(ArgRecycler, ExpressionAllocator);
   E->setType(LoadType);
   // Give store and loads same opcode so they value number together
   E->setOpcode(0);
   auto Operand = lookupOperandLeader(PtrOperand, Original, B);
-  E->args_push_back(Operand.first);
+  E->ops_push_back(Operand.first);
   E->setUsedEquivalence(Operand.second);
   // TODO: Value number heap versions. We may be able to discover
   // things alias analysis can't on it's own (IE that a store and a
@@ -941,12 +960,12 @@ const StoreExpression *NewGVN::createStoreExpression(StoreInst *SI,
                                                      const BasicBlock *B) {
   StoreExpression *E =
       new (ExpressionAllocator) StoreExpression(SI->getNumOperands(), SI, DA);
-  E->allocateArgs(ArgRecycler, ExpressionAllocator);
+  E->allocateOperands(ArgRecycler, ExpressionAllocator);
   E->setType(SI->getValueOperand()->getType());
   // Give store and loads same opcode so they value number together
   E->setOpcode(0);
   auto Operand = lookupOperandLeader(SI->getPointerOperand(), SI, B);
-  E->args_push_back(Operand.first);
+  E->ops_push_back(Operand.first);
   E->setUsedEquivalence(Operand.second);
   // TODO: Value number heap versions. We may be able to discover
   // things alias analysis can't on it's own (IE that a store and a
@@ -1270,17 +1289,17 @@ const Expression *NewGVN::performSymbolicCallEvaluation(Instruction *I,
 const Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
                                                        const BasicBlock *B) {
   PHIExpression *E = cast<PHIExpression>(createPHIExpression(I));
-  if (E->args_empty()) {
+  if (E->ops_empty()) {
     DEBUG(dbgs() << "Simplified PHI node " << *I << " to undef"
                  << "\n");
-    E->deallocateArgs(ArgRecycler);
+    E->deallocateOperands(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
     return createConstantExpression(UndefValue::get(I->getType()), false);
   }
 
-  Value *AllSameValue = E->Args[0];
+  Value *AllSameValue = E->getOperand(0);
 
-  for (const Value *Arg : E->arguments())
+  for (const Value *Arg : E->operands())
     if (Arg != AllSameValue) {
       AllSameValue = NULL;
       break;
@@ -1304,7 +1323,7 @@ const Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
     NumGVNPhisAllSame++;
     DEBUG(dbgs() << "Simplified PHI node " << *I << " to " << *AllSameValue
                  << "\n");
-    E->deallocateArgs(ArgRecycler);
+    E->deallocateOperands(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
     if (Constant *C = dyn_cast<Constant>(AllSameValue))
       return createConstantExpression(C, E->usedEquivalence());
@@ -1957,6 +1976,7 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
 // this by doing a depth first search, and figuring out the min and the max of
 // the dominated instruction range.
 // On the way up, we cache the ranges for all the child blocks.
+// This is essentially an incremental DFS
 
 std::pair<unsigned, unsigned>
 NewGVN::calculateDominatedInstRange(const DomTreeNode *DTN) {
@@ -2073,7 +2093,7 @@ void NewGVN::cleanupTables() {
   ReachableEdges.clear();
   ProcessedCount.clear();
   ProcessedBlockCount.clear();
-  DFSBBMap.clear();
+  DFSDomMap.clear();
   InstrDFS.clear();
   InstructionsToErase.clear();
 
@@ -2236,7 +2256,8 @@ bool NewGVN::runOnFunction(Function &F) {
       if (CC == InitialClass || CC->dead)
         continue;
 
-      PREChanged |= performPREOnClass(CC);
+      //      PREChanged |= performPREOnClass(CC);
+      PREChanged |= performRealPRE(F, CC);
     }
   }
   PREValueForwarding.clear();
@@ -2340,7 +2361,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
     assert(BB || "Should have figured out a basic block for value");
     ValueDFS VD;
 
-    std::pair<int, int> DFSPair = DFSBBMap[BB];
+    std::pair<int, int> DFSPair = DFSDomMap[BB];
     assert(DFSPair.first != -1 && DFSPair.second != -1 && "Invalid DFS Pair");
     VD.DFSIn = DFSPair.first;
     VD.DFSOut = DFSPair.second;
@@ -2379,7 +2400,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
           IBlock = I->getParent();
           VD.LocalNum = InstrDFS[I];
         }
-        std::pair<int, int> DFSPair = DFSBBMap[IBlock];
+        std::pair<int, int> DFSPair = DFSDomMap[IBlock];
         VD.DFSIn = DFSPair.first;
         VD.DFSOut = DFSPair.second;
         VD.U = &U;
@@ -2396,7 +2417,7 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &Dense,
     // We should be using control regions to know where they are valid.
     if (D.EdgeOnly)
       continue;
-    std::pair<int, int> &DFSPair = DFSBBMap[D.Edge.getEnd()];
+    std::pair<int, int> &DFSPair = DFSDomMap[D.Edge.getEnd()];
     assert(DFSPair.first != -1 && DFSPair.second != -1 && "Invalid DFS Pair");
     ValueDFS VD;
     VD.DFSIn = DFSPair.first;
@@ -2913,13 +2934,14 @@ bool NewGVN::eliminateInstructions(Function &F) {
 
   bool AnythingReplaced = false;
   unsigned DFSNum = 0;
+
   // Since we are going to walk the domtree anyway, and we can't guarantee the
   // DFS numbers are updated, we compute some ourselves.
   SmallVector<std::pair<const DomTreeNode *, DomTreeNode::const_iterator>, 32>
       WorkStack;
 
   WorkStack.emplace_back(DT->getRootNode(), DT->getRootNode()->begin());
-  DFSBBMap[DT->getRoot()].first = DFSNum++;
+  DFSDomMap[DT->getRoot()].first = DFSNum++;
 
   while (!WorkStack.empty()) {
     const DomTreeNode *Node = WorkStack.back().first;
@@ -2943,7 +2965,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
     // If we visited all of the children of this node, "recurse" back up the
     // stack setting the DFOutNum.
     if (ChildIt == Node->end()) {
-      DFSBBMap[BB].second = DFSNum++;
+      DFSDomMap[BB].second = DFSNum++;
       WorkStack.pop_back();
     } else {
       // Otherwise, recursively visit this child.
@@ -2951,7 +2973,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
       ++WorkStack.back().second;
 
       WorkStack.emplace_back(Child, Child->begin());
-      DFSBBMap[Child->getBlock()].first = DFSNum++;
+      DFSDomMap[Child->getBlock()].first = DFSNum++;
     }
   }
 
@@ -3353,7 +3375,7 @@ Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
   if (V)
     return V;
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
-    LoadInst *LI = new LoadInst(LE->Args[0], "loadpre", false,
+    LoadInst *LI = new LoadInst(LE->getOperand(0), "loadpre", false,
                                 LE->getAlignment(), BB->getTerminator());
     // FIXME: Track alignment, etc
     const_cast<LoadExpression *>(LE)->setLoadInst(LI);
@@ -3364,7 +3386,7 @@ Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
     unsigned Opcode = BE->getOpcode();
     if (Instruction::isBinaryOp(Opcode)) {
       BinaryOperator *BO = BinaryOperator::Create(
-          Instruction::BinaryOps(Opcode), BE->Args[0], BE->Args[1],
+          Instruction::BinaryOps(Opcode), BE->getOperand(0), BE->getOperand(1),
           "binaryoppre", BB->getTerminator());
       // FIXME: Track NSW/NUW
       return BO;
@@ -3372,23 +3394,23 @@ Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
       // It wants the pointee type, which is complex, and not equivalent to
       // getType on the original GEP
       Type *PointeeType =
-          cast<SequentialType>(BE->Args[0]->getType()->getScalarType())
+          cast<SequentialType>(BE->getOperand(0)->getType()->getScalarType())
               ->getElementType();
       GetElementPtrInst *GEP = GetElementPtrInst::Create(
-          PointeeType, BE->Args[0],
-          makeArrayRef(BE->args_begin(), BE->args_end()).slice(1), "geppre",
+          PointeeType, BE->getOperand(0),
+          makeArrayRef(BE->ops_begin(), BE->ops_end()).slice(1), "geppre",
           BB->getTerminator());
       // FIXME: Track inbounds
       return GEP;
     } else if (((Opcode & 0xff00) >> 8) == Instruction::ICmp) {
       CmpInst::Predicate Pred = (CmpInst::Predicate)(Opcode & 0xff);
-      ICmpInst *Cmp = new ICmpInst(BB->getTerminator(), Pred, BE->Args[0],
-                                   BE->Args[1], "icmppre");
+      ICmpInst *Cmp = new ICmpInst(BB->getTerminator(), Pred, BE->getOperand(0),
+                                   BE->getOperand(1), "icmppre");
       return Cmp;
     } else if (((Opcode & 0xff00) >> 8) == Instruction::FCmp) {
       CmpInst::Predicate Pred = (CmpInst::Predicate)(Opcode & 0xff);
-      FCmpInst *Cmp = new FCmpInst(BB->getTerminator(), Pred, BE->Args[0],
-                                   BE->Args[1], "fcmppre");
+      FCmpInst *Cmp = new FCmpInst(BB->getTerminator(), Pred, BE->getOperand(0),
+                                   BE->getOperand(1), "fcmppre");
       return Cmp;
     } else
       llvm_unreachable("What!");
@@ -3770,7 +3792,7 @@ static Value *phiTranslateValue(Value *Incoming, const BasicBlock *Pred) {
 bool NewGVN::phiTranslateArguments(const BasicExpression *From,
                                    BasicExpression *To, const BasicBlock *Pred,
                                    const Value *MustDominate) {
-  for (auto &A : From->arguments()) {
+  for (auto &A : From->operands()) {
     Value *Arg = A;
     Value *Forwarded = PREValueForwarding.lookup(Arg);
     if (Forwarded)
@@ -3812,7 +3834,7 @@ bool NewGVN::phiTranslateArguments(const BasicExpression *From,
     Value *Leader = findPRELeader(Arg, Pred, MustDominate);
     if (Leader == nullptr)
       return false;
-    To->args_push_back(Leader);
+    To->ops_push_back(Leader);
   }
   return true;
 }
@@ -3827,8 +3849,8 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     if (!MA)
       return nullptr;
     LoadExpression *NLE =
-        new (ExpressionAllocator) LoadExpression(LE->args_size(), nullptr, MA);
-    NLE->allocateArgs(ArgRecycler, ExpressionAllocator);
+        new (ExpressionAllocator) LoadExpression(LE->ops_size(), nullptr, MA);
+    NLE->allocateOperands(ArgRecycler, ExpressionAllocator);
     NLE->setType(LE->getType());
     NLE->setOpcode(0);
     NLE->setAlignment(LE->getAlignment());
@@ -3838,19 +3860,19 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     AliasAnalysis::Location Loc;
     if (LI) {
       Loc = AA->getLocation(LI);
-      Loc = Loc.getWithNewPtr(NLE->Args[0]);
+      Loc = Loc.getWithNewPtr(NLE->getOperand(0));
     } else {
-      Loc.Ptr = NLE->Args[0];
+      Loc.Ptr = NLE->getOperand(0);
     }
     MA = MSSAWalker->getClobberingMemoryAccess(MA, Loc);
     NLE->setDefiningAccess(MA);
     ResultExpr = NLE;
   } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
     BasicExpression *NBE =
-        new (ExpressionAllocator) BasicExpression(BE->args_size());
+        new (ExpressionAllocator) BasicExpression(BE->ops_size());
     NBE->setType(BE->getType());
     NBE->setOpcode(BE->getOpcode());
-    NBE->allocateArgs(ArgRecycler, ExpressionAllocator);
+    NBE->allocateOperands(ArgRecycler, ExpressionAllocator);
     if (!phiTranslateArguments(BE, NBE, Pred, MustDominate))
       return nullptr;
     ResultExpr = NBE;
@@ -3866,14 +3888,14 @@ const Expression *NewGVN::trySimplifyPREExpression(const Expression *E,
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
     MemoryAccess *MA = LE->getDefiningAccess();
     if (isa<MemoryDef>(MA) && !MSSA->isLiveOnEntryDef(MA))
-      ResultExpr = performSymbolicLoadCoercion(LE->getType(), LE->Args[0],
+      ResultExpr = performSymbolicLoadCoercion(LE->getType(), LE->getOperand(0),
                                                LE->getLoadInst(),
                                                MA->getMemoryInst(), MA, B);
   } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
     unsigned Opcode = BE->getOpcode();
     if (Instruction::isBinaryOp(Opcode)) {
-      Value *V =
-          SimplifyBinOp(Opcode, BE->Args[0], BE->Args[1], *DL, TLI, DT, AC);
+      Value *V = SimplifyBinOp(Opcode, BE->getOperand(0), BE->getOperand(1),
+                               *DL, TLI, DT, AC);
       if (V) {
         if (Constant *C = dyn_cast<Constant>(V))
           ResultExpr = createConstantExpression(C, false);
@@ -3881,4 +3903,306 @@ const Expression *NewGVN::trySimplifyPREExpression(const Expression *E,
     }
   }
   return ResultExpr;
+}
+
+void NewGVN::dumpBitVectorByBB(Function &F, const BitVector &BV,
+                               raw_ostream &OS, std::string Name) {
+  OS << Name << "\n";
+  for (auto &B : F) {
+    B.printAsOperand(OS);
+    OS << ":" << BV.test(BlocksToReversePostOrder.lookup(&B)) << "\n";
+  }
+}
+
+bool NewGVN::computeAV(CongruenceClass *CC, BitVector &AVIN, BitVector &AVOUT,
+                       BitVector &COMP, BitVector &TRANSP) {
+  // FIXME: Handle equivalences
+  for (auto M : CC->members) {
+    if (Instruction *I = dyn_cast<Instruction>(M))
+      COMP.set(BlocksToReversePostOrder.lookup(I->getParent()));
+  }
+  SparseBitVector<128> First;
+  SparseBitVector<128> Second;
+  SparseBitVector<128> *Worklist = &First;
+  SparseBitVector<128> *Pending = &Second;
+
+  for (const auto &P : BlocksToReversePostOrder)
+    Pending->set(P.second);
+  while (!Pending->empty()) {
+    // Swap pending and worklist
+    SparseBitVector<128> *Temp = Worklist;
+    Worklist = Pending;
+    Pending = Temp;
+    for (unsigned i : *Worklist) {
+      BasicBlock *BB = ReversePostOrderToBlocks[i];
+      // Compute AVIN
+      bool Value = AVIN[i];
+      if (Value) {
+        if (PredCache.GetNumPreds(BB) == 0) {
+          AVIN[i] = false;
+        } else {
+          if (Value) {
+            for (BasicBlock **PI = PredCache.GetPreds(BB); *PI; ++PI) {
+              Value &= AVOUT[BlocksToReversePostOrder[*PI]];
+            }
+            AVIN[i] = Value;
+          }
+        }
+      }
+      // Compute AVOUT
+      bool OldValue = AVOUT[i];
+      bool NewValue = COMP[i] || (AVIN[i] && TRANSP[i]);
+      if (OldValue != NewValue) {
+        AVOUT[i] = NewValue;
+        for (auto S : successors(BB))
+          Pending->set(BlocksToReversePostOrder[S]);
+      }
+    }
+    Worklist->clear();
+  }
+  return true;
+}
+
+bool NewGVN::computeANT(CongruenceClass *CC, BitVector &ANTIN,
+                        BitVector &ANTOUT, BitVector &COMP, BitVector &TRANSP,
+                        BitVector &ANTLOC) {
+  // FIXME: Handle equivalences
+  for (auto M : CC->members) {
+    if (Instruction *I = dyn_cast<Instruction>(M)) {
+      ANTLOC.set(BlocksToReversePostOrder.lookup(I->getParent()));
+    }
+  }
+
+  SparseBitVector<128> First;
+  SparseBitVector<128> Second;
+  SparseBitVector<128> *Worklist = &First;
+  SparseBitVector<128> *Pending = &Second;
+
+  for (const auto &P : BlocksToPostOrder)
+    Pending->set(P.second);
+  while (!Pending->empty()) {
+    // Swap pending and worklist
+    SparseBitVector<128> *Temp = Worklist;
+    Worklist = Pending;
+    Pending = Temp;
+    for (unsigned i : *Worklist) {
+      BasicBlock *BB = PostOrderToBlocks[i];
+      // All bit vectors are kept in RPO
+      unsigned BBNum = BlocksToReversePostOrder[BB];
+      // Compute ANTOUT
+      bool Value = ANTOUT[BBNum];
+      if (Value) {
+        if (succ_empty(BB)) {
+          ANTOUT[BBNum] = false;
+        } else {
+          // FIXME: PHI Translate
+          for (auto S : successors(BB)) {
+            Value &= ANTIN[BlocksToReversePostOrder[S]];
+          }
+          ANTOUT[BBNum] = Value;
+        }
+      }
+      // Compute ANTIN
+      bool OldValue = ANTIN[BBNum];
+      bool NewValue = ANTLOC[BBNum] || (ANTOUT[BBNum] && TRANSP[BBNum]);
+      if (OldValue != NewValue) {
+        ANTIN[BBNum] = NewValue;
+        for (BasicBlock **PI = PredCache.GetPreds(BB); *PI; ++PI) {
+          Pending->set(BlocksToPostOrder[*PI]);
+        }
+      }
+    }
+    Worklist->clear();
+  }
+  return true;
+}
+
+bool NewGVN::computeSPAV(CongruenceClass *CC, BitVector &SPAVIN,
+                         BitVector &SPAVOUT, BitVector &SAFEIN,
+                         BitVector &SAFEOUT, BitVector &COMP,
+                         BitVector &TRANSP) {
+  SparseBitVector<128> First;
+  SparseBitVector<128> Second;
+  SparseBitVector<128> *Worklist = &First;
+  SparseBitVector<128> *Pending = &Second;
+
+  for (const auto &P : BlocksToReversePostOrder)
+    Pending->set(P.second);
+  while (!Pending->empty()) {
+    // Swap pending and worklist
+    SparseBitVector<128> *Temp = Worklist;
+    Worklist = Pending;
+    Pending = Temp;
+    for (unsigned i : *Worklist) {
+      BasicBlock *BB = ReversePostOrderToBlocks[i];
+      // Compute SPAVIN
+      bool Value = SPAVIN[i];
+      if (PredCache.GetNumPreds(BB) == 0 || !SAFEIN[i]) {
+        SPAVIN[i] = false;
+      } else {
+        for (BasicBlock **PI = PredCache.GetPreds(BB); *PI; ++PI) {
+          Value |= SPAVOUT[BlocksToReversePostOrder[*PI]];
+        }
+        SPAVIN[i] = Value;
+      }
+      // Compute SPAVOUT
+      bool OldValue = SPAVOUT[i];
+      bool NewValue =
+          !SAFEOUT[i] ? false : (COMP[i] || (SPAVIN[i] && TRANSP[i]));
+      if (OldValue != NewValue) {
+        SPAVOUT[i] = NewValue;
+        for (auto S : successors(BB))
+          Pending->set(BlocksToReversePostOrder[S]);
+      }
+    }
+    Worklist->clear();
+  }
+  return true;
+}
+
+bool NewGVN::computeSPANT(CongruenceClass *CC, BitVector &SPANTIN,
+                          BitVector &SPANTOUT, BitVector &SAFEIN,
+                          BitVector &SAFEOUT, BitVector &ANTLOC,
+                          BitVector &TRANSP) {
+  SparseBitVector<128> First;
+  SparseBitVector<128> Second;
+  SparseBitVector<128> *Worklist = &First;
+  SparseBitVector<128> *Pending = &Second;
+
+  for (const auto &P : BlocksToPostOrder)
+    Pending->set(P.second);
+
+  while (!Pending->empty()) {
+    // Swap pending and worklist
+    SparseBitVector<128> *Temp = Worklist;
+    Worklist = Pending;
+    Pending = Temp;
+    for (unsigned i : *Worklist) {
+      BasicBlock *BB = PostOrderToBlocks[i];
+      // All bit vectors are kept in RPO
+      unsigned BBNum = BlocksToReversePostOrder[BB];
+      // Compute SPANTOUT
+      bool Value = SPANTOUT[BBNum];
+      // False if not safein
+      if (succ_empty(BB) || !SAFEIN[BBNum]) {
+        SPANTOUT[BBNum] = false;
+      } else {
+        // FIXME: PHI Translate
+        for (auto S : successors(BB)) {
+          Value |= SPANTIN[BlocksToReversePostOrder[S]];
+        }
+        SPANTOUT[BBNum] = Value;
+      }
+      // Compute SPANTIN
+      bool OldValue = SPANTIN[BBNum];
+      bool NewValue =
+          !SAFEIN[BBNum] ? false : (ANTLOC[BBNum] ||
+                                    (SPANTOUT[BBNum] && TRANSP[BBNum]));
+      if (OldValue != NewValue) {
+        SPANTIN[BBNum] = NewValue;
+        for (BasicBlock **PI = PredCache.GetPreds(BB); *PI; ++PI) {
+          Pending->set(BlocksToPostOrder[*PI]);
+        }
+      }
+    }
+    Worklist->clear();
+  }
+  return true;
+}
+
+bool NewGVN::performRealPRE(Function &F, CongruenceClass *CC) {
+  if (CC->id != 11)
+    return false;
+
+  BitVector COMP(F.size());
+  BitVector TRANSP(F.size(), true);
+  BitVector AVIN(F.size(), true);
+  BitVector AVOUT(F.size(), true);
+  BitVector ANTIN(F.size(), true);
+  BitVector ANTOUT(F.size(), true);
+  BitVector SPAVIN(F.size());
+  BitVector SPAVOUT(F.size());
+  BitVector ANTLOC(F.size());
+
+  BitVector SPANTIN(F.size());
+  BitVector SPANTOUT(F.size());
+
+  PostOrder.clear();
+  BlocksToPostOrder.clear();
+  PostOrderToBlocks.clear();
+  ReversePostOrder.clear();
+  BlocksToReversePostOrder.clear();
+  ReversePostOrderToBlocks.clear();
+  for (auto I = po_begin(&F.getEntryBlock()), E = po_end(&F.getEntryBlock());
+       I != E; ++I) {
+    BlocksToPostOrder[*I] = PostOrder.size();
+    PostOrderToBlocks[PostOrder.size()] = *I;
+    PostOrder.push_back(*I);
+  }
+  for (int i = PostOrder.size() - 1, e = 0; i >= e; --i) {
+    BasicBlock *BB = PostOrder[i];
+    ReversePostOrderToBlocks[ReversePostOrder.size()] = BB;
+    BlocksToReversePostOrder[BB] = ReversePostOrder.size();
+    ReversePostOrder.push_back(BB);
+  }
+  if (CC->id == 11) {
+    COMP.set(0);
+    ANTLOC.set(0);
+    COMP.set(2);
+    ANTLOC.set(2);
+    COMP.set(3);
+    ANTLOC.set(3);
+  }
+
+  computeAV(CC, AVIN, AVOUT, COMP, TRANSP);
+  computeANT(CC, ANTIN, ANTOUT, COMP, TRANSP, ANTLOC);
+  BitVector SAFEIN(AVIN);
+  BitVector SAFEOUT(AVOUT);
+  SAFEIN |= ANTIN;
+  SAFEOUT |= ANTOUT;
+
+  computeSPAV(CC, SPAVIN, SPAVOUT, SAFEIN, SAFEOUT, COMP, TRANSP);
+  computeSPANT(CC, SPANTIN, SPANTOUT, SAFEIN, SAFEOUT, ANTLOC, TRANSP);
+
+  BitVector INSERT(F.size());
+  SmallVector<std::pair<BasicBlock *, BasicBlock *>, 8> EDGEINSERT;
+  BitVector REPLACEFIRST(F.size());
+  BitVector REPLACELAST(F.size());
+  DEBUG(dbgs() << "Congruence class ID " << CC->id << "\n");
+  for (auto &B : F) {
+    unsigned i = BlocksToReversePostOrder[&B];
+    INSERT[i] = COMP[i] && SPANTOUT[i] && (!TRANSP[i] || !SPAVIN[i]);
+    REPLACEFIRST[i] = ANTLOC[i] && (SPAVIN[i] || (TRANSP[i] && SPANTOUT[i]));
+    REPLACELAST[i] = COMP[i] && (SPANTOUT[i] || (TRANSP[i] && SPAVIN[i]));
+    for (auto S : successors(&B)) {
+      unsigned j = BlocksToReversePostOrder[S];
+      bool EdgeResult = !SPAVOUT[i] && SPAVIN[j] && SPANTIN[j];
+      if (EdgeResult) {
+        DEBUG(dbgs() << "Have an edge insertion on {");
+        DEBUG(B.printAsOperand(dbgs()));
+        DEBUG(dbgs() << ",");
+        DEBUG(S->printAsOperand(dbgs()));
+        DEBUG(dbgs() << "}\n");
+        EDGEINSERT.emplace_back(&B, S);
+      }
+    }
+  }
+  DEBUG(dumpBitVectorByBB(F, COMP, dbgs(), "COMP"));
+  DEBUG(dumpBitVectorByBB(F, ANTLOC, dbgs(), "ANTLOC"));
+  DEBUG(dumpBitVectorByBB(F, ANTLOC, dbgs(), "TRANSP"));
+  DEBUG(dumpBitVectorByBB(F, ANTIN, dbgs(), "ANTIN"));
+  DEBUG(dumpBitVectorByBB(F, ANTOUT, dbgs(), "ANTOUT"));
+  DEBUG(dumpBitVectorByBB(F, AVIN, dbgs(), "AVIN"));
+  DEBUG(dumpBitVectorByBB(F, AVOUT, dbgs(), "AVOUT"));
+  DEBUG(dumpBitVectorByBB(F, SAFEIN, dbgs(), "SAFEIN"));
+  DEBUG(dumpBitVectorByBB(F, SAFEOUT, dbgs(), "SAFEOUT"));
+  DEBUG(dumpBitVectorByBB(F, SPAVIN, dbgs(), "SPAVIN"));
+  DEBUG(dumpBitVectorByBB(F, SPAVOUT, dbgs(), "SPAVOUT"));
+  DEBUG(dumpBitVectorByBB(F, SPANTIN, dbgs(), "SPANTIN"));
+  DEBUG(dumpBitVectorByBB(F, SPANTOUT, dbgs(), "SPANTOUT"));
+  DEBUG(dumpBitVectorByBB(F, INSERT, dbgs(), "INSERT"));
+  DEBUG(dumpBitVectorByBB(F, REPLACEFIRST, dbgs(), "REPLACEFIRST"));
+  DEBUG(dumpBitVectorByBB(F, REPLACELAST, dbgs(), "REPLACELAST"));
+
+  return false;
 }
