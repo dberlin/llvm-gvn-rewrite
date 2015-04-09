@@ -113,34 +113,52 @@ private:
   typedef RecyclerType::Capacity RecyclerCapacity;
 
 protected:
-  unsigned int MaxArgs;
-  unsigned int NumArgs;
+  Value **Operands;
+  unsigned int MaxOperands;
+  unsigned int NumOperands;
   Type *ValueType;
 
 public:
-  Value **Args;
-  typedef Value **arg_iterator;
-  typedef Value *const *const_arg_iterator;
+  typedef Value **op_iterator;
+  typedef Value *const *const_ops_iterator;
 
-  inline arg_iterator args_begin() { return Args; }
-  inline arg_iterator args_end() { return Args + NumArgs; }
-  inline const_arg_iterator args_begin() const { return Args; }
-  inline const_arg_iterator args_end() const { return Args + NumArgs; }
-  inline iterator_range<arg_iterator> arguments() {
-    return iterator_range<arg_iterator>(args_begin(), args_end());
+  /// \brief Swap two operands. Used during GVN to put commutative operands in
+  /// order.
+  inline void swapOperands(unsigned First, unsigned Second) {
+    std::swap(Operands[First], Operands[Second]);
   }
 
-  inline iterator_range<const_arg_iterator> arguments() const {
-    return iterator_range<const_arg_iterator>(args_begin(), args_end());
+  inline Value *getOperand(unsigned N) const {
+    assert(Operands && "Operands not allocated");
+    assert(N < NumOperands && "Operand out of range");
+    return Operands[N];
   }
 
-  inline unsigned int args_size() const { return NumArgs; }
-  inline void args_push_back(Value *Arg) {
-    assert(NumArgs < MaxArgs && "Tried to add too many args");
-    assert(Args && "Args not allocated before pushing");
-    Args[NumArgs++] = Arg;
+  inline void setOperand(unsigned N, Value *V) {
+    assert(Operands && "Operands not allocated before setting");
+    assert(N < NumOperands && "Operand out of range");
+    Operands[N] = V;
   }
-  inline bool args_empty() const { return args_size() == 0; }
+
+  inline op_iterator ops_begin() { return Operands; }
+  inline op_iterator ops_end() { return Operands + NumOperands; }
+  inline const_ops_iterator ops_begin() const { return Operands; }
+  inline const_ops_iterator ops_end() const { return Operands + NumOperands; }
+  inline iterator_range<op_iterator> operands() {
+    return iterator_range<op_iterator>(ops_begin(), ops_end());
+  }
+
+  inline iterator_range<const_ops_iterator> operands() const {
+    return iterator_range<const_ops_iterator>(ops_begin(), ops_end());
+  }
+
+  inline unsigned int ops_size() const { return NumOperands; }
+  inline void ops_push_back(Value *Arg) {
+    assert(NumOperands < MaxOperands && "Tried to add too many operands");
+    assert(Operands && "Operandss not allocated before pushing");
+    Operands[NumOperands++] = Arg;
+  }
+  inline bool ops_empty() const { return ops_size() == 0; }
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const BasicExpression *) { return true; }
@@ -149,23 +167,23 @@ public:
     return et > ExpressionTypeBasicStart && et < ExpressionTypeBasicEnd;
   }
 
-  void allocateArgs(RecyclerType &Recycler, BumpPtrAllocator &Allocator) {
-    assert(!Args && "Args already allocated");
-    Args = Recycler.allocate(RecyclerCapacity::get(MaxArgs), Allocator);
+  void allocateOperands(RecyclerType &Recycler, BumpPtrAllocator &Allocator) {
+    assert(!Operands && "Operands already allocated");
+    Operands = Recycler.allocate(RecyclerCapacity::get(MaxOperands), Allocator);
   }
-  void deallocateArgs(RecyclerType &Recycler) {
-    Recycler.deallocate(RecyclerCapacity::get(MaxArgs), Args);
+  void deallocateOperands(RecyclerType &Recycler) {
+    Recycler.deallocate(RecyclerCapacity::get(MaxOperands), Operands);
   }
 
   void setType(Type *T) { ValueType = T; }
 
   Type *getType() const { return ValueType; }
 
-  BasicExpression(unsigned int NumArgs)
-      : BasicExpression(NumArgs, ExpressionTypeBasic) {}
-  BasicExpression(unsigned int NumArgs, ExpressionType ET)
-      : Expression(ET), MaxArgs(NumArgs), NumArgs(0), ValueType(nullptr),
-        Args(nullptr) {}
+  BasicExpression(unsigned int NumOperands)
+      : BasicExpression(NumOperands, ExpressionTypeBasic) {}
+  BasicExpression(unsigned int NumOperands, ExpressionType ET)
+      : Expression(ET), Operands(nullptr), MaxOperands(NumOperands),
+        NumOperands(0), ValueType(nullptr) {}
 
   virtual ~BasicExpression() {}
 
@@ -173,9 +191,9 @@ public:
     const BasicExpression &OE = cast<BasicExpression>(Other);
     if (ValueType != OE.ValueType)
       return false;
-    if (NumArgs != OE.NumArgs)
+    if (NumOperands != OE.NumOperands)
       return false;
-    if (!std::equal(args_begin(), args_end(), OE.args_begin()))
+    if (!std::equal(ops_begin(), ops_end(), OE.ops_begin()))
       return false;
     return true;
   }
@@ -184,16 +202,16 @@ public:
       OS << "ExpressionTypeBasic, ";
 
     this->Expression::printInternal(OS, false);
-    OS << "args = {";
-    for (unsigned i = 0, e = args_size(); i != e; ++i) {
-      OS << "[" << i << "] = " << Args[i] << "  ";
+    OS << "operands = {";
+    for (unsigned i = 0, e = ops_size(); i != e; ++i) {
+      OS << "[" << i << "] = " << Operands[i] << "  ";
     }
     OS << "} ";
   }
 
   virtual hash_code getHashValue() const {
     return hash_combine(EType, Opcode, ValueType,
-                        hash_combine_range(args_begin(), args_end()));
+                        hash_combine_range(ops_begin(), ops_end()));
   }
 };
 class CallExpression final : public BasicExpression {
@@ -212,8 +230,8 @@ public:
   static inline bool classof(const Expression *EB) {
     return EB->getExpressionType() == ExpressionTypeCall;
   }
-  CallExpression(unsigned int NumArgs, CallInst *C, MemoryAccess *DA)
-      : BasicExpression(NumArgs, ExpressionTypeCall), Call(C),
+  CallExpression(unsigned int NumOperands, CallInst *C, MemoryAccess *DA)
+      : BasicExpression(NumOperands, ExpressionTypeCall), Call(C),
         DefiningAccess(DA) {}
 
   virtual ~CallExpression() {}
@@ -249,9 +267,9 @@ protected:
   MemoryAccess *DefiningAccess;
   unsigned Alignment;
 
-  LoadExpression(enum ExpressionType EType, unsigned int NumArgs, LoadInst *L,
-                 MemoryAccess *DA)
-      : BasicExpression(NumArgs, EType), Load(L), DefiningAccess(DA) {
+  LoadExpression(enum ExpressionType EType, unsigned int NumOperands,
+                 LoadInst *L, MemoryAccess *DA)
+      : BasicExpression(NumOperands, EType), Load(L), DefiningAccess(DA) {
     Alignment = L ? L->getAlignment() : 0;
   }
 
@@ -271,8 +289,8 @@ public:
            EB->getExpressionType() <= ExpressionTypeCoercibleLoad;
   }
 
-  LoadExpression(unsigned int NumArgs, LoadInst *L, MemoryAccess *DA)
-      : LoadExpression(ExpressionTypeLoad, NumArgs, L, DA) {}
+  LoadExpression(unsigned int NumOperands, LoadInst *L, MemoryAccess *DA)
+      : LoadExpression(ExpressionTypeLoad, NumOperands, L, DA) {}
 
   virtual ~LoadExpression() {}
 
@@ -280,7 +298,7 @@ public:
 
   virtual hash_code getHashValue() const {
     return hash_combine(Opcode, ValueType, DefiningAccess,
-                        hash_combine_range(args_begin(), args_end()));
+                        hash_combine_range(ops_begin(), ops_end()));
   }
 
   virtual void printInternal(raw_ostream &OS, bool printEType) const {
@@ -314,10 +332,10 @@ public:
     return EB->getExpressionType() == ExpressionTypeCoercibleLoad;
   }
 
-  CoercibleLoadExpression(unsigned int NumArgs, LoadInst *L, MemoryAccess *DA,
-                          unsigned int O, Value *S)
-      : LoadExpression(ExpressionTypeCoercibleLoad, NumArgs, L, DA), Offset(O),
-        Src(S) {}
+  CoercibleLoadExpression(unsigned int NumOperands, LoadInst *L,
+                          MemoryAccess *DA, unsigned int O, Value *S)
+      : LoadExpression(ExpressionTypeCoercibleLoad, NumOperands, L, DA),
+        Offset(O), Src(S) {}
 
   virtual ~CoercibleLoadExpression() {}
   virtual bool equals(const Expression &Other) const {
@@ -366,8 +384,8 @@ public:
   static inline bool classof(const Expression *EB) {
     return EB->getExpressionType() == ExpressionTypeStore;
   }
-  StoreExpression(unsigned int NumArgs, StoreInst *S, MemoryAccess *DA)
-      : BasicExpression(NumArgs, ExpressionTypeStore), Store(S),
+  StoreExpression(unsigned int NumOperands, StoreInst *S, MemoryAccess *DA)
+      : BasicExpression(NumOperands, ExpressionTypeStore), Store(S),
         DefiningAccess(DA) {}
 
   virtual ~StoreExpression() {}
@@ -383,7 +401,7 @@ public:
 
   virtual hash_code getHashValue() const {
     return hash_combine(Opcode, ValueType, DefiningAccess,
-                        hash_combine_range(args_begin(), args_end()));
+                        hash_combine_range(ops_begin(), ops_end()));
   }
 };
 
@@ -393,26 +411,27 @@ private:
   AggregateValueExpression(const AggregateValueExpression &) = delete;
   AggregateValueExpression() = delete;
 
-  unsigned int MaxIntArgs;
-  unsigned int NumIntArgs;
-  unsigned int *IntArgs;
+  unsigned int MaxIntOperands;
+  unsigned int NumIntOperands;
+  unsigned int *IntOperands;
 
 public:
   typedef unsigned int *int_arg_iterator;
   typedef const unsigned int *const_int_arg_iterator;
 
-  inline int_arg_iterator int_args_begin() { return IntArgs; }
-  inline int_arg_iterator int_args_end() { return IntArgs + NumIntArgs; }
-  inline const_int_arg_iterator int_args_begin() const { return IntArgs; }
-  inline const_int_arg_iterator int_args_end() const {
-    return IntArgs + NumIntArgs;
+  inline int_arg_iterator int_ops_begin() { return IntOperands; }
+  inline int_arg_iterator int_ops_end() { return IntOperands + NumIntOperands; }
+  inline const_int_arg_iterator int_ops_begin() const { return IntOperands; }
+  inline const_int_arg_iterator int_ops_end() const {
+    return IntOperands + NumIntOperands;
   }
-  inline unsigned int int_args_size() const { return NumIntArgs; }
-  inline bool int_args_empty() const { return NumIntArgs == 0; }
-  inline void int_args_push_back(unsigned int IntArg) {
-    assert(NumIntArgs < MaxIntArgs && "Tried to add too many int args");
-    assert(IntArgs && "Args not allocated before pushing");
-    IntArgs[NumIntArgs++] = IntArg;
+  inline unsigned int int_ops_size() const { return NumIntOperands; }
+  inline bool int_ops_empty() const { return NumIntOperands == 0; }
+  inline void int_ops_push_back(unsigned int IntOperand) {
+    assert(NumIntOperands < MaxIntOperands &&
+           "Tried to add too many int operands");
+    assert(IntOperands && "Operands not allocated before pushing");
+    IntOperands[NumIntOperands++] = IntOperand;
   }
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -421,23 +440,25 @@ public:
     return EB->getExpressionType() == ExpressionTypeAggregateValue;
   }
 
-  AggregateValueExpression(unsigned int NumArgs, unsigned int NumIntArgs)
-      : BasicExpression(NumArgs, ExpressionTypeAggregateValue),
-        MaxIntArgs(NumIntArgs), NumIntArgs(0), IntArgs(nullptr) {}
+  AggregateValueExpression(unsigned int NumOperands,
+                           unsigned int NumIntOperands)
+      : BasicExpression(NumOperands, ExpressionTypeAggregateValue),
+        MaxIntOperands(NumIntOperands), NumIntOperands(0),
+        IntOperands(nullptr) {}
 
   virtual ~AggregateValueExpression() {}
-  virtual void allocateIntArgs(BumpPtrAllocator &Allocator) {
-    assert(!IntArgs && "Args already allocated");
-    IntArgs = Allocator.Allocate<unsigned int>(MaxIntArgs);
+  virtual void allocateIntOperands(BumpPtrAllocator &Allocator) {
+    assert(!IntOperands && "Operands already allocated");
+    IntOperands = Allocator.Allocate<unsigned int>(MaxIntOperands);
   }
 
   virtual bool equals(const Expression &Other) const {
     if (!this->BasicExpression::equals(Other))
       return false;
     const AggregateValueExpression &OE = cast<AggregateValueExpression>(Other);
-    if (NumIntArgs != OE.NumIntArgs)
+    if (NumIntOperands != OE.NumIntOperands)
       return false;
-    if (!std::equal(int_args_begin(), int_args_end(), OE.int_args_begin()))
+    if (!std::equal(int_ops_begin(), int_ops_end(), OE.int_ops_begin()))
       return false;
 
     return true;
@@ -445,15 +466,15 @@ public:
 
   virtual hash_code getHashValue() const {
     return hash_combine(this->BasicExpression::getHashValue(),
-                        hash_combine_range(int_args_begin(), int_args_end()));
+                        hash_combine_range(int_ops_begin(), int_ops_end()));
   }
   virtual void printInternal(raw_ostream &OS, bool printEType) const {
     if (printEType)
       OS << "ExpressionTypeAggregateValue, ";
     this->BasicExpression::printInternal(OS, false);
-    OS << ", intargs = {";
-    for (unsigned i = 0, e = int_args_size(); i != e; ++i) {
-      OS << "[" << i << "] = " << IntArgs[i] << "  ";
+    OS << ", intoperands = {";
+    for (unsigned i = 0, e = int_ops_size(); i != e; ++i) {
+      OS << "[" << i << "] = " << IntOperands[i] << "  ";
     }
     OS << "}";
   }
@@ -479,8 +500,8 @@ public:
     return true;
   }
 
-  PHIExpression(unsigned int NumArgs, BasicBlock *B)
-      : BasicExpression(NumArgs, ExpressionTypePhi), BB(B) {}
+  PHIExpression(unsigned int NumOperands, BasicBlock *B)
+      : BasicExpression(NumOperands, ExpressionTypePhi), BB(B) {}
 
   virtual ~PHIExpression() {}
 
