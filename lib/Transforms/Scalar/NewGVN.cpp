@@ -510,6 +510,7 @@ char NewGVN::ID = 0;
 // createGVNPass - The public interface to this file...
 FunctionPass *llvm::createNewGVNPass() { return new NewGVN(); }
 
+#ifndef NDEBUG
 static std::string getBlockName(const BasicBlock *B) {
   return DOTGraphTraits<const Function *>::getSimpleNodeLabel(B, NULL);
 }
@@ -517,6 +518,7 @@ static std::string getBlockName(const BasicBlockEdge &B) {
   return DOTGraphTraits<const Function *>::getSimpleNodeLabel(B.getEnd(), NULL);
 }
 
+#endif
 INITIALIZE_PASS_BEGIN(NewGVN, "newgvn", "Global Value Numbering", false, false)
 INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
 INITIALIZE_PASS_DEPENDENCY(MemorySSALazy)
@@ -2127,8 +2129,9 @@ bool NewGVN::runOnFunction(Function &F) {
   // Count number of instructions for sizing of hash tables, and come
   // up with a global dfs numbering for instructions
 
-  for (auto DTN : depth_first(DT->getRootNode())) {
-    BasicBlock *B = DTN->getBlock();
+  auto DFI = df_begin(DT->getRootNode());
+  for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI){
+    BasicBlock *B = DFI->getBlock();
     const auto &BlockRange = assignDFSNumbers(B, ICount);
     BlockInstRange.insert({B, BlockRange});
     ICount += BlockRange.second - BlockRange.first;
@@ -2139,7 +2142,7 @@ bool NewGVN::runOnFunction(Function &F) {
 
   for (auto &B : F) {
     // Assign numbers to unreachable blocks
-    if (&B != &F.getEntryBlock() && pred_empty(&B)) {
+    if (!DFI.nodeVisited(DT->getNode(&B))) {
       const auto &BlockRange = assignDFSNumbers(&B, ICount);
       BlockInstRange.insert({&B, BlockRange});
       ICount += BlockRange.second - BlockRange.first;
@@ -2184,7 +2187,7 @@ bool NewGVN::runOnFunction(Function &F) {
                        << " because it is unreachable\n");
           continue;
         }
-        // #ifndef NDEBUG
+#ifndef NDEBUG
         if (ProcessedBlockCount.count(CurrBlock) == 0) {
           ProcessedBlockCount.insert({CurrBlock, 1});
         } else {
@@ -2194,7 +2197,7 @@ bool NewGVN::runOnFunction(Function &F) {
           if (ProcessedBlockCount[CurrBlock] >= 100)
             report_fatal_error("Processed block too many times");
         }
-        // #endif
+#endif
       }
       TouchedInstructions.reset(InstrNum);
 
