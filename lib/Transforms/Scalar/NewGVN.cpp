@@ -206,12 +206,10 @@ class NewGVN : public FunctionPass {
   SmallDenseMap<User *, std::pair<unsigned, Value *>> SingleUserEquivalences;
 
   // Expression to class mapping
-  typedef DenseMap<const Expression *, CongruenceClass *,
-                   ComparingExpressionInfo> ExpressionClassMap;
+  typedef DenseMap<const Expression *, CongruenceClass * /*,
+                                                          ComparingExpressionInfo*/>
+      ExpressionClassMap;
   ExpressionClassMap ExpressionToClass;
-  // We separate out the memory expressions to keep hashtable resizes from
-  // occurring as often.
-  ExpressionClassMap MemoryExpressionToClass;
 
   // Uniquifying expressions
   DenseSet<const Expression *, ComparingExpressionInfo> UniquedExpressions;
@@ -294,8 +292,8 @@ private:
   const Expression *createVariableOrConstant(Value *V, const BasicBlock *B);
   const StoreExpression *createStoreExpression(StoreInst *, MemoryAccess *,
                                                const BasicBlock *);
-  const LoadExpression *createLoadExpression(LoadInst *, MemoryAccess *,
-                                             const BasicBlock *);
+  LoadExpression *createLoadExpression(Type *, Value *, LoadInst *,
+                                       MemoryAccess *, const BasicBlock *);
   const CoercibleLoadExpression *
   createCoercibleLoadExpression(Type *, Value *, LoadInst *, MemoryAccess *,
                                 unsigned, Value *, const BasicBlock *);
@@ -305,7 +303,7 @@ private:
   const AggregateValueExpression *
   createAggregateValueExpression(Instruction *, const BasicBlock *);
 
-  const Expression *uniquifyExpression(Expression *);
+  const Expression *uniquifyExpression(const Expression *);
   const BasicExpression *createCmpExpression(unsigned, Type *,
                                              CmpInst::Predicate, Value *,
                                              Value *, const BasicBlock *);
@@ -500,9 +498,13 @@ private:
   Value *constructSSAForSet(Instruction *,
                             SmallVectorImpl<AvailableValueInBlock> &);
   void valueNumberNewInstruction(Value *);
+  void valueNumberNewInstructionToValue(Value *, Value *);
   const Expression *trySimplifyPREExpression(const Expression *,
                                              const BasicBlock *);
   Value *regenerateExpression(const Expression *, BasicBlock *);
+  void topoVisitCongruenceClass(CongruenceClass *,
+                                SmallDenseMap<CongruenceClass *, unsigned> &,
+                                SmallPtrSetImpl<CongruenceClass *> &);
 };
 
 char NewGVN::ID = 0;
@@ -751,13 +753,11 @@ const Expression *NewGVN::createExpression(Instruction *I,
     Value *V = SimplifyInstruction(BI, *DL, TLI, DT, AC);
     if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
       return SimplifiedE;
-  } else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
-    if (GEP->getPointerOperandType() == E->getOperand(0)->getType()) {
-      Value *V = SimplifyGEPInst(
-          ArrayRef<Value *>(E->ops_begin(), E->ops_end()), *DL, TLI, DT, AC);
-      if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
-        return SimplifiedE;
-    }
+  } else if (isa<GetElementPtrInst>(I)) {
+    Value *V = SimplifyGEPInst(ArrayRef<Value *>(E->ops_begin(), E->ops_end()),
+                               *DL, TLI, DT, AC);
+    if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
+      return SimplifiedE;
   } else if (AllConstant) {
     // We don't bother trying to simplify unless all of the operands
     // were constant
@@ -780,7 +780,7 @@ const Expression *NewGVN::createExpression(Instruction *I,
   return E;
 }
 
-const Expression *NewGVN::uniquifyExpression(Expression *E) {
+const Expression *NewGVN::uniquifyExpression(const Expression *E) {
   auto P = UniquedExpressions.insert(E);
   if (!P.second) {
     return *(P.first);
@@ -902,18 +902,18 @@ std::pair<Value *, bool> NewGVN::lookupOperandLeader(Value *V, const User *U,
   return std::make_pair(V, false);
 }
 
-const LoadExpression *NewGVN::createLoadExpression(LoadInst *LI,
-                                                   MemoryAccess *DA,
-                                                   const BasicBlock *B) {
-  LoadExpression *E =
-      new (ExpressionAllocator) LoadExpression(LI->getNumOperands(), LI, DA);
+LoadExpression *NewGVN::createLoadExpression(Type *LoadType, Value *PointerOp,
+                                             LoadInst *LI, MemoryAccess *DA,
+                                             const BasicBlock *B) {
+  LoadExpression *E = new (ExpressionAllocator) LoadExpression(1, LI, DA);
   E->allocateOperands(ArgRecycler, ExpressionAllocator);
-  E->setType(LI->getType());
+  E->setType(LoadType);
   // Give store and loads same opcode so they value number together
   E->setOpcode(0);
-  auto Operand = lookupOperandLeader(LI->getPointerOperand(), LI, B);
+  auto Operand = lookupOperandLeader(PointerOp, LI, B);
   E->ops_push_back(Operand.first);
-  E->setAlignment(LI->getAlignment());
+  if (LI)
+    E->setAlignment(LI->getAlignment());
   E->setUsedEquivalence(Operand.second);
 
   // TODO: Value number heap versions. We may be able to discover
@@ -1125,11 +1125,7 @@ const Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
 const Expression *NewGVN::performSymbolicLoadCoercion(
     Type *LoadType, Value *LoadPtr, LoadInst *LI, Instruction *DepInst,
     MemoryAccess *DefiningAccess, const BasicBlock *B) {
-  // // We can't coerce a non-simple load and replace it's uses with anything
-  // else
-  // // in most cases, though non-simple loads can be sources for coercion.
-  // if (!LI->isSimple())
-  //   return nullptr;
+  assert(!LI || LI->isSimple() && "Not a simple load");
 
   if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
     Value *LoadAddressLeader = lookupOperandLeader(LoadPtr, LI, B).first;
@@ -1251,7 +1247,8 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
     }
   }
 
-  const Expression *E = createLoadExpression(LI, DefiningAccess, B);
+  const Expression *E = createLoadExpression(
+      LI->getType(), LI->getPointerOperand(), LI, DefiningAccess, B);
   return E;
 }
 
@@ -1436,7 +1433,7 @@ const Expression *NewGVN::performSymbolicEvaluation(Value *V,
   }
   if (!E)
     return NULL;
-  return E;
+  return uniquifyExpression(E);
 }
 
 /// markDominatedSingleUseEquivalences - Go through all uses of From, and mark
@@ -1707,9 +1704,6 @@ void NewGVN::markUsersTouched(Value *V) {
 /// performCongruenceFinding - Perform congruence finding on a given
 /// value numbering expression
 void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
-  ExpressionClassMap *lookupMap = &ExpressionToClass;
-  if (E && (isa<StoreExpression>(E) || isa<LoadExpression>(E)))
-    lookupMap = &MemoryExpressionToClass;
 
   ValueToExpression[V] = E;
   // This is guaranteed to return something, since it will at least find
@@ -1736,7 +1730,7 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
   } else if (const VariableExpression *VE = dyn_cast<VariableExpression>(E)) {
     EClass = ValueToClass[VE->getVariableValue()];
   } else {
-    auto lookupResult = lookupMap->insert({E, nullptr});
+    auto lookupResult = ExpressionToClass.insert({E, nullptr});
 
     // If it's not in the value table, create a new congruence class
     if (lookupResult.second) {
@@ -1805,7 +1799,7 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
 
           DEBUG(dbgs() << "Erasing expression " << *E << " from table\n");
           // bool wasE = *E == *VClass->expression;
-          lookupMap->erase(VClass->expression);
+          ExpressionToClass.erase(VClass->expression);
           // if (wasE)
           //   lookupMap->insert({E, EClass});
         }
@@ -2071,7 +2065,6 @@ void NewGVN::cleanupTables() {
   ExpressionAllocator.Reset();
   CongruenceClasses.clear();
   ExpressionToClass.clear();
-  MemoryExpressionToClass.clear();
   ValueToExpression.clear();
   UniquedExpressions.clear();
   ReachableBlocks.clear();
@@ -2108,6 +2101,25 @@ std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
   return std::make_pair(Start, End);
 }
 
+void NewGVN::topoVisitCongruenceClass(
+    CongruenceClass *CC, SmallDenseMap<CongruenceClass *, unsigned> &UsedCount,
+    SmallPtrSetImpl<CongruenceClass *> &Visited) {
+  Visited.insert(CC);
+  // Visit the classes of the values of the operands of the leader set
+  for (auto Member : CC->members) {
+    if (User *U = dyn_cast<User>(Member)) {
+      for (auto &I : U->operands()) {
+        CongruenceClass *OperandCC = ValueToClass.lookup(I);
+        if (OperandCC) {
+          UsedCount[OperandCC] += 1;
+          if (!Visited.count(OperandCC))
+            topoVisitCongruenceClass(OperandCC, UsedCount, Visited);
+        }
+      }
+    }
+  }
+}
+
 /// runOnFunction - This is the main transformation entry point for a
 /// function.
 bool NewGVN::runOnFunction(Function &F) {
@@ -2130,7 +2142,7 @@ bool NewGVN::runOnFunction(Function &F) {
   // up with a global dfs numbering for instructions
 
   auto DFI = df_begin(DT->getRootNode());
-  for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI){
+  for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
     BasicBlock *B = DFI->getBlock();
     const auto &BlockRange = assignDFSNumbers(B, ICount);
     BlockInstRange.insert({B, BlockRange});
@@ -2156,7 +2168,6 @@ bool NewGVN::runOnFunction(Function &F) {
   // that can be quite expensive. At most, we have one expression per
   // instruction.
   ExpressionToClass.resize(ICount + 1);
-  MemoryExpressionToClass.resize(ICount + 1);
   // Initialize the touched instructions to include the entry block
   const auto &InstRange = BlockInstRange.lookup(&F.getEntryBlock());
   TouchedInstructions.set(InstRange.first, InstRange.second);
@@ -2234,11 +2245,40 @@ bool NewGVN::runOnFunction(Function &F) {
 
   Changed |= eliminateInstructions(F);
 
-  // FIXME: Topo sort the congruence classes
+  // The ideal ordering for processing is not quite topological ordering,
+  // because there are multiple roots.  It is essentially "group every vertex
+  // that depends on a given vertex together after that vertex", which is not
+  // the same.  It is in fact, an NP complete problem, and given that the graph
+  // may be cyclic anyway, we order the congruence classes by how many things
+  // depend on them.  This is a good approximation, and will cut down the number
+  // of iterations.
+
+  SmallDenseMap<CongruenceClass *, unsigned> UsedCount;
+  SmallPtrSet<CongruenceClass *, 16> Visited;
+
+  for (int i = CongruenceClasses.size() - 1; i >= 0; --i) {
+    CongruenceClass *CC = CongruenceClasses[i];
+    if (CC == InitialClass || CC->dead || Visited.count(CC))
+      continue;
+    topoVisitCongruenceClass(CC, UsedCount, Visited);
+  }
+  SmallVector<CongruenceClass *, 16> Worklist(CongruenceClasses.begin(),
+                                              CongruenceClasses.end());
+  // std::sort(Worklist.begin(), Worklist.end(),
+  //           [&UsedCount](CongruenceClass *&A, CongruenceClass *&B) {
+  //             return UsedCount[A] > UsedCount[B];
+  //           });
+
   bool PREChanged = true;
   while (PREChanged) {
     PREChanged = false;
-    for (auto &CC : CongruenceClasses) {
+    // FIXME: Handle added congruence classes
+    if (Worklist.size() != CongruenceClasses.size())
+      Worklist.insert(Worklist.end(),
+                      CongruenceClasses.begin() + (Worklist.size() - 1),
+                      CongruenceClasses.end());
+
+    for (auto CC : Worklist) {
       if (CC == InitialClass || CC->dead)
         continue;
 
@@ -3262,88 +3302,11 @@ BasicBlock *NewGVN::splitCriticalEdges(BasicBlock *Pred, BasicBlock *Succ) {
   return BB;
 }
 
-/// Return true if we can prove that the value
-/// we're analyzing is fully available in the specified block.  As we go, keep
-/// track of which blocks we know are fully alive in FullyAvailableBlocks.  This
-/// map is actually a tri-state map with the following values:
-///   0) we know the block *is not* fully available.
-///   1) we know the block *is* fully available.
-///   2) we do not know whether the block is fully available or not, but we are
-///      currently speculating that it will be.
-///   3) we are speculating for this block and have used that to speculate for
-///      other blocks.
-bool NewGVN::isValueFullyAvailableInBlock(
-    BasicBlock *BB, FullyAvailableMap &FullyAvailableBlocks,
-    uint32_t RecurseDepth) {
-  // TODO:Replace with max-recurse-depth from GVN
-  if (RecurseDepth > 1000)
-    return false;
-
-  // Optimistically assume that the block is fully available and check to see
-  // if we already know about this block in one lookup.
-  auto IV = FullyAvailableBlocks.insert({BB, 2});
-
-  // If the entry already existed for this block, return the precomputed value.
-  if (!IV.second) {
-    // If this is a speculative "available" value, mark it as being used for
-    // speculation of other blocks.
-    if (IV.first->second == 2)
-      IV.first->second = 3;
-    return IV.first->second != 0;
-  }
-
-  // Otherwise, see if it is fully available in all predecessors.
-  pred_iterator PI = pred_begin(BB), PE = pred_end(BB);
-
-  // If this block has no predecessors, it isn't live-in here.
-  if (PI == PE)
-    goto SpeculationFailure;
-
-  for (; PI != PE; ++PI)
-    // If the value isn't fully available in one of our predecessors, then it
-    // isn't fully available in this block either.  Undo our previous
-    // optimistic assumption and bail out.
-    if (!isValueFullyAvailableInBlock(*PI, FullyAvailableBlocks,
-                                      RecurseDepth + 1))
-      goto SpeculationFailure;
-
-  FullyAvailableBlocks[BB] = true;
-
-  return true;
-
-// If we get here, we found out that this is not, after
-// all, a fully-available block.  We have a problem if we speculated on this and
-// used the speculation to mark other blocks as available.
-SpeculationFailure:
-  char &BBVal = FullyAvailableBlocks[BB];
-
-  // If we didn't speculate on this, just return with it set to false.
-  if (BBVal == 2) {
-    BBVal = 0;
-    return false;
-  }
-
-  // If we did speculate on this value, we could have blocks set to 1 that are
-  // incorrect.  Walk the (transitive) successors of this block and mark them as
-  // 0 if set to one.
-  SmallVector<BasicBlock *, 32> BBWorklist;
-  BBWorklist.push_back(BB);
-
-  do {
-    BasicBlock *Entry = BBWorklist.pop_back_val();
-    // Note that this sets blocks to 0 (unavailable) if they happen to not
-    // already be in FullyAvailableBlocks.  This is safe.
-    char &EntryVal = FullyAvailableBlocks[Entry];
-    if (EntryVal == 0)
-      continue; // Already unavailable.
-
-    // Mark as unavailable.
-    EntryVal = 0;
-
-    BBWorklist.append(succ_begin(Entry), succ_end(Entry));
-  } while (!BBWorklist.empty());
-
-  return false;
+void NewGVN::valueNumberNewInstructionToValue(Value *New, Value *Old) {
+  if (!ValueToClass.count(New))
+    ValueToClass[New] = InitialClass;
+  const Expression *NewExpr = createVariableExpression(Old, false);
+  performCongruenceFinding(New, NewExpr);
 }
 
 void NewGVN::valueNumberNewInstruction(Value *V) {
@@ -3355,14 +3318,12 @@ void NewGVN::valueNumberNewInstruction(Value *V) {
 }
 
 Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
-  // FIXME: TRack debug location and AA metadata
   Value *V = findPRELeader(E, BB, nullptr);
   if (V)
     return V;
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
     LoadInst *LI = new LoadInst(LE->getOperand(0), "loadpre", false,
                                 LE->getAlignment(), BB->getTerminator());
-    // FIXME: Track alignment, etc
     const_cast<LoadExpression *>(LE)->setLoadInst(LI);
     MSSA->addNewMemoryUse(LI, MemorySSA::InsertionPlace::End);
 
@@ -3381,10 +3342,15 @@ Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
       Type *PointeeType =
           cast<SequentialType>(BE->getOperand(0)->getType()->getScalarType())
               ->getElementType();
-      GetElementPtrInst *GEP = GetElementPtrInst::Create(
-          PointeeType, BE->getOperand(0),
-          makeArrayRef(BE->ops_begin(), BE->ops_end()).slice(1), "geppre",
-          BB->getTerminator());
+      Value *GEP = nullptr;
+      if (Value *V = SimplifyGEPInst(
+              makeArrayRef(BE->ops_begin(), BE->ops_end()), *DL, TLI, DT, AC))
+        GEP = V;
+      else
+        GEP = GetElementPtrInst::Create(
+            PointeeType, BE->getOperand(0),
+            makeArrayRef(BE->ops_begin(), BE->ops_end()).slice(1), "geppre",
+            BB->getTerminator());
       // FIXME: Track inbounds
       return GEP;
     } else if (((Opcode & 0xff00) >> 8) == Instruction::ICmp) {
@@ -3415,72 +3381,6 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
   // that we only have to insert *one* load (which means we're basically moving
   // the load, not inserting a new one).
 
-  SmallPtrSet<const BasicBlock *, 4> Blockers;
-  for (unsigned i = 0, e = UnavailableBlocks.size(); i != e; ++i)
-    Blockers.insert(UnavailableBlocks[i].first);
-
-  // Let's find the first basic block with more than one predecessor.  Walk
-  // backwards through predecessors if needed.
-  BasicBlock *LoadBB = I->getParent();
-  BasicBlock *TmpBB = LoadBB;
-
-  while (TmpBB->getSinglePredecessor()) {
-    TmpBB = TmpBB->getSinglePredecessor();
-    if (TmpBB == LoadBB) // Infinite (unreachable) loop.
-      return false;
-    if (Blockers.count(TmpBB))
-      return false;
-
-    // If any of these blocks has more than one successor (i.e. if the edge we
-    // just traversed was critical), then there are other paths through this
-    // block along which the load may not be anticipated.  Hoisting the load
-    // above this block would be adding the load to execution paths along
-    // which it was not previously executed.
-    if (TmpBB->getTerminator()->getNumSuccessors() != 1)
-      return false;
-  }
-
-  assert(TmpBB);
-  LoadBB = TmpBB;
-#if 0
-  // Check to see how many predecessors have the loaded value fully
-  // available.
-  MapVector<BasicBlock *, std::pair<Value *, const Expression *>> PredLoads;
-  FullyAvailableMap FullyAvailableBlocks;
-  for (unsigned i = 0, e = ValuesPerBlock.size(); i != e; ++i)
-    FullyAvailableBlocks[ValuesPerBlock[i].BB] = true;
-  for (unsigned i = 0, e = UnavailableBlocks.size(); i != e; ++i)
-    FullyAvailableBlocks[UnavailableBlocks[i].first] = false;
-
-  SmallVector<BasicBlock *, 4> CriticalEdgePred;
-  for (pred_iterator PI = pred_begin(LoadBB), E = pred_end(LoadBB); PI != E;
-       ++PI) {
-    BasicBlock *Pred = *PI;
-    if (isValueFullyAvailableInBlock(Pred, FullyAvailableBlocks, 0)) {
-      continue;
-    }
-
-    if (Pred->getTerminator()->getNumSuccessors() != 1) {
-      if (isa<IndirectBrInst>(Pred->getTerminator())) {
-        DEBUG(dbgs()
-              << "COULD NOT PRE INSTRUCTION BECAUSE OF INDBR CRITICAL EDGE '"
-              << Pred->getName() << "': " << *I << '\n');
-        return false;
-      }
-
-      if (LoadBB->isLandingPad()) {
-        DEBUG(dbgs() << "COULD NOT PRE INSTRUCTION BECAUSE OF LANDING PAD "
-                        "CRITICAL EDGE '" << Pred->getName() << "': " << *I
-                     << '\n');
-        return false;
-      }
-      CriticalEdgePred.push_back(Pred);
-    } else {
-      // Only add the predecessors that will not be split for now.
-      PredLoads[Pred] = {nullptr, nullptr};
-    }
-  }
-#endif
   // Decide whether PRE is profitable for this load.
   unsigned NumUnavailablePreds = UnavailableBlocks.size();
   assert(NumUnavailablePreds != 0 &&
@@ -3493,17 +3393,6 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
   if (NumUnavailablePreds > 2)
     return false;
 
-#if 0
-  // Split critical edges, and update the unavailable predecessors accordingly.
-  for (BasicBlock *OrigPred : CriticalEdgePred) {
-    BasicBlock *NewPred = splitCriticalEdges(OrigPred, LoadBB);
-    ReachableBlocks.insert(NewPred);
-    assert(!PredLoads.count(OrigPred) && "Split edges shouldn't be in map!");
-    PredLoads[NewPred] = {nullptr, nullptr};
-    DEBUG(dbgs() << "Split critical edge " << OrigPred->getName() << "->"
-                 << LoadBB->getName() << '\n');
-  }
-#endif
   // Check if the load can safely be moved to all the unavailable predecessors.
   bool CanDoPRE = true;
 
@@ -3541,43 +3430,40 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
   for (auto &UnavailInfo : UnavailableBlocks) {
     BasicBlock *UnavailablePred = UnavailInfo.first;
 
-#if 0
-    Instruction *NewLoad =
-        new LoadInst(LoadPtr, LI->getName() + ".pre", false, LI->getAlignment(),
-                     UnavailablePred->getTerminator());
-
-    // Transfer the old load's AA tags to the new load.
-    AAMDNodes Tags;
-    LI->getAAMetadata(Tags);
-    if (Tags)
-      NewLoad->setAAMetadata(Tags);
-
-    // Transfer DebugLoc.
-    NewLoad->setDebugLoc(LI->getDebugLoc());
-
-    MSSA->addNewMemoryUse(NewLoad, MemorySSA::InsertionPlace::End);
-    valueNumberNewInstruction(NewLoad);
-    if (MD)
-      MD->invalidateCachedPointerInfo(LoadPtr);
-
-#endif
-    Value *NewInst = regenerateExpression(UnavailInfo.second, UnavailablePred);
-    valueNumberNewInstruction(NewInst);
+    Value *NewVal = regenerateExpression(UnavailInfo.second, UnavailablePred);
+    valueNumberNewInstruction(NewVal);
+    if (Instruction *NewInst = dyn_cast<Instruction>(NewVal)) {
+      NewInst->setDebugLoc(I->getDebugLoc());
+      LoadInst *LI = dyn_cast<LoadInst>(I);
+      LoadInst *NewLoadInst = dyn_cast<LoadInst>(NewInst);
+      // Transfer load tags
+      if (LI && NewLoadInst) {
+        AAMDNodes Tags;
+        LI->getAAMetadata(Tags);
+        if (Tags)
+          NewLoadInst->setAAMetadata(Tags);
+        if (MD)
+          MD->invalidateCachedPointerInfo(NewLoadInst->getPointerOperand());
+      }
+    }
 
     // Add the newly created load.
     ValuesPerBlock.push_back(
-        AvailableValueInBlock::get(UnavailablePred, NewInst));
-    DEBUG(dbgs() << "GVN INSERTED " << *NewInst << '\n');
+        AvailableValueInBlock::get(UnavailablePred, NewVal));
+    DEBUG(dbgs() << "GVN INSERTED " << *NewVal << '\n');
   }
 
   // Perform PHI construction.
   Value *V = constructSSAForSet(I, ValuesPerBlock);
   I->replaceAllUsesWith(V);
   PREValueForwarding[I] = V;
-  valueNumberNewInstruction(V);
+  // Value of V is the same as the value of the old instruction (or it would not
+  // be redundant)
+  valueNumberNewInstructionToValue(V, I);
 
   ValueToExpression[I] = ValueToExpression[V];
-  ValueToClass[I]->members.erase(I);
+  // I no longer exists
+  ValueToClass.lookup(I)->members.erase(I);
   if (isa<PHINode>(V))
     V->takeName(I);
   if (MD && V->getType()->getScalarType()->isPointerTy())
@@ -3597,8 +3483,8 @@ void NewGVN::analyzeAvailability(Instruction *I,
       continue;
     }
 
-    const Expression *E =
-        phiTranslateExpression(ValueToExpression[I], I->getParent(), P, I);
+    const Expression *E = phiTranslateExpression(ValueToExpression.lookup(I),
+                                                 I->getParent(), P, I);
     Value *V = nullptr;
     if (E) {
       E = trySimplifyPREExpression(E, P);
@@ -3664,7 +3550,7 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
         I->replaceAllUsesWith(V);
         PREValueForwarding[I] = V;
         valueNumberNewInstruction(V);
-        ValueToClass[I]->members.erase(I);
+        ValueToClass.lookup(I)->members.erase(I);
         ValueToExpression[I] = ValueToExpression[V];
         if (isa<PHINode>(V))
           V->takeName(I);
@@ -3718,13 +3604,10 @@ Value *NewGVN::findPRELeader(const Expression *E, const BasicBlock *BB,
   else if (const VariableExpression *VE = dyn_cast<VariableExpression>(E))
     return findPRELeader(VE->getVariableValue(), BB, MustDominate);
 
-  const ExpressionClassMap *lookupMap = &ExpressionToClass;
-  if (isa<StoreExpression>(E) || isa<LoadExpression>(E))
-    lookupMap = &MemoryExpressionToClass;
   DEBUG(dbgs() << "Hash value was " << E->getHashValue() << "\n");
 
-  const auto Result = lookupMap->find(E);
-  if (Result == lookupMap->end())
+  const auto Result = ExpressionToClass.find(E);
+  if (Result == ExpressionToClass.end())
     return 0;
 
   CongruenceClass *CC = Result->second;
@@ -3777,8 +3660,8 @@ static Value *phiTranslateValue(Value *Incoming, const BasicBlock *Pred) {
 bool NewGVN::phiTranslateArguments(const BasicExpression *From,
                                    BasicExpression *To, const BasicBlock *Pred,
                                    const Value *MustDominate) {
-  for (auto &A : From->operands()) {
-    Value *Arg = A;
+  for (unsigned i = 0, e = From->getNumOperands(); i != e; ++i) {
+    Value *Arg = From->getOperand(i);
     Value *Forwarded = PREValueForwarding.lookup(Arg);
     if (Forwarded)
       Arg = Forwarded;
@@ -3813,13 +3696,19 @@ bool NewGVN::phiTranslateArguments(const BasicExpression *From,
     }
     // If arg is still a phi node, and wasn't processed by the add processing
     // above, translate it now
-    if (!processedAdd && isa<PHINode>(Arg))
-      Arg = phiTranslateValue(Arg, Pred);
+    if (!processedAdd && isa<PHINode>(Arg)) {
+      while (isa<PHINode>(Arg)) {
+        Value *Before = Arg;
+        Arg = phiTranslateValue(Arg, Pred);
+        if (Arg == Before)
+          break;
+      }
+    }
 
     Value *Leader = findPRELeader(Arg, Pred, MustDominate);
     if (Leader == nullptr)
       return false;
-    To->ops_push_back(Leader);
+    To->setOperand(i, Leader);
   }
   return true;
 }
@@ -3833,12 +3722,8 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     MemoryAccess *MA = phiTranslateMemoryAccess(LE->getDefiningAccess(), Pred);
     if (!MA)
       return nullptr;
-    LoadExpression *NLE =
-        new (ExpressionAllocator) LoadExpression(LE->ops_size(), nullptr, MA);
-    NLE->allocateOperands(ArgRecycler, ExpressionAllocator);
-    NLE->setType(LE->getType());
-    NLE->setOpcode(0);
-    NLE->setAlignment(LE->getAlignment());
+    LoadExpression *NLE = createLoadExpression(LE->getType(), LE->getOperand(0),
+                                               LE->getLoadInst(), MA, Pred);
     if (!phiTranslateArguments(LE, NLE, Pred, MustDominate))
       return nullptr;
     LoadInst *LI = LE->getLoadInst();
@@ -3854,10 +3739,12 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     ResultExpr = NLE;
   } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
     BasicExpression *NBE =
-        new (ExpressionAllocator) BasicExpression(BE->ops_size());
+        new (ExpressionAllocator) BasicExpression(BE->getNumOperands());
     NBE->setType(BE->getType());
     NBE->setOpcode(BE->getOpcode());
     NBE->allocateOperands(ArgRecycler, ExpressionAllocator);
+    for (unsigned i = 0, e = BE->getNumOperands(); i != e; ++i)
+      NBE->ops_push_back(nullptr);
     if (!phiTranslateArguments(BE, NBE, Pred, MustDominate))
       return nullptr;
     ResultExpr = NBE;
@@ -3872,10 +3759,13 @@ const Expression *NewGVN::trySimplifyPREExpression(const Expression *E,
   // This must come first, because LoadExpression's are BasicExpressions
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
     MemoryAccess *MA = LE->getDefiningAccess();
-    if (isa<MemoryDef>(MA) && !MSSA->isLiveOnEntryDef(MA))
-      ResultExpr = performSymbolicLoadCoercion(LE->getType(), LE->getOperand(0),
-                                               LE->getLoadInst(),
-                                               MA->getMemoryInst(), MA, B);
+    if (isa<MemoryDef>(MA) && !MSSA->isLiveOnEntryDef(MA)) {
+      const Expression *Temp = performSymbolicLoadCoercion(
+          LE->getType(), LE->getOperand(0), LE->getLoadInst(),
+          MA->getMemoryInst(), MA, B);
+      if (Temp)
+        ResultExpr = Temp;
+    }
   } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
     unsigned Opcode = BE->getOpcode();
     if (Instruction::isBinaryOp(Opcode)) {
@@ -3884,8 +3774,19 @@ const Expression *NewGVN::trySimplifyPREExpression(const Expression *E,
       if (V) {
         if (Constant *C = dyn_cast<Constant>(V))
           ResultExpr = createConstantExpression(C, false);
+        else if (alwaysAvailable(V))
+          ResultExpr = createVariableExpression(V, false);
+      }
+    } else if (Opcode == Instruction::GetElementPtr) {
+      Value *V = SimplifyGEPInst(makeArrayRef(BE->ops_begin(), BE->ops_end()),
+                                 *DL, TLI, DT, AC);
+      if (V) {
+        if (Constant *C = dyn_cast<Constant>(V))
+          ResultExpr = createConstantExpression(C, false);
+        else if (alwaysAvailable(V))
+          ResultExpr = createVariableExpression(V, false);
       }
     }
   }
-  return ResultExpr;
+  return uniquifyExpression(ResultExpr);
 }
