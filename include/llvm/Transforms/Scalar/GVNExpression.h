@@ -21,6 +21,7 @@
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/ArrayRecycler.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace llvm {
@@ -98,6 +99,7 @@ public:
     printInternal(OS, true);
     OS << "}";
   }
+  void dump() const { print(dbgs()); }
 };
 inline raw_ostream &operator<<(raw_ostream &OS, const Expression &E) {
   E.print(OS);
@@ -127,7 +129,6 @@ public:
   inline void swapOperands(unsigned First, unsigned Second) {
     std::swap(Operands[First], Operands[Second]);
   }
-
   inline Value *getOperand(unsigned N) const {
     assert(Operands && "Operands not allocated");
     assert(N < NumOperands && "Operand out of range");
@@ -139,6 +140,7 @@ public:
     assert(N < NumOperands && "Operand out of range");
     Operands[N] = V;
   }
+  inline unsigned int getNumOperands() const { return NumOperands; }
 
   inline op_iterator ops_begin() { return Operands; }
   inline op_iterator ops_end() { return Operands + NumOperands; }
@@ -152,13 +154,12 @@ public:
     return iterator_range<const_ops_iterator>(ops_begin(), ops_end());
   }
 
-  inline unsigned int ops_size() const { return NumOperands; }
   inline void ops_push_back(Value *Arg) {
     assert(NumOperands < MaxOperands && "Tried to add too many operands");
     assert(Operands && "Operandss not allocated before pushing");
     Operands[NumOperands++] = Arg;
   }
-  inline bool ops_empty() const { return ops_size() == 0; }
+  inline bool ops_empty() const { return getNumOperands() == 0; }
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const BasicExpression *) { return true; }
@@ -203,8 +204,10 @@ public:
 
     this->Expression::printInternal(OS, false);
     OS << "operands = {";
-    for (unsigned i = 0, e = ops_size(); i != e; ++i) {
-      OS << "[" << i << "] = " << Operands[i] << "  ";
+    for (unsigned i = 0, e = getNumOperands(); i != e; ++i) {
+      OS << "[" << i << "] = ";
+      Operands[i]->printAsOperand(OS);
+      OS << "  ";
     }
     OS << "} ";
   }
