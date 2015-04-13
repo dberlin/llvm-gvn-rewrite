@@ -400,7 +400,6 @@ MemoryAccess *MemorySSA::createNewAccess(Instruction *I, bool ignoreNonMemory) {
   if (def) {
     MemoryDef *MD = new MemoryDef(nullptr, I, I->getParent(), nextID++);
     InstructionToMemoryAccess.insert(std::make_pair(I, MD));
-
     return MD;
   } else if (use) {
     MemoryUse *MU = new MemoryUse(nullptr, I, I->getParent());
