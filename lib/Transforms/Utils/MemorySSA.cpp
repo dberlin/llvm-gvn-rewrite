@@ -1053,7 +1053,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
         if (ImmutableCallSite(DefMemoryInst)) {
           Q.VisitedCalls.insert(MD);
         }
-        if (AA->instructionClobbersCall(DefMemoryInst, Q.Inst))
+        if (AA->instructionClobbersCall(DefMemoryInst, ImmutableCallSite(Q.Inst)))
           break;
       }
     }
