@@ -365,7 +365,9 @@ public:
     std::pair<BasicBlock *, MemoryAccess *> &Val = Operands[v];
     Val.first = BB;
   }
-  BasicBlock *getIncomingBlock(unsigned int v) const { return Operands[v].first; }
+  BasicBlock *getIncomingBlock(unsigned int v) const {
+    return Operands[v].first;
+  }
 
   typedef SmallVector<std::pair<BasicBlock *, MemoryAccess *>, 8> OperandsType;
   typedef OperandsType::const_iterator const_op_iterator;
@@ -451,11 +453,19 @@ public:
   }
 
   /// \brief Remove a MemoryAccess from MemorySSA, including updating all
-  // definitions and uses.
+  /// definitions and uses.
+  /// This should be called when a memory instruction that has a MemoryAccess
+  /// associated with it is erased from the program.  For example, if a store or
+  /// load is simply erased (not replaced), removeMemoryAccess should be called
+  /// on the MemoryAccess for that store/load.
   void removeMemoryAccess(MemoryAccess *);
 
   /// \brief Replace one MemoryAccess with another, including updating all
   /// definitions and uses.
+  /// This should be called when one memory instruction is being replaced with
+  /// another.  For example, during GVN, a load may be replaced with another
+  /// existing load. This function should be called to let MemorySSA know that
+  /// this has happened
   void replaceMemoryAccess(MemoryAccess *Replacee, MemoryAccess *Replacer);
 
   enum InsertionPlace { Beginning, End };
@@ -464,6 +474,27 @@ public:
   /// instruction \p Replacer - this does not perform generic SSA updates, so it
   /// only works if the new access dominates the old accesses uses.
   ///
+  /// This API should be used if a new memory instruction has been added that is
+  /// being used to replace an existing one.  For example, during store sinking,
+  /// we may replace  a store sunk further down the CFG.  In that
+  /// case, this function should be called with the MemoryAccess for the
+  /// original store, and the new instruction replacing it.
+  /// We may also merge two stores in two branches into a store after the
+  /// branch.
+  /// For example, we may have
+  /// if (a) {
+  ///   1 = MemoryDef(liveOnEntry)
+  ///   store %a
+  /// } else {
+  ///   2 = MemoryDef(liveOnEntry)
+  ///   store %a
+  /// }
+  /// 3 = MemoryPhi(1, 2)
+  /// MemoryUse(3)
+  /// load %a
+  /// If the store is sunk below the branch, the correct update would be to call
+  /// tihs function with the MemoryPhi and the new store, and removeAccess on
+  /// the two old stores.
   /// This version places the access at either the end or the beginning of \p
   /// Replacer's block, depending on the value of \p Where.
   ///
@@ -483,7 +514,10 @@ public:
 
   /// \brief Add a new MemoryUse for \p Use at the beginning or end of a block.
   ///
-  /// \returns The new memory access that was created.
+  /// This API is used to add MemoryUse's for new loads (or other memory Ref'ing
+  /// instructions) to MemorySSA.  For example, if a load is hoisted and the old
+  /// load eliminated, the proper update is to call addNewMemoryUse on the new
+  /// load, and then replaceMemoryAccess with (old load, new load).
   MemoryAccess *addNewMemoryUse(Instruction *Use, enum InsertionPlace Where);
 
 protected:
@@ -592,13 +626,28 @@ public:
   virtual ~MemorySSAWalker() {}
 
   typedef SmallVector<MemoryAccess *, 8> MemoryAccessSet;
-  /// \brief Given a memory defining/using/clobbering instruction, calling this
-  /// will give you the nearest dominating clobbering MemoryAccess (by skipping
-  /// non-aliasing def links).
+  /// \brief Given a memory Mod/Ref/ModRef'ing instruction, calling this
+  /// will give you the nearest dominating MemoryAccess that Mod's the location
+  /// the instruction accesses (by skipping any def which AA can prove does not
+  /// alias the location(s) accessed by the instruction given).
   ///
   /// Note that this will return a single access, and it must dominate the
-  /// Instruction, so if an argument of a MemoryPhi node clobbers thenstruction,
-  /// it will return the memoryphi node, *not* the argument.
+  /// Instruction, so if an operand of a MemoryPhi node Mod's the instruction,
+  /// this will return the MemoryPhi, not the operand.  This means that
+  /// given:
+  /// if (a) {
+  ///   1 = MemoryDef(liveOnEntry)
+  ///   store %a
+  /// } else {
+  ///   2 = MemoryDef(liveOnEntry)
+  ///    store %b
+  /// }
+  /// 3 = MemoryPhi(2, 1)
+  /// MemoryUse(3)
+  /// load %a
+  ///
+  /// calling this API on load(%a) will return the MemoryPhi, not the MemoryDef
+  /// in the if (a) branch.
   virtual MemoryAccess *getClobberingMemoryAccess(const Instruction *) = 0;
 
   /// \brief Given a potentially clobbering memory access and a new location,

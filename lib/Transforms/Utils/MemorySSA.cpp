@@ -500,9 +500,11 @@ MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
   if (Where == Beginning) {
     // Access must go after the first phi
     auto AI = Accesses->begin();
-    while (AI != Accesses->end())
+    while (AI != Accesses->end()) {
       if (!isa<MemoryPhi>(AI))
         break;
+      ++AI;
+    }
 
     return replaceMemoryAccessWithNewAccess(Replacee, Replacer, AI);
   }
@@ -609,8 +611,8 @@ void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
     // This code only used in assert builds
     (void)MP;
     assert(MP->user_empty() && "We can't delete memory phis that still have "
-                              "uses, we don't know where the uses should "
-                              "repoint to!");
+                               "uses, we don't know where the uses should "
+                               "repoint to!");
     assert(onlySingleValue(MP) && "This phi still points to multiple values, "
                                   "which means it is still needed");
   } else {
