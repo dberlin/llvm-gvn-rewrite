@@ -346,6 +346,9 @@ public:
     // offset, and type, because that is what we are going to pull the value
     // from. The rest of the load arguments don't actually matter since we've
     // already analyzed that they are "the same enough" for us to do coercion.
+    if (!isa<CoercibleLoadExpression>(Other))
+      return false;
+
     const CoercibleLoadExpression &OE = cast<CoercibleLoadExpression>(Other);
     if (ValueType != OE.ValueType)
       return false;
