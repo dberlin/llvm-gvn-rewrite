@@ -380,7 +380,7 @@ static void setDefiningAccess(MemoryAccess *Of, MemoryAccess *To) {
 /// Because of the way the intrusive list and use lists work, it is important to
 /// do removal in the right order.
 void MemorySSA::removeFromLookups(MemoryAccess *MA) {
-  assert(MA->use_empty() &&
+  assert(MA->user_empty() &&
          "Trying to remove memory access that still has uses");
   setDefiningAccess(MA, nullptr);
   // The call below to erase will destroy MA, so we can't change the order we
@@ -546,7 +546,7 @@ bool MemorySSA::dominatesUse(MemoryAccess *Replacer,
   if (isa<MemoryUse>(Replacee) || isa<MemoryDef>(Replacee))
     return DT->dominates(Replacer->getBlock(), Replacee->getBlock());
   MemoryPhi *MP = cast<MemoryPhi>(Replacee);
-  for (const auto &Arg : MP->args())
+  for (const auto &Arg : MP->operands())
     if (Arg.second == Replacee)
       if (!DT->dominates(Replacer->getBlock(), Arg.first))
         return false;
@@ -565,7 +565,7 @@ void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
   // Just to note: We can replace the live on entry def, unlike removing it, so
   // we don't assert here, but it's almost always a bug, unless you are
   // inserting a load/store in a block that dominates the rest of the program.
-  for (auto U : Replacee->uses()) {
+  for (auto U : Replacee->users()) {
     if (U == Replacer)
       continue;
     assert(dominatesUse(Replacer, Replacee) &&
@@ -592,7 +592,7 @@ void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
 static bool onlySingleValue(MemoryPhi *MP) {
   MemoryAccess *MA = nullptr;
 
-  for (const auto &Arg : MP->args()) {
+  for (const auto &Arg : MP->operands()) {
     if (!MA)
       MA = Arg.second;
     else if (MA != Arg.second)
@@ -608,7 +608,7 @@ void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
   if (MemoryPhi *MP = dyn_cast<MemoryPhi>(MA)) {
     // This code only used in assert builds
     (void)MP;
-    assert(MP->use_empty() && "We can't delete memory phis that still have "
+    assert(MP->user_empty() && "We can't delete memory phis that still have "
                               "uses, we don't know where the uses should "
                               "repoint to!");
     assert(onlySingleValue(MP) && "This phi still points to multiple values, "
@@ -616,7 +616,7 @@ void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
   } else {
     MemoryAccess *DefiningAccess = getDefiningAccess(MA);
     // Re-point the uses at our defining access
-    for (auto U : MA->uses()) {
+    for (auto U : MA->users()) {
       assert(dominatesUse(DefiningAccess, U) &&
              "Definitions will not dominate uses in removal!");
       if (MemoryPhi *MP = dyn_cast<MemoryPhi>(U)) {
@@ -653,12 +653,12 @@ void MemorySSA::verifyDomination(Function &F) {
     MemoryAccess *MA = getMemoryAccess(&B);
     if (MA) {
       MemoryPhi *MP = cast<MemoryPhi>(MA);
-      for (const auto &U : MP->uses()) {
+      for (const auto &U : MP->users()) {
         BasicBlock *UseBlock;
         // Phi operands are used on edges, we simulate the right domination by
         // acting as if the use occurred at the end of the predecessor block.
         if (MemoryPhi *P = dyn_cast<MemoryPhi>(U)) {
-          for (const auto &Arg : P->args()) {
+          for (const auto &Arg : P->operands()) {
             if (Arg.second == MP) {
               UseBlock = Arg.first;
               break;
@@ -675,12 +675,12 @@ void MemorySSA::verifyDomination(Function &F) {
       MA = getMemoryAccess(&I);
       if (MA) {
         if (MemoryDef *MD = dyn_cast<MemoryDef>(MA))
-          for (const auto &U : MD->uses()) {
+          for (const auto &U : MD->users()) {
             BasicBlock *UseBlock;
             // Things are allowed to flow to phi nodes over their predecessor
             // edge.
             if (MemoryPhi *P = dyn_cast<MemoryPhi>(U)) {
-              for (const auto &Arg : P->args()) {
+              for (const auto &Arg : P->operands()) {
                 if (Arg.second == MD) {
                   UseBlock = Arg.first;
                   break;
@@ -706,7 +706,7 @@ void MemorySSA::verifyUseInDefs(MemoryAccess *Def, MemoryAccess *Use) {
            "Null def but use not point to live on entry def");
     return;
   }
-  assert(Def->findUse(Use) && "Did not find use in def's use list");
+  assert(Def->hasUse(Use) && "Did not find use in def's use list");
 }
 
 /// \brief Verify the immediate use information, by walking all the memory
@@ -1053,8 +1053,8 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
         if (ImmutableCallSite(DefMemoryInst)) {
           Q.VisitedCalls.insert(MD);
         }
-        if (AA->instructionClobbersCall(DefMemoryInst,
-                                        ImmutableCallSite(Q.Inst)))
+        if (AA->getModRefInfo(DefMemoryInst, ImmutableCallSite(Q.Inst)) !=
+            AliasAnalysis::NoModRef)
           break;
       }
     }

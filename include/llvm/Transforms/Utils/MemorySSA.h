@@ -11,13 +11,11 @@
 // \brief This file exposes an interface to building/using memory SSA to
 // walk memory instructions using a use/def graph
 
-// Memory SSA class builds an SSA form that links together memory
-// access instructions such loads, stores, and clobbers (atomics,
-// calls, etc), so they can be walked easily.  Additionally, it does a
-// trivial form of "heap versioning" Every time the memory state
-// changes in the program, we generate a new heap version It generates
-// MemoryDef/Uses/Phis that are overlayed on top of the existing
-// instructions
+// Memory SSA class builds an SSA form that links together memory access
+// instructions such loads, stores, atomics and calls.  Additionally, it does a
+// trivial form of "heap versioning" Every time the memory state changes in the
+// program, we generate a new heap version It generates MemoryDef/Uses/Phis that
+// are overlayed on top of the existing instructions
 
 // As a trivial example,
 // define i32 @main() #0 {
@@ -48,7 +46,7 @@
 //   store i32 7, i32* %4, align 4
 //   ; MemoryUse(4)
 //   %7 = load i32* %2, align 4
-//   ; MemoryUse(4)
+//   ; MemoryUse(3)
 //   %8 = load i32* %4, align 4
 //   %add = add nsw i32 %7, %8
 //   ret i32 %add
@@ -57,11 +55,18 @@
 // at %8 can be gotten by using the memory use associated with it,
 // and walking from use to def until you hit the top of the function.
 
-// Each def also has a list of uses
-// Also note that it does not attempt any disambiguation, it is simply
-// linking together the instructions.
-
+// Each def also has a list of users associated with it, so you can walk from
+// both def to users, and users to defs.
+// Note that we disambiguate MemoryUse's, but not the RHS of memorydefs.
+// You can see this above at %8, which would otherwise be a MemoryUse(4)
+// Being disambiguated means that for a given store, all the MemoryUses on its
+// use lists are may-aliases of that store (but the MemoryDefs on its use list
+// may not be)
 //
+// MemoryDefs are not disambiguated because it would require multiple reaching
+// definitions, which would require multiple phis, and multiple memoryaccesses
+// per instruction.
+
 //===----------------------------------------------------------------------===//
 #ifndef LLVM_TRANSFORMS_UTILS_MEMORYSSA_H
 #define LLVM_TRANSFORMS_UTILS_MEMORYSSA_H
@@ -96,9 +101,6 @@ public:
   /// This may be null in the case of phi nodes.
   virtual Instruction *getMemoryInst() const = 0;
 
-  /// \brief Set the instruction that this MemoryUse represents.
-  virtual void setMemoryInst(Instruction *MI) = 0;
-
   /// \brief Get the access that produces the memory state used by this access.
   virtual MemoryAccess *getDefiningAccess() const = 0;
 
@@ -110,22 +112,22 @@ public:
   virtual void print(raw_ostream &OS) const {};
   virtual void dump() const;
 
-  typedef SmallPtrSet<MemoryAccess *, 8> UseListType;
-  typedef UseListType::iterator iterator;
-  typedef UseListType::const_iterator const_iterator;
+  typedef SmallPtrSet<MemoryAccess *, 8> UserListType;
+  typedef UserListType::iterator iterator;
+  typedef UserListType::const_iterator const_iterator;
 
-  unsigned use_size() const { return Uses.size(); }
-  bool use_empty() const { return Uses.empty(); }
-  iterator use_begin() { return Uses.begin(); }
-  iterator use_end() { return Uses.end(); }
-  iterator_range<iterator> uses() {
-    return iterator_range<iterator>(use_begin(), use_end());
+  unsigned user_size() const { return Users.size(); }
+  bool user_empty() const { return Users.empty(); }
+  iterator user_begin() { return Users.begin(); }
+  iterator user_end() { return Users.end(); }
+  iterator_range<iterator> users() {
+    return iterator_range<iterator>(user_begin(), user_end());
   }
 
-  const_iterator use_begin() const { return Uses.begin(); }
-  const_iterator use_end() const { return Uses.end(); }
+  const_iterator user_begin() const { return Users.begin(); }
+  const_iterator user_end() const { return Users.end(); }
   iterator_range<const_iterator> uses() const {
-    return iterator_range<const_iterator>(use_begin(), use_end());
+    return iterator_range<const_iterator>(user_begin(), user_end());
   }
 
 protected:
@@ -135,29 +137,32 @@ protected:
   friend class MemoryPhi;
   AccessType getAccessType() const { return AccessType; }
 
+  /// \brief Set the instruction that this MemoryUse represents.
+  virtual void setMemoryInst(Instruction *MI) = 0;
+
   /// \brief Add a use of this memory access to our list of uses.
   ///
   /// Note: We depend on being able to add the same use multiple times and not
   /// have it end up in our use list multiple times.
-  void addUse(MemoryAccess *Use) { Uses.insert(Use); }
+  void addUse(MemoryAccess *Use) { Users.insert(Use); }
 
   /// \brief Remove a use of this memory access from our list of uses.
-  void removeUse(MemoryAccess *Use) { Uses.erase(Use); }
+  void removeUse(MemoryAccess *Use) { Users.erase(Use); }
 
   /// \brief Return true if \p Use is one of the uses of this memory access.
-  bool findUse(MemoryAccess *Use) { return Uses.count(Use); }
+  bool hasUse(MemoryAccess *Use) { return Users.count(Use); }
 
   MemoryAccess(AccessType AT, BasicBlock *BB) : AccessType(AT), Block(BB) {}
 
   /// \brief Used internally to give IDs to MemoryAccesses for printing
-  virtual unsigned int getID() const { return 0; }
+  virtual unsigned int getID() const = 0;
 
 private:
   MemoryAccess(const MemoryAccess &);
   void operator=(const MemoryAccess &);
   AccessType AccessType;
   BasicBlock *Block;
-  UseListType Uses;
+  UserListType Users;
 };
 
 template <>
@@ -183,6 +188,10 @@ static inline raw_ostream &operator<<(raw_ostream &OS, MemoryAccess &MA) {
 }
 
 /// \brief Represents read-only accesses to memory
+///
+/// In particular, the set of Instructions that will be represented by
+/// MemoryUse's is exactly the set of Instructions for which
+/// AliasAnalysis::getModRefInfo returns "Ref".
 class MemoryUse : public MemoryAccess {
 public:
   MemoryUse(MemoryAccess *DMA, Instruction *MI, BasicBlock *BB)
@@ -192,6 +201,23 @@ public:
     return DefiningAccess;
   }
 
+  virtual Instruction *getMemoryInst() const final { return MemoryInst; }
+
+  static inline bool classof(const MemoryUse *) { return true; }
+  static inline bool classof(const MemoryAccess *MA) {
+    return MA->getAccessType() == AccessUse;
+  }
+  virtual void print(raw_ostream &OS) const;
+
+protected:
+  friend class MemorySSA;
+
+  MemoryUse(MemoryAccess *DMA, enum AccessType AT, Instruction *MI,
+            BasicBlock *BB)
+      : MemoryAccess(AT, BB), DefiningAccess(nullptr), MemoryInst(MI) {
+    setDefiningAccess(DMA);
+  }
+  virtual void setMemoryInst(Instruction *MI) final { MemoryInst = MI; }
   virtual void setDefiningAccess(MemoryAccess *DMA) final {
     if (DefiningAccess != DMA) {
       if (DefiningAccess)
@@ -201,21 +227,8 @@ public:
     }
     DefiningAccess = DMA;
   }
-  virtual Instruction *getMemoryInst() const final { return MemoryInst; }
-
-  virtual void setMemoryInst(Instruction *MI) final { MemoryInst = MI; }
-
-  static inline bool classof(const MemoryUse *) { return true; }
-  static inline bool classof(const MemoryAccess *MA) {
-    return MA->getAccessType() == AccessUse;
-  }
-  virtual void print(raw_ostream &OS) const;
-
-protected:
-  MemoryUse(MemoryAccess *DMA, enum AccessType AT, Instruction *MI,
-            BasicBlock *BB)
-      : MemoryAccess(AT, BB), DefiningAccess(nullptr), MemoryInst(MI) {
-    setDefiningAccess(DMA);
+  virtual unsigned int getID() const {
+    llvm_unreachable("MemoryUse's do not have ID's");
   }
 
 private:
@@ -223,11 +236,15 @@ private:
   Instruction *MemoryInst;
 };
 
-/// \brief Represents a read-write access to memory, whether it is real, or a
-/// clobber.
+/// \brief Represents a read-write access to memory, whether it is a must-alias,
+/// or a may-alias.
 ///
+/// In particular, the set of Instructions that will be represented by
+/// MemoryDef's is exactly the set of Instructions for which
+/// AliasAnalysis::getModRefInfo returns "Mod" or "ModRef".
 /// Note that, in order to provide def-def chains, all defs also have a use
-/// associated with them.
+/// associated with them.  This use points to the nearest reaching
+/// MemoryDef/MemoryPhi.
 class MemoryDef final : public MemoryUse {
 public:
   MemoryDef(MemoryAccess *DMA, Instruction *MI, BasicBlock *BB, unsigned Ver)
@@ -258,19 +275,47 @@ private:
 ///
 /// These have the same semantic as regular phi nodes, with the exception that
 /// only one phi will ever exist in a given basic block.
-
+/// Guaranteeing one phi per block means guaranteeing there is only ever one
+/// valid reaching MemoryDef/MemoryPHI along each path to the phi node.
+/// This is ensured by not allowing disambiguation of the RHS of a MemoryDef or
+/// a MemoryPhi's operands.
+/// That is, given
+/// if (a) {
+///   store %a
+///   store %b
+/// }
+/// it *must* be transformed into
+/// if (a) {
+///    1 = MemoryDef(liveOnEntry)
+///    store %a
+///    2 = MemoryDef(1)
+///    store %b
+/// }
+/// and *not*
+/// if (a) {
+///    1 = MemoryDef(liveOnEntry)
+///    store %a
+///    2 = MemoryDef(liveOnEntry)
+///    store %b
+/// }
+/// even if the two stores do not conflict.  Otherwise, both 1 and 2 reach the
+/// end of the branch, and if there are not two phi nodes, one will be
+/// disconnected completely from the SSA graph below that point.
+/// Because MemoryUse's do not generate new definitions, they do not have this
+/// issue.
 class MemoryPhi final : public MemoryAccess {
 public:
   MemoryPhi(BasicBlock *BB, unsigned int NP, unsigned int Ver)
       : MemoryAccess(AccessPhi, BB), ID(Ver), NumPreds(NP) {
-    Args.reserve(NumPreds);
+    Operands.reserve(NumPreds);
   }
 
-  virtual Instruction *getMemoryInst() const final { return nullptr; }
+  virtual Instruction *getMemoryInst() const final {
+    llvm_unreachable(
+        "MemoryPhi's do not have a memory instruction associated with them");
+  }
 
-  virtual void setMemoryInst(Instruction *MI) final {}
-
-  virtual MemoryAccess *getDefiningAccess() const {
+  virtual MemoryAccess *getDefiningAccess() const final {
     llvm_unreachable("MemoryPhi's do not have a single defining access");
   }
   virtual void setDefiningAccess(MemoryAccess *) final {
@@ -284,13 +329,13 @@ public:
   ///
   /// During SSA construction, we differentiate between this and NumPreds to
   /// know when the PHI node is fully constructed.
-  unsigned int getNumIncomingValues() const { return Args.size(); }
+  unsigned int getNumIncomingValues() const { return Operands.size(); }
 
   /// \brief Set the memory access of argument \p v of this phi node to be \p MA
   ///
   /// This function updates use lists.
   void setIncomingValue(unsigned int v, MemoryAccess *MA) {
-    std::pair<BasicBlock *, MemoryAccess *> &Val = Args[v];
+    std::pair<BasicBlock *, MemoryAccess *> &Val = Operands[v];
     // We need to update use lists.  Because our uses are not to specific
     // operands, but instead to this MemoryAccess, and because a given memory
     // access may appear multiple times in the phi argument list, we need to be
@@ -299,10 +344,10 @@ public:
     if (Val.second != MA) {
       if (Val.second) {
         bool existsElsewhere = false;
-        for (unsigned i = 0, e = Args.size(); i != e; ++i) {
+        for (unsigned i = 0, e = Operands.size(); i != e; ++i) {
           if (i == v)
             continue;
-          if (Args[i].second == Val.second)
+          if (Operands[i].second == Val.second)
             existsElsewhere = true;
         }
         if (!existsElsewhere)
@@ -314,20 +359,20 @@ public:
   }
 
   MemoryAccess *getIncomingValue(unsigned int v) const {
-    return Args[v].second;
+    return Operands[v].second;
   }
   void setIncomingBlock(unsigned int v, BasicBlock *BB) {
-    std::pair<BasicBlock *, MemoryAccess *> &Val = Args[v];
+    std::pair<BasicBlock *, MemoryAccess *> &Val = Operands[v];
     Val.first = BB;
   }
-  BasicBlock *getIncomingBlock(unsigned int v) const { return Args[v].first; }
+  BasicBlock *getIncomingBlock(unsigned int v) const { return Operands[v].first; }
 
-  typedef SmallVector<std::pair<BasicBlock *, MemoryAccess *>, 8> ArgsType;
-  typedef ArgsType::const_iterator const_arg_iterator;
-  inline const_arg_iterator args_begin() const { return Args.begin(); }
-  inline const_arg_iterator args_end() const { return Args.end(); }
-  inline iterator_range<const_arg_iterator> args() const {
-    return iterator_range<const_arg_iterator>(args_begin(), args_end());
+  typedef SmallVector<std::pair<BasicBlock *, MemoryAccess *>, 8> OperandsType;
+  typedef OperandsType::const_iterator const_op_iterator;
+  inline const_op_iterator ops_begin() const { return Operands.begin(); }
+  inline const_op_iterator ops_end() const { return Operands.end(); }
+  inline iterator_range<const_op_iterator> operands() const {
+    return iterator_range<const_op_iterator>(ops_begin(), ops_end());
   }
 
   static inline bool classof(const MemoryPhi *) { return true; }
@@ -340,10 +385,12 @@ public:
 protected:
   friend class MemorySSA;
 
+  virtual void setMemoryInst(Instruction *MI) final {}
+
   // MemorySSA currently cannot handle edge additions or deletions (but can
   // handle direct replacement).  This is protected to ensure people don't try.
   void addIncoming(MemoryAccess *MA, BasicBlock *BB) {
-    Args.push_back(std::make_pair(BB, MA));
+    Operands.push_back(std::make_pair(BB, MA));
     MA->addUse(this);
   }
 
@@ -355,7 +402,7 @@ private:
   // For debugging only
   const unsigned ID;
   unsigned NumPreds;
-  ArgsType Args;
+  OperandsType Operands;
 };
 
 class MemorySSAWalker;
@@ -371,7 +418,7 @@ public:
   /// for later reuse.  If MemorySSA is already built, just return the walker.
   MemorySSAWalker *buildMemorySSA(AliasAnalysis *, DominatorTree *);
 
-  /// \brief Given a memory using/clobbering/etc instruction, get the MemorySSA
+  /// \brief Given a memory Mod/Ref'ing instruction, get the MemorySSA
   /// access associaed with it.  If passed a basic block gets the memory phi
   /// node that exists for that block, if there is one.
   MemoryAccess *getMemoryAccess(const Value *) const;
@@ -568,14 +615,6 @@ public:
   virtual MemoryAccess *
   getClobberingMemoryAccess(MemoryAccess *, AliasAnalysis::Location &) = 0;
 
-  // Given a memory defining/using/clobbering instruction, calling this will
-  // give you the set of nearest clobbering accesses.  They are not guaranteed
-  // to dominate an instruction.  The main difference between this and the above
-  // is that if a phi's argument clobbers the instruction, the set will include
-  // the nearest clobbering access of all of phi arguments, instead of the phi.
-  // virtual MemoryAccessSet getClobberingMemoryAccesses(const Instruction *) =
-  // 0;
-
 protected:
   MemorySSA *MSSA;
 };
@@ -589,7 +628,8 @@ public:
                                           AliasAnalysis::Location &) override;
 };
 
-/// \brief A MemorySSAWalker that does real AA walks and caching of lookups.
+/// \brief A MemorySSAWalker that does AA walks and caching of lookups to
+/// disambiguate accesses.
 class CachingMemorySSAWalker final : public MemorySSAWalker {
 public:
   CachingMemorySSAWalker(MemorySSA *, AliasAnalysis *);
