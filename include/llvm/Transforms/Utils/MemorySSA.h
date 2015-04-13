@@ -318,9 +318,6 @@ public:
   virtual MemoryAccess *getDefiningAccess() const final {
     llvm_unreachable("MemoryPhi's do not have a single defining access");
   }
-  virtual void setDefiningAccess(MemoryAccess *) final {
-    llvm_unreachable("MemoryPhi's do not have a single defining access");
-  }
 
   /// \brief This is the number of actual predecessors this phi node has.
   unsigned int getNumPreds() const { return NumPreds; }
@@ -387,6 +384,9 @@ public:
 protected:
   friend class MemorySSA;
 
+  virtual void setDefiningAccess(MemoryAccess *) final {
+    llvm_unreachable("MemoryPhi's do not have a single defining access");
+  }
   virtual void setMemoryInst(Instruction *MI) final {}
 
   // MemorySSA currently cannot handle edge additions or deletions (but can
@@ -532,14 +532,13 @@ private:
   typedef DenseMap<const BasicBlock *, AccessListType *> AccessMap;
 
   void
-  determineInsertionPoint(AccessMap &BlockAccesses,
-                          const SmallPtrSetImpl<BasicBlock *> &DefiningBlocks);
+  determineInsertionPoint(const SmallPtrSetImpl<BasicBlock *> &DefiningBlocks);
   void computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels);
   void markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses, BasicBlock *BB);
   bool dominatesUse(MemoryAccess *, MemoryAccess *) const;
   void removeFromLookups(MemoryAccess *);
-  MemoryAccess *createNewAccess(Instruction *);
-  MemoryAccess *findDominatingDef(Instruction *, enum InsertionPlace);
+  MemoryAccess *createNewAccess(Instruction *, bool ignoreNonMemory = false);
+  MemoryAccess *findDominatingDef(BasicBlock *, enum InsertionPlace);
 
   struct RenamePassData {
     BasicBlock *BB;
@@ -561,6 +560,8 @@ private:
                   AccessMap &BlockAccesses,
                   std::vector<RenamePassData> &Worklist,
                   SmallPtrSet<BasicBlock *, 16> &Visited, MemorySSAWalker *);
+  AccessListType *getOrCreateAccessList(BasicBlock *);
+  bool replaceAllOccurrences(MemoryPhi *, MemoryAccess *, MemoryAccess *);
   AliasAnalysis *AA;
   DominatorTree *DT;
   Function &F;
@@ -619,7 +620,16 @@ private:
 
 /// \brief This is the generic walker interface for walkers of MemorySSA.
 /// Walkers are used to be able to further disambiguate the def-use chains
-/// MemorySSA gives you.
+/// MemorySSA gives you, or otherwise produce better info than MemorySSA gives
+/// you.
+/// In particular, while the def-use chains provide basic information, and are
+/// guaranteed to give, for example, the nearest may-aliasing MemoryDef for a
+/// MemoryUse as AliasAnalysis considers it, a user mant want better or other
+/// information. In particular, they may want to use SCEV info to further
+/// disambiguate memory accesses, or they may want the nearest dominating
+/// may-aliasing MemoryDef for a call or a store.  This API enables a
+/// standardized interface to getting and using that info.
+
 class MemorySSAWalker {
 public:
   MemorySSAWalker(MemorySSA *);
@@ -664,6 +674,13 @@ public:
   virtual MemoryAccess *
   getClobberingMemoryAccess(MemoryAccess *, AliasAnalysis::Location &) = 0;
 
+  /// \brief Given a memory access, invalidate anything this walker knows about
+  /// that access.
+  /// This API is used by walkers that store information to perform basic cache
+  /// invalidation.  This will be called by MemorySSA at appropriate times for
+  /// the walker it uses or returns through getWalker.
+  virtual void invalidateInfo(MemoryAccess *){};
+
 protected:
   MemorySSA *MSSA;
 };
@@ -686,12 +703,14 @@ public:
   MemoryAccess *getClobberingMemoryAccess(const Instruction *) override;
   MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
                                           AliasAnalysis::Location &) override;
+  void invalidateInfo(MemoryAccess *) override;
 
 protected:
   struct UpwardsMemoryQuery;
   MemoryAccess *doCacheLookup(const MemoryAccess *, const UpwardsMemoryQuery &);
   void doCacheInsert(const MemoryAccess *, MemoryAccess *,
                      const UpwardsMemoryQuery &);
+  void doCacheRemove(const MemoryAccess *, const UpwardsMemoryQuery &);
 
 private:
   std::pair<MemoryAccess *, bool>

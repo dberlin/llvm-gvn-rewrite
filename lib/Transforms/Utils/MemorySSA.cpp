@@ -77,7 +77,7 @@ public:
 /// \brief This is the same algorithm as PromoteMemoryToRegister's phi
 /// placement algorithm. It is a linear time phi placement algorithm.
 void MemorySSA::determineInsertionPoint(
-    AccessMap &BlockAccesses, const SmallPtrSetImpl<BasicBlock *> &DefBlocks) {
+    const SmallPtrSetImpl<BasicBlock *> &DefBlocks) {
   // Compute dominator levels and BB numbers
   DenseMap<DomTreeNode *, unsigned> DomLevels;
   computeDomLevels(DomLevels);
@@ -148,11 +148,7 @@ void MemorySSA::determineInsertionPoint(
 
   for (auto &BB : DFBlocks) {
     // Insert phi node
-    auto Accesses = BlockAccesses.lookup(BB);
-    if (!Accesses) {
-      Accesses = new ilist<MemoryAccess>;
-      BlockAccesses.insert(std::make_pair(BB, Accesses));
-    }
+    auto Accesses = getOrCreateAccessList(BB);
     MemoryPhi *Phi = new MemoryPhi(
         BB, std::distance(pred_begin(BB), pred_end(BB)), nextID++);
     InstructionToMemoryAccess.insert(std::make_pair(BB, Phi));
@@ -280,6 +276,13 @@ MemorySSA::~MemorySSA() {
   PerBlockAccesses.clear();
   delete LiveOnEntryDef;
 }
+MemorySSA::AccessListType *MemorySSA::getOrCreateAccessList(BasicBlock *BB) {
+  auto Res = PerBlockAccesses.insert(std::make_pair(BB, nullptr));
+  if (Res.second) {
+    Res.first->second = new AccessListType();
+  }
+  return Res.first->second;
+}
 
 MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
                                            DominatorTree *DT) {
@@ -299,45 +302,24 @@ MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
 
   // We temporarily maintain lists of memory accesses per-block,
   // trading time for memory. We could just look up the memory access
-  // for every possible instruction in the stream.  Instead, we build
-  // lists, and then throw it out once the use-def form is built.
+  // for every possible instruction in the stream.
   SmallPtrSet<BasicBlock *, 32> DefiningBlocks;
 
   for (auto &B : F) {
     AccessListType *Accesses = nullptr;
     for (auto &I : B) {
-      bool use = false;
-      bool def = false;
-      AliasAnalysis::ModRefResult ModRef = AA->getModRefInfo(&I);
-      if (ModRef & AliasAnalysis::Mod)
-        def = true;
-      if (ModRef & AliasAnalysis::Ref)
-        use = true;
-
-      // Defs are already uses, so use && def == def
-      if (use && !def) {
-        MemoryUse *MU = new MemoryUse(nullptr, &I, &B);
-        InstructionToMemoryAccess.insert(std::make_pair(&I, MU));
-        if (!Accesses) {
-          Accesses = new AccessListType();
-          PerBlockAccesses.insert(std::make_pair(&B, Accesses));
-        }
-        Accesses->push_back(MU);
-      }
-      if (def) {
-        MemoryDef *MD = new MemoryDef(nullptr, &I, &B, nextID++);
-        InstructionToMemoryAccess.insert(std::make_pair(&I, MD));
+      MemoryAccess *MA = createNewAccess(&I, true);
+      if (!MA)
+        continue;
+      if (isa<MemoryDef>(MA))
         DefiningBlocks.insert(&B);
-        if (!Accesses) {
-          Accesses = new AccessListType();
-          PerBlockAccesses.insert(std::make_pair(&B, Accesses));
-        }
-        Accesses->push_back(MD);
-      }
+      if (!Accesses)
+        Accesses = getOrCreateAccessList(&B);
+      Accesses->push_back(MA);
     }
   }
   // Determine where our PHI's should go
-  determineInsertionPoint(PerBlockAccesses, DefiningBlocks);
+  determineInsertionPoint(DefiningBlocks);
 
   // Now do regular SSA renaming
   SmallPtrSet<BasicBlock *, 16> Visited;
@@ -383,6 +365,8 @@ void MemorySSA::removeFromLookups(MemoryAccess *MA) {
   assert(MA->user_empty() &&
          "Trying to remove memory access that still has uses");
   setDefiningAccess(MA, nullptr);
+  // Invalidate our walker's cache if necessary
+  Walker->invalidateInfo(MA);
   // The call below to erase will destroy MA, so we can't change the order we
   // are doing things here
   Instruction *MemoryInst = MA->getMemoryInst();
@@ -397,7 +381,7 @@ void MemorySSA::removeFromLookups(MemoryAccess *MA) {
 }
 
 /// \brief Helper function to create new memory accesses
-MemoryAccess *MemorySSA::createNewAccess(Instruction *I) {
+MemoryAccess *MemorySSA::createNewAccess(Instruction *I, bool ignoreNonMemory) {
   // There is no easy way to assert that you are replacing it with a memory
   // access, and this call will assert it for us
   AliasAnalysis::ModRefResult ModRef = AA->getModRefInfo(I);
@@ -407,8 +391,11 @@ MemoryAccess *MemorySSA::createNewAccess(Instruction *I) {
   if (ModRef & AliasAnalysis::Ref)
     use = true;
 
+  if (ignoreNonMemory && !def && !use)
+    return nullptr;
+
   assert((def || use) &&
-         "Trying to replace a memory access with a non-memory instruction");
+         "Trying to create a memory access with a non-memory instruction");
 
   if (def) {
     MemoryDef *MD = new MemoryDef(nullptr, I, I->getParent(), nextID++);
@@ -421,13 +408,11 @@ MemoryAccess *MemorySSA::createNewAccess(Instruction *I) {
     return MU;
   }
 
-  llvm_unreachable("should have been a def or a use!");
+  llvm_unreachable("Not a memory instruction!");
 }
 
-MemoryAccess *MemorySSA::findDominatingDef(Instruction *Use,
+MemoryAccess *MemorySSA::findDominatingDef(BasicBlock *UseBlock,
                                            enum InsertionPlace Where) {
-  BasicBlock *UseBlock = Use->getParent();
-
   // Handle the initial case
   if (Where == Beginning)
     // The only thing that could define us at the beginning is a phi node
@@ -456,18 +441,11 @@ MemoryAccess *MemorySSA::findDominatingDef(Instruction *Use,
 MemoryAccess *MemorySSA::addNewMemoryUse(Instruction *Use,
                                          enum InsertionPlace Where) {
   BasicBlock *UseBlock = Use->getParent();
-  AccessListType *Accesses = nullptr;
-  auto Result = PerBlockAccesses.insert(std::make_pair(UseBlock, nullptr));
-  MemoryAccess *DefiningDef = findDominatingDef(Use, Where);
-  if (!Result.second) {
-    Accesses = Result.first->second;
-  } else {
-    Accesses = new AccessListType();
-    Result.first->second = Accesses;
-  }
+  MemoryAccess *DefiningDef = findDominatingDef(UseBlock, Where);
+  AccessListType *Accesses = getOrCreateAccessList(UseBlock);
   MemoryAccess *MA = createNewAccess(Use);
 
-  // Set starting point, then optimize
+  // Set starting point, then optimize to get correct answer.
   MA->setDefiningAccess(DefiningDef);
   auto RealVal = Walker->getClobberingMemoryAccess(MA->getMemoryInst());
   MA->setDefiningAccess(RealVal);
@@ -488,15 +466,7 @@ MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
     MemoryAccess *Replacee, Instruction *Replacer, enum InsertionPlace Where) {
   BasicBlock *ReplacerBlock = Replacer->getParent();
 
-  AccessListType *Accesses = nullptr;
-  auto Result = PerBlockAccesses.insert(std::make_pair(ReplacerBlock, nullptr));
-
-  if (!Result.second) {
-    Accesses = Result.first->second;
-  } else {
-    Accesses = new AccessListType();
-    Result.first->second = Accesses;
-  }
+  AccessListType *Accesses = getOrCreateAccessList(ReplacerBlock);
   if (Where == Beginning) {
     // Access must go after the first phi
     auto AI = Accesses->begin();
@@ -505,13 +475,11 @@ MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
         break;
       ++AI;
     }
-
     return replaceMemoryAccessWithNewAccess(Replacee, Replacer, AI);
-  }
-
-  else
+  } else {
     return replaceMemoryAccessWithNewAccess(Replacee, Replacer,
                                             Accesses->end());
+  }
 }
 
 MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
@@ -548,11 +516,29 @@ bool MemorySSA::dominatesUse(MemoryAccess *Replacer,
   if (isa<MemoryUse>(Replacee) || isa<MemoryDef>(Replacee))
     return DT->dominates(Replacer->getBlock(), Replacee->getBlock());
   MemoryPhi *MP = cast<MemoryPhi>(Replacee);
+  // For a phi node, the use occurs in the predecessor block of the phi node.
+  // Since we may occur multiple times in the phi node, we have to check each
+  // operand to ensure Replacer dominates each operand where Replacee occurs.
   for (const auto &Arg : MP->operands())
     if (Arg.second == Replacee)
       if (!DT->dominates(Replacer->getBlock(), Arg.first))
         return false;
   return true;
+}
+
+/// \brief Replace all occurrences of \p Replacee with \p Replacer in a PHI
+/// node.
+/// \return true if we replaced all operands of the phi node.
+bool MemorySSA::replaceAllOccurrences(MemoryPhi *P, MemoryAccess *Replacee,
+                                      MemoryAccess *Replacer) {
+  bool ReplacedAllValues = true;
+  for (unsigned i = 0, e = P->getNumIncomingValues(); i != e; ++i) {
+    if (P->getIncomingValue(i) == Replacee)
+      P->setIncomingValue(i, Replacer);
+    else
+      ReplacedAllValues = false;
+  }
+  return ReplacedAllValues;
 }
 
 void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
@@ -573,12 +559,8 @@ void MemorySSA::replaceMemoryAccess(MemoryAccess *Replacee,
     assert(dominatesUse(Replacer, Replacee) &&
            "Definitions will not dominate uses in replacement!");
     if (MemoryPhi *MP = dyn_cast<MemoryPhi>(U)) {
-      for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i) {
-        if (MP->getIncomingValue(i) == Replacee)
-          MP->setIncomingValue(i, Replacer);
-        else
-          replacedAllPhiEntries = false;
-      }
+      if (replaceAllOccurrences(MP, Replacee, Replacer))
+        replacedAllPhiEntries = true;
     } else {
       U->setDefiningAccess(Replacer);
     }
@@ -613,8 +595,9 @@ void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
     assert(MP->user_empty() && "We can't delete memory phis that still have "
                                "uses, we don't know where the uses should "
                                "repoint to!");
-    assert(onlySingleValue(MP) && "This phi still points to multiple values, "
-                                  "which means it is still needed");
+    assert((MP->user_empty() || onlySingleValue(MP)) &&
+           "This phi still points to multiple values, "
+           "which means it is still needed");
   } else {
     MemoryAccess *DefiningAccess = getDefiningAccess(MA);
     // Re-point the uses at our defining access
@@ -622,10 +605,7 @@ void MemorySSA::removeMemoryAccess(MemoryAccess *MA) {
       assert(dominatesUse(DefiningAccess, U) &&
              "Definitions will not dominate uses in removal!");
       if (MemoryPhi *MP = dyn_cast<MemoryPhi>(U)) {
-        for (unsigned i = 0, e = MP->getNumIncomingValues(); i != e; ++i) {
-          if (MP->getIncomingValue(i) == MA)
-            MP->setIncomingValue(i, DefiningAccess);
-        }
+        replaceAllOccurrences(MP, MA, DefiningAccess);
       } else {
         U->setDefiningAccess(DefiningAccess);
       }
@@ -888,14 +868,21 @@ struct CachingMemorySSAWalker::UpwardsMemoryQuery {
   SmallPtrSet<const MemoryAccess *, 32> VisitedCalls;
 };
 
+void CachingMemorySSAWalker::doCacheRemove(const MemoryAccess *M,
+                                           const UpwardsMemoryQuery &Q) {
+  if (Q.isCall)
+    CachedUpwardsClobberingCall.erase(M);
+  else
+    CachedUpwardsClobberingAccess.erase(std::make_pair(M, Q.Loc));
+}
+
 void CachingMemorySSAWalker::doCacheInsert(const MemoryAccess *M,
                                            MemoryAccess *Result,
                                            const UpwardsMemoryQuery &Q) {
   if (Q.isCall)
-    CachedUpwardsClobberingCall.insert(std::make_pair(M, Result));
+    CachedUpwardsClobberingCall[M] = Result;
   else
-    CachedUpwardsClobberingAccess.insert(
-        std::make_pair(std::make_pair(M, Q.Loc), Result));
+    CachedUpwardsClobberingAccess[{M, Q.Loc}] = Result;
 }
 
 MemoryAccess *
@@ -1007,10 +994,10 @@ static bool possiblyAffectedBy(const Instruction *QueryInst,
   if (isa<LoadInst>(DefInst) && isa<LoadInst>(QueryInst)) {
     const LoadInst *DefLI = cast<LoadInst>(DefInst);
     const LoadInst *QueryLI = cast<LoadInst>(QueryInst);
-    // An unordered load can't be clobbered by an ordered one in any
-    // circumstances.
-    if (QueryLI->isUnordered() && !DefLI->isUnordered())
-      return false;
+    // A non-volatile load can't be clobbered by a volatile one unless the
+    // defining one is ordered.
+    if (!QueryLI->isVolatile() && DefLI->isVolatile())
+      return !DefLI->isUnordered();
   }
   return true;
 }
@@ -1045,7 +1032,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
         return std::make_pair(CacheResult, false);
       if (!Q.isCall) {
         // Okay, well, see if it's a volatile load vs non-volatile load
-        // situation or smoething similar)
+        // situation.
         if (possiblyAffectedBy(Q.Inst, DefMemoryInst))
           // Check whether our memory location is modified by this instruction
           if (AA->getModRefInfo(DefMemoryInst, Q.Loc) & AliasAnalysis::Mod)
@@ -1121,14 +1108,15 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   // try to disambiguate
   if (isa<FenceInst>(I)) {
     return StartingAccess;
-  } else if (!isa<CallInst>(I) && !isa<InvokeInst>(I)) {
+  } else if (ImmutableCallSite(I)) {
+    Q.isCall = true;
+    Q.Inst = I;
+  } else {
     Q.isCall = false;
     Q.Loc = AA->getLocation(I);
     Q.Inst = I;
-  } else {
-    Q.isCall = true;
-    Q.Inst = I;
   }
+
   auto CacheResult = doCacheLookup(StartingAccess, Q);
   if (CacheResult)
     return CacheResult;
@@ -1157,6 +1145,23 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   DEBUG(dbgs() << *FinalAccess << "\n");
 
   return FinalAccess;
+}
+
+void CachingMemorySSAWalker::invalidateInfo(MemoryAccess *MA) {
+  UpwardsMemoryQuery Q;
+  if (!isa<MemoryPhi>(MA)) {
+    Instruction *I = MA->getMemoryInst();
+    if (ImmutableCallSite(I)) {
+      Q.isCall = true;
+      Q.Inst = I;
+    } else {
+      Q.isCall = false;
+      Q.Loc = AA->getLocation(I);
+      Q.Inst = I;
+    }
+  }
+
+  doCacheRemove(MA, Q);
 }
 
 MemoryAccess *
