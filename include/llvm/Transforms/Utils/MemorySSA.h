@@ -78,6 +78,7 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/Pass.h"
 #include <list>
+
 namespace llvm {
 
 class BasicBlock;
@@ -448,8 +449,11 @@ public:
   /// \brief Return the list of MemoryAccess's for a given basic block.
   ///
   /// This list is not modifiable by the user.
-  const AccessListType *getBlockAccesses(const BasicBlock *BB) {
-    return PerBlockAccesses.lookup(BB);
+  const AccessListType* getBlockAccesses(const BasicBlock *BB) {
+    auto It = PerBlockAccesses.find(BB);
+    if (It == PerBlockAccesses.end())
+      return nullptr;
+    return It->second.get();
   }
 
   /// \brief Remove a MemoryAccess from MemorySSA, including updating all
@@ -529,7 +533,7 @@ protected:
 
 private:
   void verifyUseInDefs(MemoryAccess *, MemoryAccess *);
-  typedef DenseMap<const BasicBlock *, AccessListType *> AccessMap;
+  typedef DenseMap<const BasicBlock *, std::unique_ptr<AccessListType>> AccessMap;
 
   void
   determineInsertionPoint(const SmallPtrSetImpl<BasicBlock *> &DefiningBlocks);
@@ -543,7 +547,7 @@ private:
   MemoryAccess *renameBlock(BasicBlock *, MemoryAccess *, MemorySSAWalker *);
   void renamePass(DomTreeNode *, MemoryAccess *IncomingVal,
                   SmallPtrSet<BasicBlock *, 16> &Visited, MemorySSAWalker *);
-  AccessListType *getOrCreateAccessList(BasicBlock *);
+  std::unique_ptr<AccessListType> &getOrCreateAccessList(BasicBlock *);
   bool replaceAllOccurrences(MemoryPhi *, MemoryAccess *, MemoryAccess *);
   AliasAnalysis *AA;
   DominatorTree *DT;
