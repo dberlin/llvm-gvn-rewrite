@@ -158,37 +158,21 @@ void MemorySSA::determineInsertionPoint(
 }
 
 /// \brief This is the standard SSA renaming algorithm.
-void MemorySSA::renamePass(BasicBlock *BB, BasicBlock *Pred,
-                           MemoryAccess *IncomingVal, AccessMap &BlockAccesses,
-                           std::vector<RenamePassData> &Worklist,
+///
+/// We walk the dominator tree in preorder, renaming accesses, and then filling
+/// in phi nodes in our successors.
+void MemorySSA::renamePass(BasicBlock *BB, MemoryAccess *IncomingVal,
                            SmallPtrSet<BasicBlock *, 16> &Visited,
                            MemorySSAWalker *Walker) {
-NextIteration:
-  const auto Accesses = BlockAccesses.lookup(BB);
-
-  // First rename the phi nodes
-  if (Accesses && isa<MemoryPhi>(Accesses->front())) {
-    MemoryPhi *Phi = cast<MemoryPhi>(&Accesses->front());
-    unsigned NumEdges = std::count(succ_begin(Pred), succ_end(Pred), BB);
-    assert(NumEdges && "Must be at least one edge from Pred to BB!");
-    for (unsigned i = 0; i != NumEdges; ++i)
-      Phi->addIncoming(IncomingVal, Pred);
-
-    IncomingVal = Phi;
-  }
-
-  // Don't revisit blocks.
-  if (!Visited.insert(BB).second)
-    return;
-
+  auto Accesses = PerBlockAccesses.lookup(BB);
+  Visited.insert(BB);
   // Skip if the list is empty, but we still have to pass thru the
   // incoming value info/etc to successors
   if (Accesses)
     for (auto &L : *Accesses) {
-      if (isa<MemoryPhi>(L))
-        continue;
-
-      if (MemoryUse *MU = dyn_cast<MemoryUse>(&L)) {
+      if (isa<MemoryPhi>(L)) {
+        IncomingVal = &L;
+      } else if (MemoryUse *MU = dyn_cast<MemoryUse>(&L)) {
         MU->setDefiningAccess(IncomingVal);
         auto RealVal = Walker->getClobberingMemoryAccess(MU->getMemoryInst());
         MU->setDefiningAccess(RealVal);
@@ -201,24 +185,21 @@ NextIteration:
         IncomingVal = MD;
       }
     }
-  // 'Recurse' to our successors.
-  succ_iterator I = succ_begin(BB), E = succ_end(BB);
-  if (I == E)
-    return;
 
-  // Keep track of the successors so we don't visit the same successor twice
-  SmallPtrSet<BasicBlock *, 8> VisitedSuccs;
-
-  // Handle the first successor without using the worklist.
-  VisitedSuccs.insert(*I);
-  Pred = BB;
-  BB = *I;
-  ++I;
-
-  for (; I != E; ++I)
-    if (VisitedSuccs.insert(*I).second)
-      Worklist.push_back(RenamePassData(*I, Pred, IncomingVal));
-  goto NextIteration;
+  for (auto S : successors(BB)) {
+    Accesses = PerBlockAccesses.lookup(S);
+    // Rename the phi nodes in our successor block
+    if (Accesses && isa<MemoryPhi>(Accesses->front())) {
+      MemoryPhi *Phi = cast<MemoryPhi>(&Accesses->front());
+      unsigned NumEdges = std::count(succ_begin(BB), succ_end(BB), S);
+      assert(NumEdges && "Must be at least one edge from Succ to BB!");
+      for (unsigned i = 0; i != NumEdges; ++i)
+        Phi->addIncoming(IncomingVal, BB);
+    }
+  }
+  DomTreeNode *DTN = DT->getNode(BB);
+  for (auto CI = DTN->begin(), CE = DTN->end(); CI != CE; ++CI)
+    renamePass((*CI)->getBlock(), IncomingVal, Visited, Walker);
 }
 
 /// \brief Compute dominator levels, used by the phi insertion algorithm above.
@@ -323,16 +304,7 @@ MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
 
   // Now do regular SSA renaming
   SmallPtrSet<BasicBlock *, 16> Visited;
-
-  std::vector<RenamePassData> RenamePassWorklist;
-  RenamePassWorklist.push_back({F.begin(), nullptr, LiveOnEntryDef});
-  do {
-    RenamePassData RPD;
-    RPD.swap(RenamePassWorklist.back());
-    RenamePassWorklist.pop_back();
-    renamePass(RPD.BB, RPD.Pred, RPD.MA, PerBlockAccesses, RenamePassWorklist,
-               Visited, Walker);
-  } while (!RenamePassWorklist.empty());
+  renamePass(F.begin(), LiveOnEntryDef, Visited, Walker);
 
   // At this point, we may have unreachable blocks with unreachable accesses
   // Given any uses in unreachable blocks the live on entry definition
@@ -391,6 +363,8 @@ MemoryAccess *MemorySSA::createNewAccess(Instruction *I, bool ignoreNonMemory) {
   if (ModRef & AliasAnalysis::Ref)
     use = true;
 
+  // It's possible for an instruction to not modify memory at all. During
+  // construction, we ignore them.
   if (ignoreNonMemory && !def && !use)
     return nullptr;
 
