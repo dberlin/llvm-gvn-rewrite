@@ -1010,9 +1010,9 @@ static bool possiblyAffectedBy(const Instruction *QueryInst,
     const LoadInst *DefLI = cast<LoadInst>(DefInst);
     const LoadInst *QueryLI = cast<LoadInst>(QueryInst);
     // A non-volatile load can't be clobbered by a volatile one unless the
-    // defining one is ordered.
+    // volatile one is ordered.
     if (!QueryLI->isVolatile() && DefLI->isVolatile())
-      return !DefLI->isUnordered();
+      return DefLI->getOrdering() > Unordered;
   }
   return true;
 }
