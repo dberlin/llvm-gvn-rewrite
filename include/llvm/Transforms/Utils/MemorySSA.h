@@ -449,7 +449,7 @@ public:
   ///
   /// This list is not modifiable by the user.
   const AccessListType *getBlockAccesses(const BasicBlock *BB) {
-    return PerBlockAccesses[BB];
+    return PerBlockAccesses.lookup(BB);
   }
 
   /// \brief Remove a MemoryAccess from MemorySSA, including updating all
@@ -542,23 +542,18 @@ private:
 
   struct RenamePassData {
     BasicBlock *BB;
-    BasicBlock *Pred;
     MemoryAccess *MA;
 
-    RenamePassData() : BB(nullptr), Pred(nullptr), MA(nullptr) {}
+    RenamePassData() : BB(nullptr), MA(nullptr) {}
 
-    RenamePassData(BasicBlock *B, BasicBlock *P, MemoryAccess *M)
-        : BB(B), Pred(P), MA(M) {}
+    RenamePassData(BasicBlock *B, MemoryAccess *M) : BB(B), MA(M) {}
     void swap(RenamePassData &RHS) {
       std::swap(BB, RHS.BB);
-      std::swap(Pred, RHS.Pred);
       std::swap(MA, RHS.MA);
     }
   };
 
-  void renamePass(BasicBlock *BB, BasicBlock *Pred, MemoryAccess *IncomingVal,
-                  AccessMap &BlockAccesses,
-                  std::vector<RenamePassData> &Worklist,
+  void renamePass(BasicBlock *BB, MemoryAccess *IncomingVal,
                   SmallPtrSet<BasicBlock *, 16> &Visited, MemorySSAWalker *);
   AccessListType *getOrCreateAccessList(BasicBlock *);
   bool replaceAllOccurrences(MemoryPhi *, MemoryAccess *, MemoryAccess *);

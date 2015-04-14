@@ -28,8 +28,8 @@ bb68:                                             ; preds = %bb26
   br label %bb77
 
 bb77:                                             ; preds = %bb68, %bb26
-; CHECK:  2 = MemoryPhi({bb68,1},{bb26,3})
-; 2 = MemoryPhi({bb68,1},{bb26,3})
+; CHECK:  2 = MemoryPhi({bb26,3},{bb68,1})
+; 2 = MemoryPhi({bb26,3},{bb68,1})
 ; CHECK:  MemoryUse(2)
 ; MemoryUse(2)
 ; CHECK-NEXT:   %tmp78 = load i64*, i64** %tmp25, align 8
