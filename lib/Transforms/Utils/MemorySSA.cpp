@@ -148,7 +148,7 @@ void MemorySSA::determineInsertionPoint(
 
   for (auto &BB : DFBlocks) {
     // Insert phi node
-    auto Accesses = getOrCreateAccessList(BB);
+    auto &Accesses = getOrCreateAccessList(BB);
     MemoryPhi *Phi = new MemoryPhi(
         BB, std::distance(pred_begin(BB), pred_end(BB)), nextID++);
     InstructionToMemoryAccess.insert(std::make_pair(BB, Phi));
@@ -179,10 +179,11 @@ struct RenamePassData {
 /// \returns The new incoming value.
 MemoryAccess *MemorySSA::renameBlock(BasicBlock *BB, MemoryAccess *IncomingVal,
                                      MemorySSAWalker *Walker) {
-  auto Accesses = PerBlockAccesses.lookup(BB);
+  auto It = PerBlockAccesses.find(BB);
   // Skip if the list is empty, but we still have to pass thru the
   // incoming value info/etc to successors
-  if (Accesses)
+  if (It != PerBlockAccesses.end()) {
+    auto &Accesses = It->second;
     for (auto &L : *Accesses) {
       if (isa<MemoryPhi>(L)) {
         IncomingVal = &L;
@@ -199,11 +200,14 @@ MemoryAccess *MemorySSA::renameBlock(BasicBlock *BB, MemoryAccess *IncomingVal,
         IncomingVal = MD;
       }
     }
+  }
 
   for (auto S : successors(BB)) {
-    Accesses = PerBlockAccesses.lookup(S);
+    auto It = PerBlockAccesses.find(S);
     // Rename the phi nodes in our successor block
-    if (Accesses && isa<MemoryPhi>(Accesses->front())) {
+
+    if (It != PerBlockAccesses.end() && isa<MemoryPhi>(It->second->front())) {
+      auto &Accesses = It->second;
       MemoryPhi *Phi = cast<MemoryPhi>(&Accesses->front());
       unsigned NumEdges = std::count(succ_begin(BB), succ_end(BB), S);
       assert(NumEdges && "Must be at least one edge from Succ to BB!");
@@ -246,6 +250,11 @@ void MemorySSA::renamePass(DomTreeNode *Root, MemoryAccess *IncomingVal,
 
 /// \brief Compute dominator levels, used by the phi insertion algorithm above.
 void MemorySSA::computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels) {
+
+  for (auto DFI = df_begin(DT->getRootNode()), DFE = df_end(DT->getRootNode());
+       DFI != DFE; ++DFI)
+    DomLevels[*DFI] = DFI.getPathLength() - 1;
+#if 0
   SmallVector<DomTreeNode *, 32> Worklist;
 
   DomTreeNode *Root = DT->getRootNode();
@@ -260,6 +269,7 @@ void MemorySSA::computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels) {
       Worklist.push_back(*CI);
     }
   }
+#endif
 }
 
 /// \brief This handles unreachable block acccesses by deleting phi nodes in
@@ -270,10 +280,11 @@ void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
   assert(!DT->isReachableFromEntry(BB) &&
          "Reachable block found while handling unreachable blocks");
 
-  auto Accesses = BlockAccesses.lookup(BB);
-  if (!Accesses)
+  auto It = BlockAccesses.find(BB);
+  if (It == BlockAccesses.end())
     return;
-
+  
+  auto &Accesses = It->second;
   for (auto AI = Accesses->begin(), AE = Accesses->end(); AI != AE;) {
     auto Next = std::next(AI);
     // If we have a phi, just remove it. We are going to replace all
@@ -293,16 +304,14 @@ MemorySSA::MemorySSA(Function &Func)
 
 MemorySSA::~MemorySSA() {
   InstructionToMemoryAccess.clear();
-  // This will destroy and delete all the accesses
-  for (auto &BA : PerBlockAccesses)
-    delete BA.second;
   PerBlockAccesses.clear();
   delete LiveOnEntryDef;
 }
-MemorySSA::AccessListType *MemorySSA::getOrCreateAccessList(BasicBlock *BB) {
+std::unique_ptr<MemorySSA::AccessListType> &
+MemorySSA::getOrCreateAccessList(BasicBlock *BB) {
   auto Res = PerBlockAccesses.insert(std::make_pair(BB, nullptr));
   if (Res.second) {
-    Res.first->second = new AccessListType();
+    Res.first->second = make_unique<AccessListType>(); // AccessListType();
   }
   return Res.first->second;
 }
@@ -337,7 +346,7 @@ MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
       if (isa<MemoryDef>(MA))
         DefiningBlocks.insert(&B);
       if (!Accesses)
-        Accesses = getOrCreateAccessList(&B);
+        Accesses = getOrCreateAccessList(&B).get();
       Accesses->push_back(MA);
     }
   }
@@ -386,10 +395,9 @@ void MemorySSA::removeFromLookups(MemoryAccess *MA) {
   Instruction *MemoryInst = MA->getMemoryInst();
   if (MemoryInst)
     InstructionToMemoryAccess.erase(MemoryInst);
-  auto *Accesses = PerBlockAccesses[MA->getBlock()];
+  auto &Accesses = PerBlockAccesses.find(MA->getBlock())->second;
   Accesses->erase(MA);
   if (Accesses->empty()) {
-    delete Accesses;
     PerBlockAccesses.erase(MA->getBlock());
   }
 }
@@ -440,8 +448,9 @@ MemoryAccess *MemorySSA::findDominatingDef(BasicBlock *UseBlock,
     CurrNode = CurrNode->getIDom();
   Where = End;
   while (CurrNode) {
-    AccessListType *Accesses = PerBlockAccesses.lookup(CurrNode->getBlock());
-    if (Accesses) {
+    auto It = PerBlockAccesses.find(CurrNode->getBlock());
+    if (It != PerBlockAccesses.end()) {
+      auto &Accesses = It->second;
       for (auto RAI = Accesses->rbegin(), RAE = Accesses->rend(); RAI != RAE;
            ++RAI) {
         if (isa<MemoryDef>(*RAI) || isa<MemoryPhi>(*RAI))
@@ -457,7 +466,7 @@ MemoryAccess *MemorySSA::addNewMemoryUse(Instruction *Use,
                                          enum InsertionPlace Where) {
   BasicBlock *UseBlock = Use->getParent();
   MemoryAccess *DefiningDef = findDominatingDef(UseBlock, Where);
-  AccessListType *Accesses = getOrCreateAccessList(UseBlock);
+  auto &Accesses = getOrCreateAccessList(UseBlock);
   MemoryAccess *MA = createNewAccess(Use);
 
   // Set starting point, then optimize to get correct answer.
@@ -481,7 +490,7 @@ MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
     MemoryAccess *Replacee, Instruction *Replacer, enum InsertionPlace Where) {
   BasicBlock *ReplacerBlock = Replacer->getParent();
 
-  AccessListType *Accesses = getOrCreateAccessList(ReplacerBlock);
+  auto &Accesses = getOrCreateAccessList(ReplacerBlock);
   if (Where == Beginning) {
     // Access must go after the first phi
     auto AI = Accesses->begin();
@@ -518,8 +527,10 @@ MemoryAccess *MemorySSA::replaceMemoryAccessWithNewAccess(
 
   MA = createNewAccess(Replacer);
   MA->setDefiningAccess(DefiningAccess);
-  AccessListType *Accesses = PerBlockAccesses.lookup(ReplacerBlock);
-  assert(Accesses && "Can't use iterator insertion for brand new block");
+  auto It = PerBlockAccesses.find(ReplacerBlock);
+  assert(It != PerBlockAccesses.end() &&
+         "Can't use iterator insertion for brand new block");
+  auto &Accesses = It->second;
   Accesses->insert(Where, MA);
   replaceMemoryAccess(Replacee, MA);
   return MA;
