@@ -283,7 +283,7 @@ void MemorySSA::markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses,
   auto It = BlockAccesses.find(BB);
   if (It == BlockAccesses.end())
     return;
-  
+
   auto &Accesses = It->second;
   for (auto AI = Accesses->begin(), AE = Accesses->end(); AI != AE;) {
     auto Next = std::next(AI);

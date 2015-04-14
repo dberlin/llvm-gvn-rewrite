@@ -449,7 +449,7 @@ public:
   /// \brief Return the list of MemoryAccess's for a given basic block.
   ///
   /// This list is not modifiable by the user.
-  const AccessListType* getBlockAccesses(const BasicBlock *BB) {
+  const AccessListType *getBlockAccesses(const BasicBlock *BB) {
     auto It = PerBlockAccesses.find(BB);
     if (It == PerBlockAccesses.end())
       return nullptr;
@@ -533,7 +533,8 @@ protected:
 
 private:
   void verifyUseInDefs(MemoryAccess *, MemoryAccess *);
-  typedef DenseMap<const BasicBlock *, std::unique_ptr<AccessListType>> AccessMap;
+  typedef DenseMap<const BasicBlock *, std::unique_ptr<AccessListType>>
+      AccessMap;
 
   void
   determineInsertionPoint(const SmallPtrSetImpl<BasicBlock *> &DefiningBlocks);
