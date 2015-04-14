@@ -157,15 +157,29 @@ void MemorySSA::determineInsertionPoint(
   }
 }
 
-/// \brief This is the standard SSA renaming algorithm.
-///
-/// We walk the dominator tree in preorder, renaming accesses, and then filling
-/// in phi nodes in our successors.
-void MemorySSA::renamePass(BasicBlock *BB, MemoryAccess *IncomingVal,
-                           SmallPtrSet<BasicBlock *, 16> &Visited,
-                           MemorySSAWalker *Walker) {
+namespace {
+struct RenamePassData {
+  DomTreeNode *DTN;
+  DomTreeNode::const_iterator ChildIt;
+  MemoryAccess *IncomingVal;
+
+  RenamePassData(DomTreeNode *D, DomTreeNode::const_iterator It,
+                 MemoryAccess *M)
+      : DTN(D), ChildIt(It), IncomingVal(M) {}
+  void swap(RenamePassData &RHS) {
+    std::swap(DTN, RHS.DTN);
+    std::swap(ChildIt, RHS.ChildIt);
+    std::swap(IncomingVal, RHS.IncomingVal);
+  }
+};
+}
+
+/// \brief Rename a single basic block into MemorySSA form.
+/// Uses the standard SSA renaming algorithm.
+/// \returns The new incoming value.
+MemoryAccess *MemorySSA::renameBlock(BasicBlock *BB, MemoryAccess *IncomingVal,
+                                     MemorySSAWalker *Walker) {
   auto Accesses = PerBlockAccesses.lookup(BB);
-  Visited.insert(BB);
   // Skip if the list is empty, but we still have to pass thru the
   // incoming value info/etc to successors
   if (Accesses)
@@ -177,10 +191,10 @@ void MemorySSA::renamePass(BasicBlock *BB, MemoryAccess *IncomingVal,
         auto RealVal = Walker->getClobberingMemoryAccess(MU->getMemoryInst());
         MU->setDefiningAccess(RealVal);
       } else if (MemoryDef *MD = dyn_cast<MemoryDef>(&L)) {
-        // We can't legally optimize defs, because we only allow single memory
-        // phis/uses on operations, and if we optimize these, we can end up with
-        // multiple reaching defs.  Uses do not have this problem, since they do
-        // not produce a value
+        // We can't legally optimize defs, because we only allow single
+        // memory phis/uses on operations, and if we optimize these, we can
+        // end up with multiple reaching defs.  Uses do not have this
+        // problem, since they do not produce a value
         MD->setDefiningAccess(IncomingVal);
         IncomingVal = MD;
       }
@@ -197,9 +211,37 @@ void MemorySSA::renamePass(BasicBlock *BB, MemoryAccess *IncomingVal,
         Phi->addIncoming(IncomingVal, BB);
     }
   }
-  DomTreeNode *DTN = DT->getNode(BB);
-  for (auto CI = DTN->begin(), CE = DTN->end(); CI != CE; ++CI)
-    renamePass((*CI)->getBlock(), IncomingVal, Visited, Walker);
+  return IncomingVal;
+}
+
+/// \brief This is the standard SSA renaming algorithm.
+///
+/// We walk the dominator tree in preorder, renaming accesses, and then filling
+/// in phi nodes in our successors.
+void MemorySSA::renamePass(DomTreeNode *Root, MemoryAccess *IncomingVal,
+                           SmallPtrSet<BasicBlock *, 16> &Visited,
+                           MemorySSAWalker *Walker) {
+  SmallVector<RenamePassData, 32> WorkStack;
+  IncomingVal = renameBlock(Root->getBlock(), IncomingVal, Walker);
+  WorkStack.push_back({Root, Root->begin(), IncomingVal});
+  Visited.insert(Root->getBlock());
+
+  while (!WorkStack.empty()) {
+    DomTreeNode *Node = WorkStack.back().DTN;
+    DomTreeNode::const_iterator ChildIt = WorkStack.back().ChildIt;
+    IncomingVal = WorkStack.back().IncomingVal;
+
+    if (ChildIt == Node->end()) {
+      WorkStack.pop_back();
+    } else {
+      DomTreeNode *Child = *ChildIt;
+      ++WorkStack.back().ChildIt;
+      BasicBlock *BB = Child->getBlock();
+      Visited.insert(BB);
+      IncomingVal = renameBlock(BB, IncomingVal, Walker);
+      WorkStack.push_back({Child, Child->begin(), IncomingVal});
+    }
+  }
 }
 
 /// \brief Compute dominator levels, used by the phi insertion algorithm above.
@@ -304,7 +346,7 @@ MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
 
   // Now do regular SSA renaming
   SmallPtrSet<BasicBlock *, 16> Visited;
-  renamePass(F.begin(), LiveOnEntryDef, Visited, Walker);
+  renamePass(DT->getRootNode(), LiveOnEntryDef, Visited, Walker);
 
   // At this point, we may have unreachable blocks with unreachable accesses
   // Given any uses in unreachable blocks the live on entry definition

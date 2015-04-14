@@ -540,20 +540,8 @@ private:
   MemoryAccess *createNewAccess(Instruction *, bool ignoreNonMemory = false);
   MemoryAccess *findDominatingDef(BasicBlock *, enum InsertionPlace);
 
-  struct RenamePassData {
-    BasicBlock *BB;
-    MemoryAccess *MA;
-
-    RenamePassData() : BB(nullptr), MA(nullptr) {}
-
-    RenamePassData(BasicBlock *B, MemoryAccess *M) : BB(B), MA(M) {}
-    void swap(RenamePassData &RHS) {
-      std::swap(BB, RHS.BB);
-      std::swap(MA, RHS.MA);
-    }
-  };
-
-  void renamePass(BasicBlock *BB, MemoryAccess *IncomingVal,
+  MemoryAccess *renameBlock(BasicBlock *, MemoryAccess *, MemorySSAWalker *);
+  void renamePass(DomTreeNode *, MemoryAccess *IncomingVal,
                   SmallPtrSet<BasicBlock *, 16> &Visited, MemorySSAWalker *);
   AccessListType *getOrCreateAccessList(BasicBlock *);
   bool replaceAllOccurrences(MemoryPhi *, MemoryAccess *, MemoryAccess *);
