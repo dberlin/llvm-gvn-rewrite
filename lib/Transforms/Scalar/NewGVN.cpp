@@ -2958,48 +2958,28 @@ bool NewGVN::eliminateInstructions(Function &F) {
   // for elimination purposes
 
   bool AnythingReplaced = false;
-  unsigned DFSNum = 0;
 
   // Since we are going to walk the domtree anyway, and we can't guarantee the
   // DFS numbers are updated, we compute some ourselves.
-  SmallVector<std::pair<const DomTreeNode *, DomTreeNode::const_iterator>, 32>
-      WorkStack;
 
-  WorkStack.emplace_back(DT->getRootNode(), DT->getRootNode()->begin());
-  DFSDomMap[DT->getRoot()].first = DFSNum++;
-
-  while (!WorkStack.empty()) {
-    const DomTreeNode *Node = WorkStack.back().first;
-    DomTreeNode::const_iterator ChildIt = WorkStack.back().second;
-    BasicBlock *BB = Node->getBlock();
-
-    if (!ReachableBlocks.count(BB)) {
-      for (const auto S : successors(BB)) {
+  DT->updateDFSNumbers();
+  for (auto &B : F) {
+    if (!ReachableBlocks.count(&B)) {
+      for (const auto S : successors(&B)) {
         for (auto II = S->begin(); isa<PHINode>(II); ++II) {
           PHINode &Phi = cast<PHINode>(*II);
           DEBUG(dbgs() << "Replacing incoming value of " << *II << " for block "
-                       << getBlockName(BB)
+                       << getBlockName(&B)
                        << " with undef due to it being unreachable\n");
           for (auto &Operand : Phi.incoming_values())
-            if (Phi.getIncomingBlock(Operand) == BB)
+            if (Phi.getIncomingBlock(Operand) == &B)
               Operand.set(UndefValue::get(Phi.getType()));
         }
       }
     }
-
-    // If we visited all of the children of this node, "recurse" back up the
-    // stack setting the DFOutNum.
-    if (ChildIt == Node->end()) {
-      DFSDomMap[BB].second = DFSNum++;
-      WorkStack.pop_back();
-    } else {
-      // Otherwise, recursively visit this child.
-      const DomTreeNode *Child = *ChildIt;
-      ++WorkStack.back().second;
-
-      WorkStack.emplace_back(Child, Child->begin());
-      DFSDomMap[Child->getBlock()].first = DFSNum++;
-    }
+    DomTreeNode *Node = DT->getNode(&B);
+    if (Node)
+      DFSDomMap[&B] = {Node->getDFSNumIn(), Node->getDFSNumOut()};
   }
 
   for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
@@ -3482,9 +3462,12 @@ void NewGVN::analyzeAvailability(Instruction *I,
       ValuesPerBlock.push_back(AvailableValueInBlock::getUndef(P));
       continue;
     }
-
-    const Expression *E = phiTranslateExpression(ValueToExpression.lookup(I),
-                                                 I->getParent(), P, I);
+    const Expression *Before = ValueToExpression.lookup(I);
+    // This can happen if it was too complex or complicated an expression for
+    // GVN to analyze
+    if (!Before)
+      return;
+    const Expression *E = phiTranslateExpression(Before, I->getParent(), P, I);
     Value *V = nullptr;
     if (E) {
       E = trySimplifyPREExpression(E, P);
