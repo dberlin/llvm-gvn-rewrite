@@ -206,13 +206,10 @@ class NewGVN : public FunctionPass {
   SmallDenseMap<User *, std::pair<unsigned, Value *>> SingleUserEquivalences;
 
   // Expression to class mapping
-  typedef DenseMap<const Expression *, CongruenceClass */*,
-                                                          ComparingExpressionInfo*/>
+  typedef DenseMap<const Expression *, CongruenceClass *, ComparingExpressionInfo>
       ExpressionClassMap;
   ExpressionClassMap ExpressionToClass;
 
-  // Uniquifying expressions
-  DenseSet<const Expression *, ComparingExpressionInfo> UniquedExpressions;
   SmallPtrSet<Value *, 8> ChangedValues;
 
   // Reachability info
@@ -303,7 +300,6 @@ private:
   const AggregateValueExpression *
   createAggregateValueExpression(Instruction *, const BasicBlock *);
 
-  const Expression *uniquifyExpression(const Expression *);
   const BasicExpression *createCmpExpression(unsigned, Type *,
                                              CmpInst::Predicate, Value *,
                                              Value *, const BasicBlock *);
@@ -780,13 +776,6 @@ const Expression *NewGVN::createExpression(Instruction *I,
   return E;
 }
 
-const Expression *NewGVN::uniquifyExpression(const Expression *E) {
-  auto P = UniquedExpressions.insert(E);
-  if (!P.second) {
-    return *(P.first);
-  }
-  return E;
-}
 
 const AggregateValueExpression *
 NewGVN::createAggregateValueExpression(Instruction *I, const BasicBlock *B) {
@@ -818,7 +807,7 @@ NewGVN::createVariableExpression(Value *V, bool UsedEquivalence) {
   VariableExpression *E = new (ExpressionAllocator) VariableExpression(V);
   E->setOpcode(V->getValueID());
   E->setUsedEquivalence(UsedEquivalence);
-  return cast<VariableExpression>(uniquifyExpression(E));
+  return E;
 }
 
 const Expression *NewGVN::createVariableOrConstant(Value *V,
@@ -834,7 +823,7 @@ NewGVN::createConstantExpression(Constant *C, bool UsedEquivalence) {
   ConstantExpression *E = new (ExpressionAllocator) ConstantExpression(C);
   E->setOpcode(C->getValueID());
   E->setUsedEquivalence(UsedEquivalence);
-  return cast<ConstantExpression>(uniquifyExpression(E));
+  return E;
 }
 
 const CallExpression *NewGVN::createCallExpression(CallInst *CI,
@@ -1433,7 +1422,7 @@ const Expression *NewGVN::performSymbolicEvaluation(Value *V,
   }
   if (!E)
     return NULL;
-  return uniquifyExpression(E);
+  return E;
 }
 
 /// markDominatedSingleUseEquivalences - Go through all uses of From, and mark
@@ -2063,7 +2052,6 @@ void NewGVN::cleanupTables() {
   CongruenceClasses.clear();
   ExpressionToClass.clear();
   ValueToExpression.clear();
-  UniquedExpressions.clear();
   ReachableBlocks.clear();
   ReachableEdges.clear();
   ProcessedCount.clear();
@@ -2159,7 +2147,7 @@ bool NewGVN::runOnFunction(Function &F) {
     }
   }
 
-  UniquedExpressions.resize(ICount + 1);
+
   TouchedInstructions.resize(ICount + 1);
   InvolvedInEquivalence.resize(ICount + 1);
 
@@ -3774,5 +3762,5 @@ const Expression *NewGVN::trySimplifyPREExpression(const Expression *E,
       }
     }
   }
-  return uniquifyExpression(ResultExpr);
+  return ResultExpr;
 }
