@@ -444,7 +444,7 @@ public:
     return LiveOnEntryDef;
   }
 
-  typedef ilist<MemoryAccess> AccessListType;
+  typedef iplist<MemoryAccess> AccessListType;
 
   /// \brief Return the list of MemoryAccess's for a given basic block.
   ///

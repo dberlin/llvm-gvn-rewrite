@@ -75,8 +75,12 @@ public:
       return false;
     if (Opcode == ~0U || Opcode == ~1U)
       return true;
-    // We do not compare expression types because opcode takes care of it, and
-    // we want stores and loads to be the same
+    // Compare etype for anything but load and store
+    if (getExpressionType() != ExpressionTypeLoad
+        && getExpressionType() != ExpressionTypeStore
+        && getExpressionType() != Other.getExpressionType())
+      return false;
+
     return equals(Other);
   }
   bool usedEquivalence() const { return UsedEquivalence; }
@@ -188,8 +192,10 @@ public:
 
   virtual ~BasicExpression() {}
 
-  virtual bool equals(const Expression &Other) const {
+  virtual bool equals(const Expression &Other) const {    
     const BasicExpression &OE = cast<BasicExpression>(Other);
+    if (Opcode != OE.Opcode)
+      return false;
     if (ValueType != OE.ValueType)
       return false;
     if (NumOperands != OE.NumOperands)
@@ -278,7 +284,7 @@ protected:
 
 public:
   LoadInst *getLoadInst() const { return Load; }
-  void setLoadInst(LoadInst *L) { L = Load; }
+  void setLoadInst(LoadInst *L) { Load = L; }
 
   MemoryAccess *getDefiningAccess() const { return DefiningAccess; }
   void setDefiningAccess(MemoryAccess *MA) { DefiningAccess = MA; }
@@ -604,6 +610,8 @@ private:
 };
 
 bool LoadExpression::equals(const Expression &Other) const {
+  if (!isa<LoadExpression>(Other) && !isa<StoreExpression>(Other))
+    return false;
   if (!this->BasicExpression::equals(Other))
     return false;
   if (const LoadExpression *OtherL = dyn_cast<LoadExpression>(&Other)) {
@@ -618,6 +626,8 @@ bool LoadExpression::equals(const Expression &Other) const {
   return true;
 }
 bool StoreExpression::equals(const Expression &Other) const {
+  if (!isa<LoadExpression>(Other) && !isa<StoreExpression>(Other))
+      return false;
   if (!this->BasicExpression::equals(Other))
     return false;
   if (const LoadExpression *OtherL = dyn_cast<LoadExpression>(&Other)) {
