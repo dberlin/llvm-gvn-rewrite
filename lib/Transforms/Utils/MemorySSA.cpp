@@ -250,26 +250,9 @@ void MemorySSA::renamePass(DomTreeNode *Root, MemoryAccess *IncomingVal,
 
 /// \brief Compute dominator levels, used by the phi insertion algorithm above.
 void MemorySSA::computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels) {
-
   for (auto DFI = df_begin(DT->getRootNode()), DFE = df_end(DT->getRootNode());
        DFI != DFE; ++DFI)
     DomLevels[*DFI] = DFI.getPathLength() - 1;
-#if 0
-  SmallVector<DomTreeNode *, 32> Worklist;
-
-  DomTreeNode *Root = DT->getRootNode();
-  DomLevels[Root] = 0;
-  Worklist.push_back(Root);
-
-  while (!Worklist.empty()) {
-    DomTreeNode *Node = Worklist.pop_back_val();
-    unsigned ChildLevel = DomLevels[Node] + 1;
-    for (auto CI = Node->begin(), CE = Node->end(); CI != CE; ++CI) {
-      DomLevels[*CI] = ChildLevel;
-      Worklist.push_back(*CI);
-    }
-  }
-#endif
 }
 
 /// \brief This handles unreachable block acccesses by deleting phi nodes in
@@ -1103,13 +1086,14 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
   if (CacheResult)
     return CacheResult;
 
+  MemoryAccess *StartPoint = StartingAccess;
   // Unlike below, do not walk to the def, because we are handed something we
   // already believe is the clobbering access.
-  if (isa<MemoryUse>(StartingAccess))
-    StartingAccess = StartingAccess->getDefiningAccess();
+  if (isa<MemoryUse>(StartPoint))
+    StartPoint = StartPoint->getDefiningAccess();
 
   MemoryAccess *FinalAccess =
-      getClobberingMemoryAccess(StartingAccess, Q).first;
+      getClobberingMemoryAccess(StartPoint, Q).first;
   doCacheInsert(StartingAccess, FinalAccess, Q);
   return FinalAccess;
 }
@@ -1154,11 +1138,13 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
       return MSSA->getLiveOnEntryDef();
     }
 
-  // If we started with a heap use, walk to the def
-  StartingAccess = StartingAccess->getDefiningAccess();
+  // If we started with a heap use, walk to the def. Save the original starting
+  // access so we can cache the right result later.
+  MemoryAccess *StartPoint = StartingAccess;
+  StartPoint = StartPoint->getDefiningAccess();
 
   MemoryAccess *FinalAccess =
-      getClobberingMemoryAccess(StartingAccess, Q).first;
+      getClobberingMemoryAccess(StartPoint, Q).first;
   doCacheInsert(StartingAccess, FinalAccess, Q);
   if (Q.isCall) {
     for (const auto &C : Q.VisitedCalls)

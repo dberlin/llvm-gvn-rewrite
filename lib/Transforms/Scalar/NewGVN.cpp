@@ -159,7 +159,7 @@ class NewGVN : public FunctionPass {
 
   // Congruence class info
   CongruenceClass *InitialClass;
-  std::vector<CongruenceClass *> CongruenceClasses;
+  std::vector<std::unique_ptr<CongruenceClass>> CongruenceClasses;
 
   // Value Mappings
   DenseMap<Value *, CongruenceClass *> ValueToClass;
@@ -206,7 +206,7 @@ class NewGVN : public FunctionPass {
   SmallDenseMap<User *, std::pair<unsigned, Value *>> SingleUserEquivalences;
 
   // Expression to class mapping
-  typedef DenseMap<const Expression *, CongruenceClass * /*,
+  typedef DenseMap<const Expression *, CongruenceClass */*,
                                                           ComparingExpressionInfo*/>
       ExpressionClassMap;
   ExpressionClassMap ExpressionToClass;
@@ -1125,7 +1125,7 @@ const Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
 const Expression *NewGVN::performSymbolicLoadCoercion(
     Type *LoadType, Value *LoadPtr, LoadInst *LI, Instruction *DepInst,
     MemoryAccess *DefiningAccess, const BasicBlock *B) {
-  assert(!LI || LI->isSimple() && "Not a simple load");
+  assert((!LI || LI->isSimple()) && "Not a simple load");
 
   if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
     Value *LoadAddressLeader = lookupOperandLeader(LoadPtr, LI, B).first;
@@ -1836,7 +1836,7 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
       TouchedInstructions.set(InstRange.first, InstRange.second);
     } else {
       DEBUG(dbgs() << "Block " << getBlockName(To)
-                   << " was reachable, but new edge to it found\n");
+            << " was reachable, but new edge {" << getBlockName(From) << "," << getBlockName(To) << "} to it found\n");
       // We've made an edge reachable to an existing block, which may
       // impact predicates.
       // Otherwise, only mark the phi nodes as touched, as they are
@@ -2056,9 +2056,6 @@ void NewGVN::cleanupTables() {
   for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
     DEBUG(dbgs() << "Congruence class " << CongruenceClasses[i]->id << " has "
                  << CongruenceClasses[i]->members.size() << " members\n");
-    delete CongruenceClasses[i];
-
-    CongruenceClasses[i] = NULL;
   }
 
   ArgRecycler.clear(ExpressionAllocator);
@@ -2133,17 +2130,18 @@ bool NewGVN::runOnFunction(Function &F) {
   AC = &getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
   TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
   AA = &getAnalysis<AliasAnalysis>();
-  SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(AA, DT));
+  SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(AA, DT));  
   MSSA = &getAnalysis<MemorySSALazy>().getMSSA();
   MSSAWalker = MSSA->buildMemorySSA(AA, DT);
 
   unsigned ICount = 0;
   // Count number of instructions for sizing of hash tables, and come
   // up with a global dfs numbering for instructions
-
-  auto DFI = df_begin(DT->getRootNode());
-  for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
-    BasicBlock *B = DFI->getBlock();
+  
+  SmallPtrSet<BasicBlock *, 16> VisitedBlocks;
+  ReversePostOrderTraversal<Function*> RPOT(&F);
+  for (auto &B : RPOT) {
+    VisitedBlocks.insert(B);
     const auto &BlockRange = assignDFSNumbers(B, ICount);
     BlockInstRange.insert({B, BlockRange});
     ICount += BlockRange.second - BlockRange.first;
@@ -2154,13 +2152,14 @@ bool NewGVN::runOnFunction(Function &F) {
 
   for (auto &B : F) {
     // Assign numbers to unreachable blocks
-    if (!DFI.nodeVisited(DT->getNode(&B))) {
+    if (!VisitedBlocks.count(&B)) {
       const auto &BlockRange = assignDFSNumbers(&B, ICount);
       BlockInstRange.insert({&B, BlockRange});
       ICount += BlockRange.second - BlockRange.first;
     }
   }
 
+  UniquedExpressions.resize(ICount + 1);
   TouchedInstructions.resize(ICount + 1);
   InvolvedInEquivalence.resize(ICount + 1);
 
@@ -2198,7 +2197,7 @@ bool NewGVN::runOnFunction(Function &F) {
                        << " because it is unreachable\n");
           continue;
         }
-#ifndef NDEBUG
+        //#ifndef NDEBUG
         if (ProcessedBlockCount.count(CurrBlock) == 0) {
           ProcessedBlockCount.insert({CurrBlock, 1});
         } else {
@@ -2208,7 +2207,7 @@ bool NewGVN::runOnFunction(Function &F) {
           if (ProcessedBlockCount[CurrBlock] >= 100)
             report_fatal_error("Processed block too many times");
         }
-#endif
+        //#endif
       }
       TouchedInstructions.reset(InstrNum);
 
@@ -2254,21 +2253,23 @@ bool NewGVN::runOnFunction(Function &F) {
   // of iterations.
 
   SmallDenseMap<CongruenceClass *, unsigned> UsedCount;
-  SmallPtrSet<CongruenceClass *, 16> Visited;
+  SmallPtrSet<CongruenceClass *, 16> VisitedClasses;
 
   for (int i = CongruenceClasses.size() - 1; i >= 0; --i) {
-    CongruenceClass *CC = CongruenceClasses[i];
-    if (CC == InitialClass || CC->dead || Visited.count(CC))
+    CongruenceClass *CC = CongruenceClasses[i].get();
+    if (CC == InitialClass || CC->dead || VisitedClasses.count(CC))
       continue;
-    topoVisitCongruenceClass(CC, UsedCount, Visited);
+    topoVisitCongruenceClass(CC, UsedCount, VisitedClasses);
   }
-  SmallVector<CongruenceClass *, 16> Worklist(CongruenceClasses.begin(),
-                                              CongruenceClasses.end());
+  SmallVector<CongruenceClass *, 16> Worklist;
+  for (auto &CC : CongruenceClasses)
+    Worklist.push_back(CC.get());
   // std::sort(Worklist.begin(), Worklist.end(),
   //           [&UsedCount](CongruenceClass *&A, CongruenceClass *&B) {
   //             return UsedCount[A] > UsedCount[B];
   //           });
 
+#if 0
   bool PREChanged = true;
   while (PREChanged) {
     PREChanged = false;
@@ -2285,10 +2286,11 @@ bool NewGVN::runOnFunction(Function &F) {
       PREChanged |= performPREOnClass(CC);
     }
   }
+  
   PREValueForwarding.clear();
 
   Changed |= PREChanged;
-
+#endif
   // Delete all instructions marked for deletion.
   for (Instruction *ToErase : InstructionsToErase) {
     if (!ToErase->use_empty())
@@ -2983,7 +2985,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
   }
 
   for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
-    CongruenceClass *CC = CongruenceClasses[i];
+    CongruenceClass *CC = CongruenceClasses[i].get();
     // FIXME: We should eventually be able to replace everything still
     // in the initial class with undef, as they should be unreachable.
     // Right now, initial still contains some things we skip value
@@ -3668,6 +3670,7 @@ bool NewGVN::phiTranslateArguments(const BasicExpression *From,
               RHS = ConstantExpr::getAdd(RHS, CI);
               isNSW = isNUW = false;
             }
+        // FIXME: Handle NSW
         const Expression *BinExpr = createBinaryExpression(
             I->getOpcode(), I->getType(), LHS, RHS, Pred);
         Value *Leader = findPRELeader(BinExpr, Pred, MustDominate);
