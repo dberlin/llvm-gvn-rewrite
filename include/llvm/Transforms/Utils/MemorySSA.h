@@ -449,7 +449,7 @@ public:
   /// \brief Return the list of MemoryAccess's for a given basic block.
   ///
   /// This list is not modifiable by the user.
-  const AccessListType *getBlockAccesses(const BasicBlock *BB) {
+  const AccessListType *getBlockAccesses(const BasicBlock *BB) const {
     auto It = PerBlockAccesses.find(BB);
     if (It == PerBlockAccesses.end())
       return nullptr;
@@ -524,6 +524,10 @@ public:
   /// load, and then replaceMemoryAccess with (old load, new load).
   MemoryAccess *addNewMemoryUse(Instruction *Use, enum InsertionPlace Where);
 
+  /// \brief Given two memory accesses in the same basic block, determine
+  /// whether MemoryAccess \p A dominates MemoryAccess \p B.
+  bool locallyDominates(const MemoryAccess *A, const MemoryAccess *B) const;
+
 protected:
   // Used by Memory SSA annotater, dumpers, and wrapper pass
   friend class MemorySSAAnnotatedWriter;
@@ -539,8 +543,8 @@ private:
   void
   determineInsertionPoint(const SmallPtrSetImpl<BasicBlock *> &DefiningBlocks);
   void computeDomLevels(DenseMap<DomTreeNode *, unsigned> &DomLevels);
-  void markUnreachableAsLiveOnEntry(AccessMap &BlockAccesses, BasicBlock *BB);
-  bool dominatesUse(MemoryAccess *, MemoryAccess *) const;
+  void markUnreachableAsLiveOnEntry(BasicBlock *BB);
+  bool dominatesUse(const MemoryAccess *, const MemoryAccess *) const;
   void removeFromLookups(MemoryAccess *);
   MemoryAccess *createNewAccess(Instruction *, bool ignoreNonMemory = false);
   MemoryAccess *findDominatingDef(BasicBlock *, enum InsertionPlace);
@@ -686,7 +690,7 @@ public:
 /// disambiguate accesses.
 class CachingMemorySSAWalker final : public MemorySSAWalker {
 public:
-  CachingMemorySSAWalker(MemorySSA *, AliasAnalysis *);
+  CachingMemorySSAWalker(MemorySSA *, AliasAnalysis *, DominatorTree *);
   virtual ~CachingMemorySSAWalker();
   MemoryAccess *getClobberingMemoryAccess(const Instruction *) override;
   MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
@@ -706,10 +710,12 @@ private:
   std::pair<MemoryAccess *, bool>
   getClobberingMemoryAccess(MemoryAccess *, struct UpwardsMemoryQuery &);
 
-  DenseMap<std::pair<const MemoryAccess *, AliasAnalysis::Location>,
-           MemoryAccess *> CachedUpwardsClobberingAccess;
+  typedef SmallDenseMap<AliasAnalysis::Location, MemoryAccess *> InnerCacheType;
+  SmallDenseMap<const MemoryAccess *, std::unique_ptr<InnerCacheType>>
+      CachedUpwardsClobberingAccess;
   DenseMap<const MemoryAccess *, MemoryAccess *> CachedUpwardsClobberingCall;
   AliasAnalysis *AA;
+  DominatorTree *DT;
 };
 }
 
