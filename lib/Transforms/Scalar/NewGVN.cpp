@@ -206,8 +206,8 @@ class NewGVN : public FunctionPass {
   SmallDenseMap<User *, std::pair<unsigned, Value *>> SingleUserEquivalences;
 
   // Expression to class mapping
-  typedef DenseMap<const Expression *, CongruenceClass *, ComparingExpressionInfo>
-      ExpressionClassMap;
+  typedef DenseMap<const Expression *, CongruenceClass *,
+                   ComparingExpressionInfo> ExpressionClassMap;
   ExpressionClassMap ExpressionToClass;
 
   SmallPtrSet<Value *, 8> ChangedValues;
@@ -775,7 +775,6 @@ const Expression *NewGVN::createExpression(Instruction *I,
   }
   return E;
 }
-
 
 const AggregateValueExpression *
 NewGVN::createAggregateValueExpression(Instruction *I, const BasicBlock *B) {
@@ -1430,10 +1429,10 @@ const Expression *NewGVN::performSymbolicEvaluation(Value *V,
 
 void NewGVN::markDominatedSingleUserEquivalences(Value *From, Value *To,
                                                  const BasicBlockEdge &Root) {
+#if 0
   for (const auto &U : From->uses()) {
     // If From occurs as a phi node operand then the use implicitly lives in
-    // the
-    // corresponding incoming block.  Otherwise it is the block containing the
+    // the corresponding incoming block.  Otherwise it is the block containing the
     // user that must be dominated by Root.
     if (DT->dominates(Root, U)) {
       SingleUserEquivalences[U.getUser()] = {U.getOperandNo(), To};
@@ -1442,6 +1441,7 @@ void NewGVN::markDominatedSingleUserEquivalences(Value *From, Value *To,
         TouchedInstructions.set(InstrDFS[I]);
     }
   }
+#endif
 }
 
 /// replaceAllDominatedUsesWith - Replace all uses of 'From' with 'To'
@@ -1825,7 +1825,8 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
       TouchedInstructions.set(InstRange.first, InstRange.second);
     } else {
       DEBUG(dbgs() << "Block " << getBlockName(To)
-            << " was reachable, but new edge {" << getBlockName(From) << "," << getBlockName(To) << "} to it found\n");
+                   << " was reachable, but new edge {" << getBlockName(From)
+                   << "," << getBlockName(To) << "} to it found\n");
       // We've made an edge reachable to an existing block, which may
       // impact predicates.
       // Otherwise, only mark the phi nodes as touched, as they are
@@ -2002,6 +2003,8 @@ void NewGVN::propagateChangeInEdge(BasicBlock *Dest) {
   // touched by our caller.
   DomTreeNode *DTN = DT->getNode(Dest);
 
+  // Note that this is an overshoot, because the inst ranges are calculated in
+  // RPO order, not dominator tree order.
   const auto &DominatedRange = DominatedInstRange.find(DTN);
   std::pair<unsigned, unsigned> Result;
   if (DominatedRange == DominatedInstRange.end()) {
@@ -2118,16 +2121,20 @@ bool NewGVN::runOnFunction(Function &F) {
   AC = &getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
   TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
   AA = &getAnalysis<AliasAnalysis>();
-  //  SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(AA, DT));  
+  //  SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(AA, DT));
   MSSA = &getAnalysis<MemorySSALazy>().getMSSA();
   MSSAWalker = MSSA->buildMemorySSA(AA, DT);
 
   unsigned ICount = 0;
   // Count number of instructions for sizing of hash tables, and come
   // up with a global dfs numbering for instructions
-  
+
   SmallPtrSet<BasicBlock *, 16> VisitedBlocks;
-  ReversePostOrderTraversal<Function*> RPOT(&F);
+
+  // Note: We want RPO traversal of the blocks, which is not quite the same as
+  // dominator tree order, particularly with regard whether backedges get
+  // visited first or second, given a block with multiple successors.
+  ReversePostOrderTraversal<Function *> RPOT(&F);
   for (auto &B : RPOT) {
     VisitedBlocks.insert(B);
     const auto &BlockRange = assignDFSNumbers(B, ICount);
@@ -2146,7 +2153,6 @@ bool NewGVN::runOnFunction(Function &F) {
       ICount += BlockRange.second - BlockRange.first;
     }
   }
-
 
   TouchedInstructions.resize(ICount + 1);
   InvolvedInEquivalence.resize(ICount + 1);
@@ -2252,10 +2258,10 @@ bool NewGVN::runOnFunction(Function &F) {
   SmallVector<CongruenceClass *, 16> Worklist;
   for (auto &CC : CongruenceClasses)
     Worklist.push_back(CC.get());
-  // std::sort(Worklist.begin(), Worklist.end(),
-  //           [&UsedCount](CongruenceClass *&A, CongruenceClass *&B) {
-  //             return UsedCount[A] > UsedCount[B];
-  //           });
+// std::sort(Worklist.begin(), Worklist.end(),
+//           [&UsedCount](CongruenceClass *&A, CongruenceClass *&B) {
+//             return UsedCount[A] > UsedCount[B];
+//           });
 
 #if 0
   bool PREChanged = true;

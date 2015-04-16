@@ -76,9 +76,9 @@ public:
     if (Opcode == ~0U || Opcode == ~1U)
       return true;
     // Compare etype for anything but load and store
-    if (getExpressionType() != ExpressionTypeLoad
-        && getExpressionType() != ExpressionTypeStore
-        && getExpressionType() != Other.getExpressionType())
+    if (getExpressionType() != ExpressionTypeLoad &&
+        getExpressionType() != ExpressionTypeStore &&
+        getExpressionType() != Other.getExpressionType())
       return false;
 
     return equals(Other);
@@ -192,7 +192,7 @@ public:
 
   virtual ~BasicExpression() {}
 
-  virtual bool equals(const Expression &Other) const {    
+  virtual bool equals(const Expression &Other) const {
     const BasicExpression &OE = cast<BasicExpression>(Other);
     if (Opcode != OE.Opcode)
       return false;
@@ -627,7 +627,7 @@ bool LoadExpression::equals(const Expression &Other) const {
 }
 bool StoreExpression::equals(const Expression &Other) const {
   if (!isa<LoadExpression>(Other) && !isa<StoreExpression>(Other))
-      return false;
+    return false;
   if (!this->BasicExpression::equals(Other))
     return false;
   if (const LoadExpression *OtherL = dyn_cast<LoadExpression>(&Other)) {
