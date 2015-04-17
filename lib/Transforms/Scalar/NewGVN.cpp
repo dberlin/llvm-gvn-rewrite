@@ -117,10 +117,19 @@ struct Equivalence {
       : Val(V), Edge(E), EdgeOnly(EOnly) {}
 };
 
+// These are equivalences that are valid for a single user.  This happens when
+// we know particular edge equivalences are valid for some users, but can't
+// prove they are valid for all users.
+struct SingleUserEquivalence {
+  User *U;
+  unsigned OperandNo;
+  Value *Replacement;
+};
+
 struct CongruenceClass {
   typedef SmallPtrSet<Value *, 4> MemberSet;
-  static unsigned int nextCongruenceNum;
-  unsigned int id;
+
+  unsigned int ID;
   Value *leader;
   const Expression *expression;
   // Actual members of this class.  These are the things the same everywhere
@@ -137,13 +146,25 @@ struct CongruenceClass {
   // this class over certain paths.  This could be replaced with
   // proper predicate support during analysis.
   EquivalenceSet equivalences;
+
+  // This map holds the list of equivalences that only apply to a single
+  // instruction.  Because we don't have control regions, when we have
+  // equivalences along edges to blocks with multiple predecessors, we can't add
+  // them to the general equivalences list, because they don't dominate a given
+  // root, but instead, they really represent something valid in certain control
+  // regions of the program, a concept that is not really expressible using the
+  // a standard dominator (and not postdominator) tree.
+  std::unordered_multimap<Value *, SingleUserEquivalence>
+      singleUserEquivalences;
+
+  // True if this class has no members left.  This is mainly used for assertion
+  // purposes.
   bool dead;
-  explicit CongruenceClass()
-      : id(nextCongruenceNum++), leader(0), expression(0), dead(false) {}
-  CongruenceClass(Value *Leader, const Expression *E)
-      : id(nextCongruenceNum++), leader(Leader), expression(E), dead(false) {}
+  explicit CongruenceClass(unsigned int ID)
+      : ID(ID), leader(0), expression(0), dead(false) {}
+  CongruenceClass(unsigned int ID, Value *Leader, const Expression *E)
+      : ID(ID), leader(Leader), expression(E), dead(false) {}
 };
-unsigned int CongruenceClass::nextCongruenceNum = 0;
 
 class NewGVN : public FunctionPass {
   MemoryDependenceAnalysis *MD;
@@ -160,6 +181,7 @@ class NewGVN : public FunctionPass {
   // Congruence class info
   CongruenceClass *InitialClass;
   std::vector<std::unique_ptr<CongruenceClass>> CongruenceClasses;
+  unsigned int NextCongruenceNum = 0;
 
   // Value Mappings
   DenseMap<Value *, CongruenceClass *> ValueToClass;
@@ -195,15 +217,6 @@ class NewGVN : public FunctionPass {
   // it's equivalences
   std::unordered_multimap<const Expression *, Equivalence, hash_expression,
                           expression_equal_to> PendingEquivalences;
-
-  // This map holds the list of equivalences that only apply to a single
-  // instruction.  Because we don't have control regions, when we have
-  // equivalences along edges to blocks with multiple predecessors, we can't add
-  // them to the general equivalences list, because they don't dominate a given
-  // root, but instead, they really represent something valid in certain control
-  // regions of the program, a concept that is not really expressible using the
-  // a standard dominator (and not postdominator) tree.
-  SmallDenseMap<User *, std::pair<unsigned, Value *>> SingleUserEquivalences;
 
   // Expression to class mapping
   typedef DenseMap<const Expression *, CongruenceClass *,
@@ -305,7 +318,8 @@ private:
                                              Value *, const BasicBlock *);
   // Congruence class handling
   CongruenceClass *createCongruenceClass(Value *Leader, const Expression *E) {
-    CongruenceClass *result = new CongruenceClass(Leader, E);
+    CongruenceClass *result =
+        new CongruenceClass(NextCongruenceNum++, Leader, E);
     CongruenceClasses.emplace_back(result);
     return result;
   }
@@ -352,16 +366,16 @@ private:
   void updateReachableEdge(BasicBlock *, BasicBlock *);
   void processOutgoingEdges(TerminatorInst *, BasicBlock *);
   void propagateChangeInEdge(BasicBlock *);
-  bool propagateEquality(Value *, Value *, const BasicBlockEdge &);
-  void markDominatedSingleUserEquivalences(Value *, Value *,
-                                           const BasicBlockEdge &);
+  bool propagateEquality(Value *, Value *, bool, const BasicBlockEdge &);
+  void markDominatedSingleUserEquivalences(CongruenceClass *, Value *, Value *,
+                                           bool, const BasicBlockEdge &);
   Value *findConditionEquivalence(Value *, BasicBlock *) const;
   std::pair<unsigned, unsigned>
   calculateDominatedInstRange(const DomTreeNode *);
 
   // Instruction replacement
-  unsigned replaceAllDominatedUsesWith(Value *, Value *,
-                                       const BasicBlockEdge &);
+  unsigned replaceAllDominatedUsesWith(Value *, Value *, const BasicBlockEdge &,
+                                       bool);
 
   // Elimination
   struct ValueDFS;
@@ -846,7 +860,9 @@ Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, const User *U,
   // necessary, or caching whether we found one before and only updating it when
   // things change.
   for (const auto &Member : CC->equivalences) {
-    if (DT->dominates(Member.Edge, B))
+    assert(!U || !isa<PHINode>(U) && "Do we need the User operand?");
+
+    if (DT->dominates(Member.Edge.getStart(), B))
       return Member.Val;
   }
   return nullptr;
@@ -1424,53 +1440,83 @@ const Expression *NewGVN::performSymbolicEvaluation(Value *V,
   return E;
 }
 
-/// markDominatedSingleUseEquivalences - Go through all uses of From, and mark
-/// them as equivalent to To if From dominates them
+/// \brief Given an edge we know does not dominate its end, go through all uses
+/// of \p From, figure out if we dominate them, and if so, mark them
+/// individually as equivalent to \p To.
 
-void NewGVN::markDominatedSingleUserEquivalences(Value *From, Value *To,
+void NewGVN::markDominatedSingleUserEquivalences(CongruenceClass *CC,
+                                                 Value *From, Value *To,
+                                                 bool MultipleEdgesOneReachable,
                                                  const BasicBlockEdge &Root) {
-#if 0
+
+  // The MultipleEdgesOneReachable case means we know there are multiple edges
+  // to the block,  but *only one from us is reachable*.  This occurs if, for
+  // example, we
+  // discover the value of a switch's condition is constant, and it normally had
+  // multiple case values that go to the same block.  Because the dominators API
+  // asserts isSingleEdge, we have to special case this, since we know
+  // isSingleEdge doesn't matter.
+
   for (const auto &U : From->uses()) {
-    // If From occurs as a phi node operand then the use implicitly lives in
-    // the corresponding incoming block.  Otherwise it is the block containing the
-    // user that must be dominated by Root.
-    if (DT->dominates(Root, U)) {
-      SingleUserEquivalences[U.getUser()] = {U.getOperandNo(), To};
-      // Mark the users as touched
-      if (Instruction *I = dyn_cast<Instruction>(U.getUser()))
-        TouchedInstructions.set(InstrDFS[I]);
+    bool Dominates = false;
+    if (MultipleEdgesOneReachable) {
+      Instruction *UserInst = cast<Instruction>(U.getUser());
+      PHINode *PN = dyn_cast<PHINode>(UserInst);
+      if (PN && PN->getParent() == Root.getEnd() &&
+          PN->getIncomingBlock(U) == Root.getStart()) {
+        Dominates = true;
+      } else
+        Dominates = DT->dominates(Root.getStart(), UserInst->getParent());
+    } else {
+      Dominates = DT->dominates(Root, U);
     }
+    if (!Dominates)
+      continue;
+    CC->singleUserEquivalences.emplace(
+        From, SingleUserEquivalence{U.getUser(), U.getOperandNo(), To});
+    // Mark the users as touched
+    if (Instruction *I = dyn_cast<Instruction>(U.getUser()))
+      TouchedInstructions.set(InstrDFS[I]);
   }
-#endif
 }
 
 /// replaceAllDominatedUsesWith - Replace all uses of 'From' with 'To'
 /// if the use is dominated by the given basic block.  Returns the
 /// number of uses that were replaced.
 unsigned NewGVN::replaceAllDominatedUsesWith(Value *From, Value *To,
-                                             const BasicBlockEdge &Root) {
+                                             const BasicBlockEdge &Root,
+                                             bool EdgeEquivOnly) {
   unsigned Count = 0;
   for (auto UI = From->use_begin(), UE = From->use_end(); UI != UE;) {
     Use &U = *UI++;
+    // Edge equivalents
+    if (EdgeEquivOnly) {
+      PHINode *PN = dyn_cast<PHINode>(U.getUser());
+      if (PN && PN->getParent() == Root.getEnd() &&
+          PN->getIncomingBlock(U) == Root.getStart()) {
+        U.set(To);
+        ++Count;
+      }
+    } else {
+      // If From occurs as a phi node operand then the use implicitly lives in
+      // the
+      // corresponding incoming block.  Otherwise it is the block containing the
+      // user that must be dominated by Root.
+      BasicBlock *UsingBlock;
+      if (PHINode *PN = dyn_cast<PHINode>(U.getUser()))
+        UsingBlock = PN->getIncomingBlock(U);
+      else
+        UsingBlock = cast<Instruction>(U.getUser())->getParent();
 
-    // If From occurs as a phi node operand then the use implicitly lives in
-    // the
-    // corresponding incoming block.  Otherwise it is the block containing the
-    // user that must be dominated by Root.
-    BasicBlock *UsingBlock;
-    if (PHINode *PN = dyn_cast<PHINode>(U.getUser()))
-      UsingBlock = PN->getIncomingBlock(U);
-    else
-      UsingBlock = cast<Instruction>(U.getUser())->getParent();
-
-    if (DT->dominates(Root, UsingBlock)) {
-      // Mark the users as touched
-      if (Instruction *I = dyn_cast<Instruction>(U.getUser()))
-        TouchedInstructions.set(InstrDFS[I]);
-      DEBUG(dbgs() << "Equality propagation replacing " << *From << " with "
-                   << *To << " in " << *(U.getUser()) << "\n");
-      U.set(To);
-      ++Count;
+      if (DT->dominates(Root, UsingBlock)) {
+        // Mark the users as touched
+        if (Instruction *I = dyn_cast<Instruction>(U.getUser()))
+          TouchedInstructions.set(InstrDFS[I]);
+        DEBUG(dbgs() << "Equality propagation replacing " << *From << " with "
+                     << *To << " in " << *(U.getUser()) << "\n");
+        U.set(To);
+        ++Count;
+      }
     }
   }
   return Count;
@@ -1506,6 +1552,7 @@ static bool isOnlyReachableViaThisEdge(const BasicBlockEdge &E) {
 // iteration.
 
 bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
+                               bool MultipleEdgesOneReachable,
                                const BasicBlockEdge &Root) {
   SmallVector<std::pair<Value *, Value *>, 4> Worklist;
   Worklist.emplace_back(LHS, RHS);
@@ -1551,14 +1598,16 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
     CC->equivalences.emplace_back(RHS, Root, !RootDominatesEnd);
 
     if (!RootDominatesEnd)
-      markDominatedSingleUserEquivalences(LHS, RHS, Root);
+      markDominatedSingleUserEquivalences(CC, LHS, RHS,
+                                          MultipleEdgesOneReachable, Root);
     // Replace all occurrences of 'LHS' with 'RHS' everywhere in the
     // scope.  As LHS always has at least one use that is not
     // dominated by Root, this will never do anything if LHS has only
     // one use.
     // FIXME: I think this can be deleted now, bootstrap with an assert
     if (!LHS->hasOneUse() && 0) {
-      unsigned NumReplacements = replaceAllDominatedUsesWith(LHS, RHS, Root);
+      unsigned NumReplacements =
+          replaceAllDominatedUsesWith(LHS, RHS, Root, false);
       Changed |= NumReplacements > 0;
       NumGVNEqProp += NumReplacements;
     }
@@ -1644,7 +1693,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
         // assert
         if (CC->members.size() == 1 && 0) {
           unsigned NumReplacements =
-              replaceAllDominatedUsesWith(CC->leader, NotVal, Root);
+              replaceAllDominatedUsesWith(CC->leader, NotVal, Root, false);
           Changed |= NumReplacements > 0;
           NumGVNEqProp += NumReplacements;
         }
@@ -1739,7 +1788,7 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
 
       EClass = NewClass;
       DEBUG(dbgs() << "Created new congruence class for " << *V
-                   << " using expression " << *E << " at " << NewClass->id
+                   << " using expression " << *E << " at " << NewClass->ID
                    << "\n");
       DEBUG(dbgs() << "Hash value was " << E->getHashValue() << "\n");
     } else {
@@ -1751,11 +1800,11 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
   }
   bool WasInChanged = ChangedValues.erase(V);
   if (VClass != EClass || WasInChanged) {
-    DEBUG(dbgs() << "Found class " << EClass->id << " for expression " << E
+    DEBUG(dbgs() << "Found class " << EClass->ID << " for expression " << E
                  << "\n");
 
     if (VClass != EClass) {
-      DEBUG(dbgs() << "New congruence class for " << V << " is " << EClass->id
+      DEBUG(dbgs() << "New congruence class for " << V << " is " << EClass->ID
                    << "\n");
 
       if (E && isa<CoercibleLoadExpression>(E)) {
@@ -1890,10 +1939,10 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
       }
     } else {
       propagateEquality(Cond, ConstantInt::getTrue(TrueSucc->getContext()),
-                        {B, TrueSucc});
+                        false, {B, TrueSucc});
 
       propagateEquality(Cond, ConstantInt::getFalse(FalseSucc->getContext()),
-                        {B, FalseSucc});
+                        false, {B, FalseSucc});
       updateReachableEdge(B, TrueSucc);
       updateReachableEdge(B, FalseSucc);
     }
@@ -1904,6 +1953,7 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
     // Remember how many outgoing edges there are to every successor.
     SmallDenseMap<BasicBlock *, unsigned, 16> SwitchEdges;
 
+    bool MultipleEdgesOneReachable = false;
     Value *SwitchCond = SI->getCondition();
     Value *CondEvaluated = findConditionEquivalence(SwitchCond, B);
     // See if we were able to turn this switch statement into a constant
@@ -1912,23 +1962,44 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
       ConstantInt *CondVal = cast<ConstantInt>(CondEvaluated);
       // We should be able to get case value for this
       auto CaseVal = SI->findCaseValue(CondVal);
+      if (CaseVal == SI->case_end()) {
+        // We proved the value is outside of the range of the case.
+        // Back away slowly, mark the default dest as reachable, and go home.
+        updateReachableEdge(B, SI->getDefaultDest());
+        return;
+      }
       // Now get where it goes and mark it reachable
       BasicBlock *TargetBlock = CaseVal.getCaseSuccessor();
       updateReachableEdge(B, TargetBlock);
-      ++SwitchEdges[TargetBlock];
+      unsigned WhichSucc = CaseVal.getSuccessorIndex();
+      // Calculate whether our single reachable edge is really a single edge to
+      // the target block.  If not, and the block has multiple predecessors, we
+      // can only replace phi node values.
+      for (unsigned i = 0, e = SI->getNumSuccessors(); i != e; ++i) {
+        if (i == WhichSucc)
+          continue;
+        BasicBlock *Block = SI->getSuccessor(i);
+        if (Block == TargetBlock)
+          MultipleEdgesOneReachable = true;
+      }
+      const BasicBlockEdge E(B, TargetBlock);
+      propagateEquality(SwitchCond, CaseVal.getCaseValue(),
+                        MultipleEdgesOneReachable, E);
     } else {
       for (unsigned i = 0, e = SI->getNumSuccessors(); i != e; ++i) {
         BasicBlock *TargetBlock = SI->getSuccessor(i);
         ++SwitchEdges[TargetBlock];
         updateReachableEdge(B, TargetBlock);
       }
-    }
-    // Regardless of answers, propagate equalities for case values
-    for (auto i = SI->case_begin(), e = SI->case_end(); i != e; ++i) {
-      BasicBlock *TargetBlock = i.getCaseSuccessor();
-      if (SwitchEdges.lookup(TargetBlock) == 1) {
-        const BasicBlockEdge E(B, TargetBlock);
-        propagateEquality(SwitchCond, i.getCaseValue(), E);
+
+      // Regardless of answers, propagate equalities for case values
+      for (auto i = SI->case_begin(), e = SI->case_end(); i != e; ++i) {
+        BasicBlock *TargetBlock = i.getCaseSuccessor();
+        if (SwitchEdges.lookup(TargetBlock) == 1) {
+          const BasicBlockEdge E(B, TargetBlock);
+          propagateEquality(SwitchCond, i.getCaseValue(),
+                            MultipleEdgesOneReachable, E);
+        }
       }
     }
   } else {
@@ -2022,7 +2093,8 @@ void NewGVN::propagateChangeInEdge(BasicBlock *Dest) {
 }
 
 void NewGVN::initializeCongruenceClasses(Function &F) {
-  CongruenceClass::nextCongruenceNum = 2;
+  // FIXME now i can't remember why this is 2
+  NextCongruenceNum = 2;
   // Initialize all other instructions to be in INITIAL class
   CongruenceClass::MemberSet InitialValues;
   for (auto &B : F) {
@@ -2046,7 +2118,7 @@ void NewGVN::cleanupTables() {
 
   ValueToClass.clear();
   for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
-    DEBUG(dbgs() << "Congruence class " << CongruenceClasses[i]->id << " has "
+    DEBUG(dbgs() << "Congruence class " << CongruenceClasses[i]->ID << " has "
                  << CongruenceClasses[i]->members.size() << " members\n");
   }
 
@@ -2070,7 +2142,6 @@ void NewGVN::cleanupTables() {
   CoercionInfo.clear();
   CoercionForwarding.clear();
   DominatedInstRange.clear();
-  SingleUserEquivalences.clear();
   PendingEquivalences.clear();
   PredCache.clear();
 }
@@ -2203,13 +2274,12 @@ bool NewGVN::runOnFunction(Function &F) {
         }
         //#endif
       }
-      TouchedInstructions.reset(InstrNum);
-
       DEBUG(dbgs() << "Processing instruction " << *I << "\n");
       if (I->use_empty() && !I->getType()->isVoidTy()) {
         DEBUG(dbgs() << "Skipping unused instruction\n");
         if (isInstructionTriviallyDead(I, TLI))
           markInstructionForDeletion(I);
+        TouchedInstructions.reset(InstrNum);
         continue;
       }
 
@@ -2233,6 +2303,9 @@ bool NewGVN::runOnFunction(Function &F) {
       } else {
         processOutgoingEdges(dyn_cast<TerminatorInst>(I), CurrBlock);
       }
+      // Reset after processing (because we may mark ourselves as touched when
+      // we propagate equalities)
+      TouchedInstructions.reset(InstrNum);
     }
   }
 
@@ -2399,15 +2472,6 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
     // Now add the users
     for (auto &U : D->uses()) {
       if (Instruction *I = dyn_cast<Instruction>(U.getUser())) {
-        // If we the the same use we have an equivalence for, we will replace it
-        // with the equivalence later
-
-        const auto &LI = SingleUserEquivalences.find(I);
-        if (LI != SingleUserEquivalences.end()) {
-          if (U.getOperandNo() == LI->second.first)
-            continue;
-        }
-
         ValueDFS VD;
         VD.Coercible = Coercible;
         // Put the phi node uses in the incoming block
@@ -2434,8 +2498,9 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
 void NewGVN::convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &Dense,
                                       std::vector<ValueDFS> &DFSOrderedSet) {
   for (const auto &D : Dense) {
-    // We don't have the machinery to handle edge only equivalences yet.
+    // FIXME: We don't have the machinery to handle edge only equivalences yet.
     // We should be using control regions to know where they are valid.
+    // Otherwise, replace in phi nodes for the specific edge
     if (D.EdgeOnly)
       continue;
     std::pair<int, int> &DFSPair = DFSDomMap[D.Edge.getEnd()];
@@ -2998,7 +3063,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
 
         Value *Member = M;
         for (auto &Equiv : CC->equivalences)
-          replaceAllDominatedUsesWith(M, Equiv.Val, Equiv.Edge);
+          replaceAllDominatedUsesWith(M, Equiv.Val, Equiv.Edge, Equiv.EdgeOnly);
 
         // Void things have no uses we can replace
         if (Member == CC->leader || Member->getType()->isVoidTy()) {
@@ -3024,7 +3089,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
       CC->members.swap(MembersLeft);
 
     } else {
-      DEBUG(dbgs() << "Eliminating in congruence class " << CC->id << "\n");
+      DEBUG(dbgs() << "Eliminating in congruence class " << CC->ID << "\n");
       // If this is a singleton, with no equivalences, we can skip it
       if (CC->members.size() != 1 || !CC->equivalences.empty() ||
           !CC->coercible_members.empty()) {
@@ -3032,7 +3097,8 @@ bool NewGVN::eliminateInstructions(Function &F) {
         // replacement and move on
         if (CC->members.size() == 1 && 0) {
           for (auto &Equiv : CC->equivalences)
-            replaceAllDominatedUsesWith(CC->leader, Equiv.Val, Equiv.Edge);
+            replaceAllDominatedUsesWith(CC->leader, Equiv.Val, Equiv.Edge,
+                                        Equiv.EdgeOnly);
           continue;
         }
 
@@ -3064,6 +3130,19 @@ bool NewGVN::eliminateInstructions(Function &F) {
           Use *MemberUse = C.U;
           bool EquivalenceOnly = C.Equivalence;
           bool Coercible = C.Coercible;
+
+          // See if we have single user equivalences for this member
+          auto EquivalenceRange =
+              CC->singleUserEquivalences.equal_range(Member);
+          auto EquivalenceIt = EquivalenceRange.first;
+          while (EquivalenceIt != EquivalenceRange.second) {
+            const SingleUserEquivalence &Equiv = EquivalenceIt->second;
+            DEBUG(dbgs() << "Using single user equivalence to replace ");
+            DEBUG(dbgs() << *Equiv.U << " with " << *Equiv.Replacement);
+            DEBUG(dbgs() << "\n");
+            Equiv.U->getOperandUse(Equiv.OperandNo).set(Equiv.Replacement);
+            // FIXME Don't reprocess the use this represents
+          }
 
           // We ignore void things because we can't get a value from
           // them.
@@ -3161,12 +3240,6 @@ bool NewGVN::eliminateInstructions(Function &F) {
     }
     CC->members.swap(MembersLeft);
     CC->coercible_members.clear();
-  }
-  for (auto &Equivs : SingleUserEquivalences) {
-    DEBUG(dbgs() << "Using single user equivalence to replace ");
-    DEBUG(dbgs() << *Equivs.first << " with " << *Equivs.second.second);
-    DEBUG(dbgs() << "\n");
-    Equivs.first->getOperandUse(Equivs.second.first).set(Equivs.second.second);
   }
 
   return AnythingReplaced;
@@ -3315,6 +3388,7 @@ Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
     } else if (Opcode == Instruction::MemoryOps::GetElementPtr) {
       // It wants the pointee type, which is complex, and not equivalent to
       // getType on the original GEP
+      // FIXME: Store getSrcType on the GEP
       Type *PointeeType =
           cast<SequentialType>(BE->getOperand(0)->getType()->getScalarType())
               ->getElementType();
