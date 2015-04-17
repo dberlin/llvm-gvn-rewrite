@@ -860,11 +860,14 @@ Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, const User *U,
   // necessary, or caching whether we found one before and only updating it when
   // things change.
   for (const auto &Member : CC->equivalences) {
-    assert(!U || !isa<PHINode>(U) && "Do we need the User operand?");
-
+    // We can't process edge only equivalences without edges
+    if (Member.EdgeOnly)
+      continue;
     if (DT->dominates(Member.Edge.getStart(), B))
       return Member.Val;
   }
+  // FIXME: Use single user equivalences too
+
   return nullptr;
 }
 
@@ -880,9 +883,11 @@ Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, const User *U,
   for (const auto &Member : CC->equivalences) {
     if ((Member.Edge.getStart() == B.getStart() &&
          Member.Edge.getEnd() == B.getEnd()) ||
-        DT->dominates(Member.Edge, B.getEnd()))
+        (!Member.EdgeOnly && DT->dominates(Member.Edge.getStart(), B.getEnd())))
       return Member.Val;
   }
+  // FIXME: Use single user equivalences too
+
   return nullptr;
 }
 
@@ -1962,9 +1967,10 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
       ConstantInt *CondVal = cast<ConstantInt>(CondEvaluated);
       // We should be able to get case value for this
       auto CaseVal = SI->findCaseValue(CondVal);
-      if (CaseVal == SI->case_end()) {
+      if (CaseVal.getCaseSuccessor() == SI->getDefaultDest()) {
         // We proved the value is outside of the range of the case.
-        // Back away slowly, mark the default dest as reachable, and go home.
+        // We can't do anything other than mark the default dest as reachable,
+        // and go home.
         updateReachableEdge(B, SI->getDefaultDest());
         return;
       }
@@ -3141,6 +3147,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
             DEBUG(dbgs() << *Equiv.U << " with " << *Equiv.Replacement);
             DEBUG(dbgs() << "\n");
             Equiv.U->getOperandUse(Equiv.OperandNo).set(Equiv.Replacement);
+            ++EquivalenceIt;
             // FIXME Don't reprocess the use this represents
           }
 
