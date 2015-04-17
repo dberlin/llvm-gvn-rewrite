@@ -367,6 +367,8 @@ private:
   void processOutgoingEdges(TerminatorInst *, BasicBlock *);
   void propagateChangeInEdge(BasicBlock *);
   bool propagateEquality(Value *, Value *, bool, const BasicBlockEdge &);
+  bool isOnlyReachableViaThisEdge(const BasicBlockEdge &);
+
   void markDominatedSingleUserEquivalences(CongruenceClass *, Value *, Value *,
                                            bool, const BasicBlockEdge &);
   Value *findConditionEquivalence(Value *, BasicBlock *) const;
@@ -863,7 +865,7 @@ Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, const User *U,
     // We can't process edge only equivalences without edges
     if (Member.EdgeOnly)
       continue;
-    if (DT->dominates(Member.Edge.getStart(), B))
+    if (DT->dominates(Member.Edge.getEnd(), B))
       return Member.Val;
   }
   // FIXME: Use single user equivalences too
@@ -883,11 +885,10 @@ Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, const User *U,
   for (const auto &Member : CC->equivalences) {
     if ((Member.Edge.getStart() == B.getStart() &&
          Member.Edge.getEnd() == B.getEnd()) ||
-        (!Member.EdgeOnly && DT->dominates(Member.Edge.getStart(), B.getEnd())))
+        (!Member.EdgeOnly && DT->dominates(Member.Edge.getEnd(), B.getEnd())))
       return Member.Val;
   }
   // FIXME: Use single user equivalences too
-
   return nullptr;
 }
 
@@ -1529,13 +1530,16 @@ unsigned NewGVN::replaceAllDominatedUsesWith(Value *From, Value *To,
 /// There is an edge from 'Src' to 'Dst'.  Return
 /// true if every path from the entry block to 'Dst' passes via this edge.  In
 /// particular 'Dst' must not be reachable via another edge from 'Src'.
-static bool isOnlyReachableViaThisEdge(const BasicBlockEdge &E) {
+bool NewGVN::isOnlyReachableViaThisEdge(const BasicBlockEdge &E) {
   // While in theory it is interesting to consider the case in which Dst has
   // more than one predecessor, because Dst might be part of a loop which is
   // only reachable from Src, in practice it is pointless since at the time
   // GVN runs all such loops have preheaders, which means that Dst will have
   // been changed to have only one predecessor, namely Src.
-  const BasicBlock *Pred = E.getEnd()->getSinglePredecessor();
+
+  if (PredCache.GetNumPreds(const_cast<BasicBlock*>(E.getEnd())) != 1)
+    return false;
+  const BasicBlock *Pred = *(PredCache.GetPreds(const_cast<BasicBlock*>(E.getEnd())));
   const BasicBlock *Src = E.getStart();
   assert((!Pred || Pred == Src) && "No edge between these basic blocks!");
   (void)Src;
