@@ -884,8 +884,10 @@ CachingMemorySSAWalker::~CachingMemorySSAWalker() {
 struct CachingMemorySSAWalker::UpwardsMemoryQuery {
   // True if our original query started off as a call
   bool isCall;
-  // The pointer location we are going to query about. This will be
+  // The pointer location we started the query with. This will be
   // empty if isCall is true
+  AliasAnalysis::Location StartingLoc;
+  // The pointer location the query is using right now
   AliasAnalysis::Location Loc;
   // This is the instruction we were querying about.
   const Instruction *Inst;
@@ -967,88 +969,6 @@ static const Value *phiTranslateValue(const PHINode *P,
   return P;
 }
 
-/// \brief Walk the use-def chains starting at \p P and find
-/// the MemoryAccess that actually clobbers Loc.
-///
-/// \returns a pair of clobbering memory access and whether we hit a cyclic phi
-/// node.
-std::pair<MemoryAccess *, bool>
-CachingMemorySSAWalker::getClobberingMemoryAccess(
-    MemoryPhi *P, struct UpwardsMemoryQuery &Q) {
-
-  bool HitVisited = false;
-
-  ++NumClobberCacheLookups;
-  auto CacheResult = doCacheLookup(P, Q);
-  if (CacheResult)
-    return std::make_pair(CacheResult, false);
-
-  // The algorithm here is fairly simple. The goal is to prove that
-  // the phi node doesn't matter for this alias location, and to get
-  // to whatever Access occurs before the *split* point that caused
-  // the phi node.
-  // There are only two cases we can walk through:
-  // 1. One argument dominates the other, and the other's argument
-  // defining memory access is non-aliasing with our location.
-  // 2. All of the arguments are non-aliasing with our location, and
-  // eventually lead back to the same defining memory access.
-  MemoryAccess *Result = nullptr;
-
-  // Don't try to walk past an incomplete phi node during construction
-  if (P->getNumIncomingValues() != P->getNumPreds())
-    return std::make_pair(P, false);
-
-  // If we already got here once, and didn't get to an answer (if we
-  // did, it would have been cached below), we must be stuck in
-  // mutually recursive phi nodes.  In that case, the correct answer
-  // is "we can ignore the phi node if all the other arguments turn
-  // out okay" (since it cycles between itself and the other
-  // arguments).  We return true here, and are careful to make sure we
-  // only pass through "true" when we are giving results
-  // for the cycle itself.
-  if (!Q.VisitedPhis.insert(P).second)
-    return std::make_pair(P, true);
-
-  // Look through 1 argument phi nodes
-  if (P->getNumIncomingValues() == 1) {
-    auto SingleResult = getClobberingMemoryAccess(P->getIncomingValue(0), Q);
-    HitVisited = SingleResult.second;
-    Result = SingleResult.first;
-  } else {
-    MemoryAccess *TargetResult = nullptr;
-
-    // This is true if we hit ourselves from every argument
-    bool AllVisited = true;
-    for (unsigned i = 0; i < P->getNumIncomingValues(); ++i) {
-      MemoryAccess *Arg = P->getIncomingValue(i);
-      auto ArgResult = getClobberingMemoryAccess(Arg, Q);
-      if (!ArgResult.second) {
-        AllVisited = false;
-        // Fill in target result we are looking for if we haven't so far
-        // Otherwise check the argument is equal to the last one
-        if (!TargetResult) {
-          TargetResult = ArgResult.first;
-        } else if (TargetResult != ArgResult.first) {
-          Result = P;
-          HitVisited = false;
-          break;
-        }
-      }
-    }
-    //  See if we completed either with all visited, or with success
-    if (!Result && AllVisited) {
-      Result = P;
-      HitVisited = true;
-    } else if (!Result && TargetResult) {
-      Result = TargetResult;
-      HitVisited = false;
-    }
-  }
-  doCacheInsert(P, Result, Q);
-
-  return std::make_pair(Result, HitVisited);
-}
-
 /// \brief Return true if \p QueryInst could possibly have a Mod result with \p
 /// DefInst.  This is false, if for example, \p DefInst is a volatile load, and
 /// \p QueryInst is not.
@@ -1065,6 +985,30 @@ static bool possiblyAffectedBy(const Instruction *QueryInst,
   return true;
 }
 
+bool CachingMemorySSAWalker::instructionClobbersQuery(
+    const MemoryDef *MD, struct UpwardsMemoryQuery &Q) const {
+  Instruction *DefMemoryInst = MD->getMemoryInst();
+  assert(DefMemoryInst && "Defining instruction not actually an instruction");
+
+  if (!Q.isCall) {
+    // Okay, well, see if it's a volatile load vs non-volatile load
+    // situation.
+    if (possiblyAffectedBy(Q.Inst, DefMemoryInst))
+      // Check whether our memory location is modified by this instruction
+      if (AA->getModRefInfo(DefMemoryInst, Q.Loc) & AliasAnalysis::Mod)
+        return true;
+  } else {
+    // If this is a call, try then mark it for caching
+    if (ImmutableCallSite(DefMemoryInst)) {
+      Q.VisitedCalls.insert(MD);
+    }
+    if (AA->getModRefInfo(DefMemoryInst, ImmutableCallSite(Q.Inst)) !=
+        AliasAnalysis::NoModRef)
+      return true;
+  }
+  return false;
+}
+
 /// \brief Walk the use-def chains starting at \p MA and find
 /// the MemoryAccess that actually clobbers Loc.
 ///
@@ -1073,10 +1017,9 @@ static bool possiblyAffectedBy(const Instruction *QueryInst,
 std::pair<MemoryAccess *, bool>
 CachingMemorySSAWalker::getClobberingMemoryAccess(
     MemoryAccess *StartingAccess, struct UpwardsMemoryQuery &Q) {
-  DEBUG(dbgs() << "Starting!\n");
   std::queue<std::pair<MemoryAccess *, AliasAnalysis::Location>> Worklist;
   SmallPtrSet<const MemoryAccess *, 16> Visited;
-  Worklist.emplace(StartingAccess, Q.Loc);
+  Worklist.emplace(StartingAccess, Q.StartingLoc);
   SmallDenseMap<MemoryAccess *,
                 std::pair<MemoryAccess *, AliasAnalysis::Location>> Prev;
   MemoryAccess *CurrAccess = nullptr;
@@ -1084,7 +1027,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
   AliasAnalysis::Location Loc;
   while (!Worklist.empty()) {
     CurrAccess = Worklist.front().first;
-    Loc = Worklist.front().second;
+    Q.Loc = Loc = Worklist.front().second;
     Worklist.pop();
     // If it's a phi node, and we have already visited it, skip it
     if (MemoryPhi *MP = dyn_cast<MemoryPhi>(CurrAccess)) {
@@ -1097,6 +1040,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
       if (!Q.VisitedPhis.insert(MP).second)
         continue;
       // Enqueue each pred
+      const Value *LocPtr = Loc.Ptr;
       for (unsigned i = 0; i < MP->getNumIncomingValues(); ++i) {
         MemoryAccess *Arg = MP->getIncomingValue(i);
         // If we dominate the predecessor, it must be a backedge
@@ -1104,7 +1048,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
           SawBackedgePhi = true;
         // See if our pointer is defined by a phi node, if so, translate it
         if (!Q.isCall) {
-          if (const PHINode *P = dyn_cast<PHINode>(Loc.Ptr)) {
+          if (const PHINode *P = dyn_cast<PHINode>(LocPtr)) {
             const Value *NewPtr = phiTranslateValue(P, MP->getIncomingBlock(i));
             Loc = Loc.getWithNewPtr(NewPtr);
           }
@@ -1124,31 +1068,13 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
       // If we hit the top, stop following this path
       if (MSSA->isLiveOnEntryDef(MD))
         continue;
-      Instruction *DefMemoryInst = MD->getMemoryInst();
-      assert(DefMemoryInst &&
-             "Defining instruction not actually an instruction");
-
       // While we can do lookups, we can't sanely do inserts here unless we
       // were to track every thing we saw along the way, since we don't
       // know where we will stop.
       if (auto CacheResult = doCacheLookup(CurrAccess, Q))
         return std::make_pair(CacheResult, false);
-      if (!Q.isCall) {
-        // Okay, well, see if it's a volatile load vs non-volatile load
-        // situation.
-        if (possiblyAffectedBy(Q.Inst, DefMemoryInst))
-          // Check whether our memory location is modified by this instruction
-          if (AA->getModRefInfo(DefMemoryInst, Q.Loc) & AliasAnalysis::Mod)
-            break;
-      } else {
-        // If this is a call, try then mark it for caching
-        if (ImmutableCallSite(DefMemoryInst)) {
-          Q.VisitedCalls.insert(MD);
-        }
-        if (AA->getModRefInfo(DefMemoryInst, ImmutableCallSite(Q.Inst)) !=
-            AliasAnalysis::NoModRef)
-          break;
-      }
+      if (instructionClobbersQuery(MD, Q))
+        break;
       // Don't revisit
       if (!Visited.insert(CurrAccess).second)
         continue;
@@ -1174,7 +1100,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
   // may in fact be below us, in which case, we need to check local domination
   // if the found access is in the same block as the starting access.
   const BasicBlock *OriginalBlock = Q.Inst->getParent();
-
+  MemoryAccess *FinalAccess = CurrAccess;
   unsigned int N = 0;
   while (CurrAccess && CurrAccess != StartingAccess) {
     BasicBlock *CurrBlock = CurrAccess->getBlock();
@@ -1185,63 +1111,16 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
     const auto &PrevResult = Prev.lookup(CurrAccess);
     Loc = PrevResult.second;
     CurrAccess = PrevResult.first;
+    Q.Loc = Loc;
+    doCacheInsert(CurrAccess, FinalAccess, Q);
     N++;
     assert(N < 1000 && "In the loop too many times");
   }
 
   assert(CurrAccess &&
          "Should have found something that dominated our original access");
-
-  /*
-  MemoryAccess *CurrAccess = MA;
-  while (true) {
-    // Should be either a Memory Def or a Phi node at this point
-    if (MemoryPhi *P = dyn_cast<MemoryPhi>(CurrAccess))
-      return getClobberingMemoryAccess(P, Q);
-    else {
-      MemoryDef *MD = dyn_cast<MemoryDef>(CurrAccess);
-      assert(MD && "Use linked to something that is not a def");
-      // If we hit the top, stop
-      if (MSSA->isLiveOnEntryDef(MD))
-        return std::make_pair(CurrAccess, false);
-      Instruction *DefMemoryInst = MD->getMemoryInst();
-      assert(DefMemoryInst &&
-             "Defining instruction not actually an instruction");
-
-      // While we can do lookups, we can't sanely do inserts here unless we
-      // were to track every thing we saw along the way, since we don't
-      // know where we will stop.
-      if (auto CacheResult = doCacheLookup(CurrAccess, Q))
-        return std::make_pair(CacheResult, false);
-      if (!Q.isCall) {
-        // Okay, well, see if it's a volatile load vs non-volatile load
-        // situation.
-        if (possiblyAffectedBy(Q.Inst, DefMemoryInst))
-          // Check whether our memory location is modified by this instruction
-          if (AA->getModRefInfo(DefMemoryInst, Q.Loc) & AliasAnalysis::Mod)
-            break;
-      } else {
-        // If this is a call, try then mark it for caching
-        if (ImmutableCallSite(DefMemoryInst)) {
-          Q.VisitedCalls.insert(MD);
-        }
-        if (AA->getModRefInfo(DefMemoryInst, ImmutableCallSite(Q.Inst)) !=
-            AliasAnalysis::NoModRef)
-          break;
-      }
-    }
-    MemoryAccess *NextAccess = cast<MemoryDef>(CurrAccess)->getDefiningAccess();
-    // Walk from def to def
-    CurrAccess = NextAccess;
-  }
-  */
-
+  Q.Loc = Q.StartingLoc;
   doCacheInsert(StartingAccess, CurrAccess, Q);
-  // Temporarily replace the location in the query for the current access
-  AliasAnalysis::Location &Temp = Loc;
-  Q.Loc = Loc;
-  doCacheInsert(CurrAccess, CurrAccess, Q);
-  Q.Loc = Temp;
   return std::make_pair(CurrAccess, false);
 }
 
@@ -1259,7 +1138,7 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
     return StartingAccess;
 
   Q.OriginalAccess = StartingAccess;
-  Q.Loc = Loc;
+  Q.StartingLoc = Loc;
   Q.Inst = StartingAccess->getMemoryInst();
   Q.isCall = false;
 
@@ -1303,7 +1182,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
     Q.Inst = I;
   } else {
     Q.isCall = false;
-    Q.Loc = AA->getLocation(I);
+    Q.StartingLoc = AA->getLocation(I);
     Q.Inst = I;
   }
 
@@ -1347,7 +1226,7 @@ void CachingMemorySSAWalker::invalidateInfo(MemoryAccess *MA) {
       Q.Inst = I;
     } else {
       Q.isCall = false;
-      Q.Loc = AA->getLocation(I);
+      Q.StartingLoc = AA->getLocation(I);
       Q.Inst = I;
     }
   }

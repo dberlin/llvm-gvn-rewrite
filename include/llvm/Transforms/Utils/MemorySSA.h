@@ -706,10 +706,9 @@ protected:
 
 private:
   std::pair<MemoryAccess *, bool>
-  getClobberingMemoryAccess(MemoryPhi *Phi, struct UpwardsMemoryQuery &);
-  std::pair<MemoryAccess *, bool>
   getClobberingMemoryAccess(MemoryAccess *, struct UpwardsMemoryQuery &);
-
+  bool instructionClobbersQuery(const MemoryDef *,
+                                struct UpwardsMemoryQuery &) const;
   typedef SmallDenseMap<AliasAnalysis::Location, MemoryAccess *> InnerCacheType;
   SmallDenseMap<const MemoryAccess *, std::unique_ptr<InnerCacheType>>
       CachedUpwardsClobberingAccess;
