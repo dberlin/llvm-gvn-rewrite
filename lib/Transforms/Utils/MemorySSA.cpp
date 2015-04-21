@@ -19,6 +19,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/CFG.h"
+#include "llvm/Analysis/IteratedDominanceFrontier.h"
 #include "llvm/IR/AssemblyAnnotationWriter.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Dominators.h"
@@ -74,89 +75,6 @@ public:
       OS << "; " << *MA << "\n";
   }
 };
-}
-
-/// \brief This is the same algorithm as PromoteMemoryToRegister's phi
-/// placement algorithm. It is a linear time phi placement algorithm.
-void MemorySSA::determineInsertionPoint(
-    const SmallPtrSetImpl<BasicBlock *> &DefBlocks) {
-  // Compute dominator levels and BB numbers
-  DenseMap<DomTreeNode *, unsigned> DomLevels;
-  computeDomLevels(DomLevels);
-
-  // Use a priority queue keyed on dominator tree level so that inserted nodes
-  // are handled from the bottom of the dominator tree upwards.
-  typedef std::pair<DomTreeNode *, unsigned> DomTreeNodePair;
-  typedef std::priority_queue<DomTreeNodePair, SmallVector<DomTreeNodePair, 32>,
-                              less_second> IDFPriorityQueue;
-  IDFPriorityQueue PQ;
-
-  for (BasicBlock *BB : DefBlocks) {
-    if (DomTreeNode *Node = DT->getNode(BB))
-      PQ.push(std::make_pair(Node, DomLevels[Node]));
-  }
-
-  SmallVector<BasicBlock *, 32> DFBlocks;
-  SmallVector<DomTreeNode *, 32> Worklist;
-  SmallPtrSet<DomTreeNode *, 32> VisitedPQ;
-  SmallPtrSet<DomTreeNode *, 32> VisitedWorklist;
-
-  while (!PQ.empty()) {
-    DomTreeNodePair RootPair = PQ.top();
-    PQ.pop();
-    DomTreeNode *Root = RootPair.first;
-    unsigned RootLevel = RootPair.second;
-
-    // Walk all dominator tree children of Root, inspecting their CFG edges with
-    // targets elsewhere on the dominator tree. Only targets whose level is at
-    // most Root's level are added to the iterated dominance frontier of the
-    // definition set.
-
-    Worklist.clear();
-    Worklist.push_back(Root);
-    VisitedWorklist.insert(Root);
-
-    while (!Worklist.empty()) {
-      DomTreeNode *Node = Worklist.pop_back_val();
-      BasicBlock *BB = Node->getBlock();
-
-      for (auto S : successors(BB)) {
-        DomTreeNode *SuccNode = DT->getNode(S);
-
-        // Quickly skip all CFG edges that are also dominator tree edges instead
-        // of catching them below.
-        if (SuccNode->getIDom() == Node)
-          continue;
-
-        unsigned SuccLevel = DomLevels[SuccNode];
-        if (SuccLevel > RootLevel)
-          continue;
-
-        if (!VisitedPQ.insert(SuccNode).second)
-          continue;
-
-        BasicBlock *SuccBB = SuccNode->getBlock();
-
-        DFBlocks.push_back(SuccBB);
-        if (!DefBlocks.count(SuccBB))
-          PQ.push(std::make_pair(SuccNode, SuccLevel));
-      }
-
-      for (auto &C : *Node)
-        if (VisitedWorklist.insert(C).second)
-          Worklist.push_back(C);
-    }
-  }
-
-  for (auto &BB : DFBlocks) {
-    // Insert phi node
-    auto &Accesses = getOrCreateAccessList(BB);
-    MemoryPhi *Phi = new MemoryPhi(
-        BB, std::distance(pred_begin(BB), pred_end(BB)), nextID++);
-    InstructionToMemoryAccess.insert(std::make_pair(BB, Phi));
-    // Phi goes first
-    Accesses->push_front(Phi);
-  }
 }
 
 namespace {
@@ -334,8 +252,23 @@ MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
       Accesses->push_back(MA);
     }
   }
+
   // Determine where our PHI's should go
-  determineInsertionPoint(DefiningBlocks);
+  IDFCalculator IDFs(*DT);
+  IDFs.setDefiningBlocks(DefiningBlocks);
+  SmallVector<BasicBlock *, 32> IDFBlocks;
+  IDFs.calculate(IDFBlocks);
+
+  // Place MemoryPHI nodes
+  for (auto &BB : IDFBlocks) {
+    // Insert phi node
+    auto &Accesses = getOrCreateAccessList(BB);
+    MemoryPhi *Phi = new MemoryPhi(
+        BB, std::distance(pred_begin(BB), pred_end(BB)), nextID++);
+    InstructionToMemoryAccess.insert(std::make_pair(BB, Phi));
+    // Phi goes first
+    Accesses->push_front(Phi);
+  }
 
   // Now do regular SSA renaming
   SmallPtrSet<BasicBlock *, 16> Visited;
