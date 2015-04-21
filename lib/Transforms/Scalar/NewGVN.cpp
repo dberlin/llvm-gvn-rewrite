@@ -1537,10 +1537,10 @@ bool NewGVN::isOnlyReachableViaThisEdge(const BasicBlockEdge &E) {
   // GVN runs all such loops have preheaders, which means that Dst will have
   // been changed to have only one predecessor, namely Src.
 
-  if (PredCache.GetNumPreds(const_cast<BasicBlock *>(E.getEnd())) != 1)
+  BasicBlock *EdgeEnd = const_cast<BasicBlock *>(E.getEnd());
+  if (PredCache.size(EdgeEnd) != 1)
     return false;
-  const BasicBlock *Pred =
-      *(PredCache.GetPreds(const_cast<BasicBlock *>(E.getEnd())));
+  const BasicBlock *Pred = PredCache.get(EdgeEnd)[0];
   const BasicBlock *Src = E.getStart();
   assert((!Pred || Pred == Src) && "No edge between these basic blocks!");
   (void)Src;
