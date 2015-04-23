@@ -273,6 +273,20 @@ MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
   // Now do regular SSA renaming
   SmallPtrSet<BasicBlock *, 16> Visited;
   renamePass(DT->getRootNode(), LiveOnEntryDef, Visited, Walker);
+#if 0
+  for (auto BB: Visited) {
+    auto AI = PerBlockAccesses.find(BB);
+    if (AI != PerBlockAccesses.end())
+      continue;
+    auto &Accesses = AI->second;
+    for (auto &MA : *Accesses) {
+      if (MemoryUse *MU = dyn_cast<MemoryUse>(&MA)){
+        auto RealVal = Walker->getClobberingMemoryAccess(MU->getMemoryInst());
+        MU->setDefiningAccess(RealVal);
+      }
+    }
+  }
+#endif
 
   // At this point, we may have unreachable blocks with unreachable accesses.
   // Given any uses in unreachable blocks the live on entry definition.
@@ -818,13 +832,14 @@ struct CachingMemorySSAWalker::UpwardsMemoryQuery {
   // True if our original query started off as a call
   bool isCall;
   // The pointer location we started the query with. This will be
-  // empty if isCall is true
+  // empty if isCall is true.
   AliasAnalysis::Location StartingLoc;
-  // The pointer location the query is using right now
+  // The pointer location the query is using right now. This may be different
+  // from StartingLoc due to pointer phi translation.
   AliasAnalysis::Location Loc;
   // This is the instruction we were querying about.
   const Instruction *Inst;
-  // Set of visited Instructions for this query
+  // Set of visited Instructions for this query.
   SmallPtrSet<const MemoryAccess *, 32> VisitedPhis;
   // Set of visited call accesses for this query This is separated out because
   // you can always cache and lookup the result of call queries (IE when
@@ -856,6 +871,8 @@ void CachingMemorySSAWalker::doCacheInsert(const MemoryAccess *M,
   if (Q.isCall)
     CachedUpwardsClobberingCall[M] = Result;
   else {
+    DEBUG(dbgs() << "Insert: M is " << M << " Loc.Ptr is " << Q.Loc.Ptr
+                 << "\n");
     auto It = CachedUpwardsClobberingAccess.insert({M, nullptr});
     if (!It.second) {
       auto &Cache = It.first->second;
@@ -876,6 +893,8 @@ CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
   if (Q.isCall)
     Result = CachedUpwardsClobberingCall.lookup(M);
   else {
+    DEBUG(dbgs() << "Lookup: M is " << M << " Loc.Ptr is " << Q.Loc.Ptr
+                 << "\n");
     auto It = CachedUpwardsClobberingAccess.find(M);
     if (It != CachedUpwardsClobberingAccess.end()) {
       auto &Cache = It->second;
@@ -886,6 +905,9 @@ CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
   }
 
   if (Result) {
+    DEBUG(dbgs() << "Lookup - found: M is " << M << " Loc.Ptr is " << Q.Loc.Ptr
+                 << "\n");
+
     ++NumClobberCacheHits;
     return Result;
   }
@@ -903,8 +925,7 @@ static const Value *phiTranslateValue(const PHINode *P,
 }
 
 /// \brief Return true if \p QueryInst could possibly have a Mod result with \p
-/// DefInst.  This is false, if for example, \p DefInst is a volatile load, and
-/// \p QueryInst is not.
+/// DefInst.
 static bool possiblyAffectedBy(const Instruction *QueryInst,
                                const Instruction *DefInst) {
   if (isa<LoadInst>(DefInst) && isa<LoadInst>(QueryInst)) {
@@ -964,7 +985,6 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
     Worklist.pop();
     // If it's a phi node, and we have already visited it, skip it
     if (MemoryPhi *MP = dyn_cast<MemoryPhi>(CurrAccess)) {
-
       // Don't try to walk past an incomplete phi node during construction
       if (MP->getNumIncomingValues() != MP->getNumPreds())
         continue;
@@ -1025,6 +1045,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
   if (MSSA->isLiveOnEntryDef(CurrAccess))
     return {CurrAccess, false};
 
+  doCacheInsert(CurrAccess, CurrAccess, Q);
   // Now find the thing that dominates us from the path we found to the
   // clobbering access. This means walking the prev pointers backwards to figure
   // out how we go to this clobber, stopping when we find something that
@@ -1033,7 +1054,6 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
   // may in fact be below us, in which case, we need to check local domination
   // if the found access is in the same block as the starting access.
   const BasicBlock *OriginalBlock = Q.Inst->getParent();
-  MemoryAccess *FinalAccess = CurrAccess;
   unsigned int N = 0;
   while (CurrAccess && CurrAccess != StartingAccess) {
     BasicBlock *CurrBlock = CurrAccess->getBlock();
@@ -1042,18 +1062,18 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(
          MSSA->locallyDominates(CurrAccess, Q.OriginalAccess)))
       break;
     const auto &PrevResult = Prev.lookup(CurrAccess);
-    Loc = PrevResult.second;
     CurrAccess = PrevResult.first;
-    Q.Loc = Loc;
-    doCacheInsert(CurrAccess, FinalAccess, Q);
     N++;
     assert(N < 1000 && "In the loop too many times");
   }
-
+  for (auto &Entry : Prev) {
+    Q.Loc = Entry.second.second;
+    doCacheInsert(Entry.second.first, CurrAccess, Q);
+  }
   assert(CurrAccess &&
          "Should have found something that dominated our original access");
   Q.Loc = Q.StartingLoc;
-  doCacheInsert(StartingAccess, CurrAccess, Q);
+  //  doCacheInsert(StartingAccess, CurrAccess, Q);
   return std::make_pair(CurrAccess, false);
 }
 
@@ -1071,7 +1091,7 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
     return StartingAccess;
 
   Q.OriginalAccess = StartingAccess;
-  Q.StartingLoc = Loc;
+  Q.StartingLoc = Q.Loc = Loc;
   Q.Inst = StartingAccess->getMemoryInst();
   Q.isCall = false;
 
@@ -1115,7 +1135,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
     Q.Inst = I;
   } else {
     Q.isCall = false;
-    Q.StartingLoc = AA->getLocation(I);
+    Q.Loc = Q.StartingLoc = AA->getLocation(I);
     Q.Inst = I;
   }
 
@@ -1159,7 +1179,7 @@ void CachingMemorySSAWalker::invalidateInfo(MemoryAccess *MA) {
       Q.Inst = I;
     } else {
       Q.isCall = false;
-      Q.StartingLoc = AA->getLocation(I);
+      Q.Loc = Q.StartingLoc = AA->getLocation(I);
       Q.Inst = I;
     }
   }
