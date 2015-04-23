@@ -372,7 +372,7 @@ private:
   void markDominatedSingleUserEquivalences(CongruenceClass *, Value *, Value *,
                                            bool, const BasicBlockEdge &);
   Value *findConditionEquivalence(Value *, BasicBlock *) const;
-  std::pair<unsigned, unsigned>
+  const std::pair<unsigned, unsigned>
   calculateDominatedInstRange(const DomTreeNode *);
 
   // Instruction replacement
@@ -1537,10 +1537,13 @@ bool NewGVN::isOnlyReachableViaThisEdge(const BasicBlockEdge &E) {
   // GVN runs all such loops have preheaders, which means that Dst will have
   // been changed to have only one predecessor, namely Src.
 
+  const BasicBlock *Pred = E.getEnd()->getSinglePredecessor();
+#if 0
   BasicBlock *EdgeEnd = const_cast<BasicBlock *>(E.getEnd());
   if (PredCache.size(EdgeEnd) != 1)
     return false;
   const BasicBlock *Pred = PredCache.get(EdgeEnd)[0];
+#endif
   const BasicBlock *Src = E.getStart();
   assert((!Pred || Pred == Src) && "No edge between these basic blocks!");
   (void)Src;
@@ -2029,8 +2032,15 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
 // On the way up, we cache the ranges for all the child blocks.
 // This is essentially an incremental DFS
 
-std::pair<unsigned, unsigned>
+const std::pair<unsigned, unsigned>
 NewGVN::calculateDominatedInstRange(const DomTreeNode *DTN) {
+
+  // First see if we have it, if not, we need to recalculate
+  const auto &DominatedRange = DominatedInstRange.find(DTN);
+  if (DominatedRange != DominatedInstRange.end()) {
+    return DominatedRange->second;
+  }
+  // Recalculate
   SmallVector<std::pair<const DomTreeNode *, DomTreeNode::const_iterator>, 32>
       WorkStack;
   WorkStack.emplace_back(DTN, DTN->begin());
@@ -2039,16 +2049,16 @@ NewGVN::calculateDominatedInstRange(const DomTreeNode *DTN) {
     const auto &Back = WorkStack.back();
     const DomTreeNode *Node = Back.first;
     auto ChildIt = Back.second;
-    auto Result = BlockInstRange.lookup(Node->getBlock());
+    const auto &Result = BlockInstRange.lookup(Node->getBlock());
     MaxSeen = std::max(MaxSeen, Result.second);
     // If we visited all of the children of this node, "recurse" back up the
     // stack setting the ranges
     if (ChildIt == Node->end()) {
-      auto Result = BlockInstRange.lookup(Node->getBlock());
+      const auto &Result = BlockInstRange.lookup(Node->getBlock());
       DominatedInstRange[DTN] = {Result.first, MaxSeen};
       WorkStack.pop_back();
       if (WorkStack.empty())
-        return std::make_pair(Result.first, MaxSeen);
+        return {Result.first, MaxSeen};
     } else {
       while (ChildIt != Node->end()) {
         // Otherwise, recursively visit this child.
@@ -2087,12 +2097,7 @@ void NewGVN::propagateChangeInEdge(BasicBlock *Dest) {
 
   // Note that this is an overshoot, because the inst ranges are calculated in
   // RPO order, not dominator tree order.
-  const auto &DominatedRange = DominatedInstRange.find(DTN);
-  std::pair<unsigned, unsigned> Result;
-  if (DominatedRange == DominatedInstRange.end()) {
-    Result = calculateDominatedInstRange(DTN);
-  } else
-    Result = DominatedRange->second;
+  const std::pair<unsigned, unsigned> Result = calculateDominatedInstRange(DTN);
 
   // Touch all the downstream dominated instructions that used equivalences.
   for (int InstrNum = InvolvedInEquivalence.find_next(Result.first - 1);
@@ -2322,14 +2327,14 @@ bool NewGVN::runOnFunction(Function &F) {
 
   Changed |= eliminateInstructions(F);
 
-  // The ideal ordering for processing is not quite topological ordering,
-  // because there are multiple roots.  It is essentially "group every vertex
-  // that depends on a given vertex together after that vertex", which is not
-  // the same.  It is in fact, an NP complete problem, and given that the graph
-  // may be cyclic anyway, we order the congruence classes by how many things
-  // depend on them.  This is a good approximation, and will cut down the number
-  // of iterations.
-
+// The ideal ordering for processing is not quite topological ordering,
+// because there are multiple roots.  It is essentially "group every vertex
+// that depends on a given vertex together after that vertex", which is not
+// the same.  It is in fact, an NP complete problem, and given that the graph
+// may be cyclic anyway, we order the congruence classes by how many things
+// depend on them.  This is a good approximation, and will cut down the number
+// of iterations.
+#if 0
   SmallDenseMap<CongruenceClass *, unsigned> UsedCount;
   SmallPtrSet<CongruenceClass *, 16> VisitedClasses;
 
@@ -2347,7 +2352,7 @@ bool NewGVN::runOnFunction(Function &F) {
 //             return UsedCount[A] > UsedCount[B];
 //           });
 
-#if 0
+
   bool PREChanged = true;
   while (PREChanged) {
     PREChanged = false;
@@ -3538,8 +3543,7 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
 void NewGVN::analyzeAvailability(Instruction *I,
                                  AvailValInBlkVect &ValuesPerBlock,
                                  UnavailBlkVect &UnavailableBlocks) {
-  for (BasicBlock **PI = PredCache.GetPreds(I->getParent()); *PI; ++PI) {
-    BasicBlock *P = *PI;
+  for (auto P : PredCache.get(I->getParent())) {
     if (!ReachableBlocks.count(P)) {
       ValuesPerBlock.push_back(AvailableValueInBlock::getUndef(P));
       continue;
@@ -3588,12 +3592,12 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
     if (Instruction *I = dyn_cast<Instruction>(M)) {
       UnavailBlkVect UnavailableBlocks;
       BasicBlock *IBlock = I->getParent();
-      if (PredCache.GetNumPreds(IBlock) == 0)
+      if (PredCache.size(IBlock) == 0)
         continue;
       analyzeAvailability(I, ValuesPerBlock, UnavailableBlocks);
 
       if ((UnavailableBlocks.size() + ValuesPerBlock.size()) !=
-          PredCache.GetNumPreds(IBlock))
+          PredCache.size(IBlock))
         continue;
 #if 1
       // If we have no predecessors that produce a known value for this load,
