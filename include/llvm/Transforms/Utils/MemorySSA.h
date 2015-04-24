@@ -705,8 +705,12 @@ protected:
   void doCacheRemove(const MemoryAccess *, const UpwardsMemoryQuery &);
 
 private:
-  std::pair<MemoryAccess *, bool>
-  getClobberingMemoryAccess(MemoryAccess *, struct UpwardsMemoryQuery &);
+  typedef std::pair<MemoryAccess *, AliasAnalysis::Location> PathInfo;
+  typedef SmallDenseMap<MemoryAccess *, PathInfo> PathMap;
+  MemoryAccess *UpwardsBFSWalkAccess(MemoryAccess *, PathMap &,
+                                     struct UpwardsMemoryQuery &);
+  MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
+                                          struct UpwardsMemoryQuery &);
   bool instructionClobbersQuery(const MemoryDef *,
                                 struct UpwardsMemoryQuery &) const;
   typedef SmallDenseMap<AliasAnalysis::Location, MemoryAccess *> InnerCacheType;
