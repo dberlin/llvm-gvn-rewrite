@@ -17,8 +17,8 @@ bb26:                                             ; preds = %bb77, %0
   br i1 undef, label %bb68, label %bb77
 
 bb68:                                             ; preds = %bb26
-; CHECK:  MemoryUse(3)
-; MemoryUse(3)
+; CHECK:  MemoryUse(liveOnEntry)
+; MemoryUse(liveOnEntry)
 ; CHECK-NEXT:   %tmp69 = load i64, i64* null, align 8
   %tmp69 = load i64, i64* null, align 8
 ; CHECK:  1 = MemoryDef(3)
