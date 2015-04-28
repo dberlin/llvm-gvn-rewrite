@@ -425,7 +425,7 @@ public:
   /// access associaed with it.  If passed a basic block gets the memory phi
   /// node that exists for that block, if there is one.
   MemoryAccess *getMemoryAccess(const Value *) const;
-  void dump(Function &);
+  void dump() const;
   void print(raw_ostream &) const;
 
   /// \brief Return true if \p MA represents the live on entry value
@@ -706,9 +706,10 @@ protected:
 
 private:
   typedef std::pair<MemoryAccess *, AliasAnalysis::Location> PathInfo;
-  typedef SmallDenseMap<MemoryAccess *, PathInfo> PathMap;
-  MemoryAccess *UpwardsBFSWalkAccess(MemoryAccess *, PathMap &,
-                                     struct UpwardsMemoryQuery &);
+  typedef SmallDenseMap<std::pair<MemoryAccess *, AliasAnalysis::Location>,
+                        PathInfo> PathMap;
+  std::pair<MemoryAccess *, AliasAnalysis::Location>
+  UpwardsBFSWalkAccess(MemoryAccess *, PathMap &, struct UpwardsMemoryQuery &);
   MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
                                           struct UpwardsMemoryQuery &);
   bool instructionClobbersQuery(const MemoryDef *,

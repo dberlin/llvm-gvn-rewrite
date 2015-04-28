@@ -180,7 +180,7 @@ class NewGVN : public FunctionPass {
 
   // Congruence class info
   CongruenceClass *InitialClass;
-  std::vector<std::unique_ptr<CongruenceClass>> CongruenceClasses;
+  std::vector<CongruenceClass *> CongruenceClasses;
   unsigned int NextCongruenceNum = 0;
 
   // Value Mappings
@@ -1531,18 +1531,18 @@ unsigned NewGVN::replaceAllDominatedUsesWith(Value *From, Value *To,
 /// true if every path from the entry block to 'Dst' passes via this edge.  In
 /// particular 'Dst' must not be reachable via another edge from 'Src'.
 bool NewGVN::isOnlyReachableViaThisEdge(const BasicBlockEdge &E) {
-  // While in theory it is interesting to consider the case in which Dst has
-  // more than one predecessor, because Dst might be part of a loop which is
-  // only reachable from Src, in practice it is pointless since at the time
-  // GVN runs all such loops have preheaders, which means that Dst will have
-  // been changed to have only one predecessor, namely Src.
-
-  const BasicBlock *Pred = E.getEnd()->getSinglePredecessor();
+// While in theory it is interesting to consider the case in which Dst has
+// more than one predecessor, because Dst might be part of a loop which is
+// only reachable from Src, in practice it is pointless since at the time
+// GVN runs all such loops have preheaders, which means that Dst will have
+// been changed to have only one predecessor, namely Src.
 #if 0
   BasicBlock *EdgeEnd = const_cast<BasicBlock *>(E.getEnd());
   if (PredCache.size(EdgeEnd) != 1)
     return false;
   const BasicBlock *Pred = PredCache.get(EdgeEnd)[0];
+#else
+  const BasicBlock *Pred = E.getEnd()->getSinglePredecessor();
 #endif
   const BasicBlock *Src = E.getStart();
   assert((!Pred || Pred == Src) && "No edge between these basic blocks!");
@@ -2208,7 +2208,7 @@ bool NewGVN::runOnFunction(Function &F) {
   AC = &getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
   TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
   AA = &getAnalysis<AliasAnalysis>();
-  //  SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(AA, DT));
+  SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(AA, DT));
   MSSA = &getAnalysis<MemorySSALazy>().getMSSA();
   MSSAWalker = MSSA->buildMemorySSA(AA, DT);
 
@@ -2243,7 +2243,7 @@ bool NewGVN::runOnFunction(Function &F) {
 
   TouchedInstructions.resize(ICount + 1);
   InvolvedInEquivalence.resize(ICount + 1);
-
+  DominatedInstRange.resize(F.size());
   // Ensure we don't end up resizing the expressionToClass map, as
   // that can be quite expensive. At most, we have one expression per
   // instruction.
@@ -2334,34 +2334,34 @@ bool NewGVN::runOnFunction(Function &F) {
 // may be cyclic anyway, we order the congruence classes by how many things
 // depend on them.  This is a good approximation, and will cut down the number
 // of iterations.
-#if 0
+#if 1
   SmallDenseMap<CongruenceClass *, unsigned> UsedCount;
   SmallPtrSet<CongruenceClass *, 16> VisitedClasses;
 
   for (int i = CongruenceClasses.size() - 1; i >= 0; --i) {
-    CongruenceClass *CC = CongruenceClasses[i].get();
+    CongruenceClass *CC = CongruenceClasses[i];
     if (CC == InitialClass || CC->dead || VisitedClasses.count(CC))
       continue;
     topoVisitCongruenceClass(CC, UsedCount, VisitedClasses);
   }
   SmallVector<CongruenceClass *, 16> Worklist;
   for (auto &CC : CongruenceClasses)
-    Worklist.push_back(CC.get());
-// std::sort(Worklist.begin(), Worklist.end(),
-//           [&UsedCount](CongruenceClass *&A, CongruenceClass *&B) {
-//             return UsedCount[A] > UsedCount[B];
-//           });
-
+    Worklist.push_back(CC);
+  // std::sort(Worklist.begin(), Worklist.end(),
+  //           [&UsedCount](CongruenceClass *&A, CongruenceClass *&B) {
+  //             return UsedCount[A] > UsedCount[B];
+  //           });
 
   bool PREChanged = true;
   while (PREChanged) {
     PREChanged = false;
+#if 1
     // FIXME: Handle added congruence classes
     if (Worklist.size() != CongruenceClasses.size())
       Worklist.insert(Worklist.end(),
                       CongruenceClasses.begin() + (Worklist.size() - 1),
                       CongruenceClasses.end());
-
+#endif
     for (auto CC : Worklist) {
       if (CC == InitialClass || CC->dead)
         continue;
@@ -2369,7 +2369,7 @@ bool NewGVN::runOnFunction(Function &F) {
       PREChanged |= performPREOnClass(CC);
     }
   }
-  
+
   PREValueForwarding.clear();
 
   Changed |= PREChanged;
@@ -3060,7 +3060,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
   }
 
   for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
-    CongruenceClass *CC = CongruenceClasses[i].get();
+    CongruenceClass *CC = CongruenceClasses[i];
     // FIXME: We should eventually be able to replace everything still
     // in the initial class with undef, as they should be unreachable.
     // Right now, initial still contains some things we skip value
@@ -3766,14 +3766,8 @@ bool NewGVN::phiTranslateArguments(const BasicExpression *From,
     }
     // If arg is still a phi node, and wasn't processed by the add processing
     // above, translate it now
-    if (!processedAdd && isa<PHINode>(Arg)) {
-      while (isa<PHINode>(Arg)) {
-        Value *Before = Arg;
-        Arg = phiTranslateValue(Arg, Pred);
-        if (Arg == Before)
-          break;
-      }
-    }
+    if (!processedAdd && isa<PHINode>(Arg))
+      Arg = phiTranslateValue(Arg, Pred);
 
     Value *Leader = findPRELeader(Arg, Pred, MustDominate);
     if (Leader == nullptr)
