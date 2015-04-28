@@ -281,7 +281,7 @@ MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
 
 #if OPTIMIZE_AFTER_CONSTRUCTION
   bool SomeUnvisited = false;
-  if (Visited.size() == F.size())
+  if (Visited.size() != F.size())
     SomeUnvisited = true;
   for (auto &BB : F)
     if (!SomeUnvisited || Visited.count(&BB)) {
@@ -886,7 +886,7 @@ void CachingMemorySSAWalker::doCacheInsert(const MemoryAccess *M,
   if (Q.isCall)
     CachedUpwardsClobberingCall[M] = Result;
   else {
-    DEBUG(dbgs() << "Insert: M is " << M << " Loc.Ptr is " << Q.Loc.Ptr
+    DEBUG(dbgs() << "Insert: M is " << *M << " Loc.Ptr is " << *(Q.Loc.Ptr)
                  << " Result will be " << *Result << "\n");
     auto It = CachedUpwardsClobberingAccess.insert({M, nullptr});
     if (!It.second) {
@@ -908,7 +908,7 @@ CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
   if (Q.isCall)
     Result = CachedUpwardsClobberingCall.lookup(M);
   else {
-    DEBUG(dbgs() << "Lookup: M is " << M << " Loc.Ptr is " << Q.Loc.Ptr
+    DEBUG(dbgs() << "Lookup: M is " << *M << " Loc.Ptr is " << *(Q.Loc.Ptr)
                  << "\n");
     auto It = CachedUpwardsClobberingAccess.find(M);
     if (It != CachedUpwardsClobberingAccess.end()) {
@@ -920,8 +920,8 @@ CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
   }
 
   if (Result) {
-    DEBUG(dbgs() << "Lookup - found: M is " << M << " Loc.Ptr is " << Q.Loc.Ptr
-                 << "\n");
+    DEBUG(dbgs() << "Lookup - found: M is " << *M << " Loc.Ptr is "
+                 << *(Q.Loc.Ptr) << " Result is " << *Result << "\n");
 
     ++NumClobberCacheHits;
     return Result;
@@ -986,11 +986,13 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
   std::queue<PathInfo> Worklist;
   Worklist.emplace(StartingAccess, Q.StartingLoc);
   MemoryAccess *ModifyingAccess = nullptr;
-
+  unsigned N = 0;
   Q.SawBackedgePhi = false;
 
   AliasAnalysis::Location Loc;
   while (!Worklist.empty()) {
+    N++;
+    assert(N < 1000 && "In the loop too many times");
     MemoryAccess *CurrAccess = Worklist.front().first;
     Q.Loc = Loc = Worklist.front().second;
     Worklist.pop();
@@ -1058,7 +1060,13 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
         if (Worklist.empty()) {
           return {CacheResult, Loc};
         } else {
-          Worklist.emplace(CacheResult, Loc);
+#if 0
+          // This may eventually lead to a place we've already visited
+          if (!Q.Visited.insert({CacheResult, Loc}).second)
+#endif
+          // If we discover we reach ourselves, don't place it on the worklist
+          if (CacheResult != MD)
+            Worklist.emplace(CacheResult, Loc);
           continue;
         }
       } else {
@@ -1218,8 +1226,9 @@ MemoryAccess *
 CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   MemoryAccess *StartingAccess = MSSA->getMemoryAccess(I);
 
-  if (isa<MemoryPhi>(StartingAccess))
-    return StartingAccess;
+  // There should be no way to lookup an instruction and get a phi as the
+  // access, since we only map BB's to PHI's.
+  assert(!isa<MemoryPhi>(StartingAccess));
 
   struct UpwardsMemoryQuery Q;
   Q.OriginalAccess = StartingAccess;
@@ -1255,9 +1264,12 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
       return MSSA->getLiveOnEntryDef();
     }
 
-  // If we started with a heap use, walk to the def.
+  // Start with the thing we already think clobbers this location
   StartingAccess = StartingAccess->getDefiningAccess();
-
+  // At this point, StartingAccess may be the live on entry def.
+  // If it is, we will not get a better result.
+  if (MSSA->isLiveOnEntryDef(StartingAccess))
+    return StartingAccess;
   MemoryAccess *FinalAccess = getClobberingMemoryAccess(StartingAccess, Q);
   doCacheInsert(Q.OriginalAccess, FinalAccess, Q);
   if (Q.isCall) {

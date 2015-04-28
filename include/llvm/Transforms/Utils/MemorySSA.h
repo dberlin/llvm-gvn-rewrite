@@ -183,7 +183,7 @@ private:
   mutable ilist_half_node<MemoryAccess> Sentinel;
 };
 
-static inline raw_ostream &operator<<(raw_ostream &OS, MemoryAccess &MA) {
+inline raw_ostream &operator<<(raw_ostream &OS, const MemoryAccess &MA) {
   MA.print(OS);
   return OS;
 }
