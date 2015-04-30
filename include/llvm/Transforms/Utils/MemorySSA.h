@@ -78,6 +78,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
 #include <list>
 
@@ -688,6 +689,8 @@ public:
                                           AliasAnalysis::Location &) override;
 };
 
+typedef std::pair<MemoryAccess *, AliasAnalysis::Location> MemoryAccessPair;
+
 /// \brief A MemorySSAWalker that does AA walks and caching of lookups to
 /// disambiguate accesses.
 class CachingMemorySSAWalker final : public MemorySSAWalker {
@@ -707,9 +710,7 @@ protected:
   void doCacheRemove(const MemoryAccess *, const UpwardsMemoryQuery &);
 
 private:
-  typedef std::pair<MemoryAccess *, AliasAnalysis::Location> PathInfo;
-  typedef SmallDenseMap<std::pair<MemoryAccess *, AliasAnalysis::Location>,
-                        PathInfo> PathMap;
+  typedef SmallDenseMap<MemoryAccessPair, MemoryAccessPair> PathMap;
   std::pair<MemoryAccess *, AliasAnalysis::Location>
   UpwardsBFSWalkAccess(MemoryAccess *, PathMap &, struct UpwardsMemoryQuery &);
   MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
@@ -724,110 +725,188 @@ private:
   DominatorTree *DT;
 };
 
-typedef std::pair<MemoryAccess *, AliasAnalysis::Location> AccessPair;
-
-// This iterator, while somewhat specialized, is what most clients actually want
-// when walking upwards through MemorySSA chains (IE in the direction of defs).
-// It takes a pair of MemoryAccess, memory location, and walks defs, properly
-// translating the memory location through phi nodes for the user.
-class upwards_memoryaccess_iterator
-    : public std::iterator<std::forward_iterator_tag, AccessPair, ptrdiff_t,
-                           AccessPair *, AccessPair *> {
-  typedef std::iterator<std::forward_iterator_tag, AccessPair, ptrdiff_t,
-                        AccessPair *, AccessPair *> super;
+/// \brief This iterator walks over all of the defs in a given MemoryAccess. For
+/// MemoryPhi nodes, this walks arguments.  For MemoryUse/MemoryDef, this walks
+/// the defining access.
+class memoryaccess_def_iterator
+    : public std::iterator<std::forward_iterator_tag, MemoryAccess, ptrdiff_t,
+                           MemoryAccess *, MemoryAccess *> {
+  typedef std::iterator<std::forward_iterator_tag, MemoryAccess, ptrdiff_t,
+                        MemoryAccess *, MemoryAccess *> super;
 
 public:
   typedef typename super::pointer pointer;
   typedef typename super::reference reference;
-
-  upwards_memoryaccess_iterator(const AccessPair &Info)
-      : Access(Info.first), Location(Info.second), ArgNo(0) {
-    fillInCurrentPair();
-  }
-  upwards_memoryaccess_iterator() : Access(nullptr), ArgNo(0) {}
-  bool operator==(const upwards_memoryaccess_iterator &Other) const {
+  memoryaccess_def_iterator(MemoryAccess *Start) : Access(Start), ArgNo(0) {}
+  memoryaccess_def_iterator() : Access(nullptr), ArgNo(0) {}
+  bool operator==(const memoryaccess_def_iterator &Other) const {
     if (Access == nullptr)
       return Other.Access == nullptr;
-    return Access == Other.Access && ArgNo == Other.ArgNo &&
-           Location == Other.Location;
+    return Access == Other.Access && ArgNo == Other.ArgNo;
   }
-  bool operator!=(const upwards_memoryaccess_iterator &Other) const {
+  bool operator!=(const memoryaccess_def_iterator &Other) const {
     return !operator==(Other);
   }
-  reference operator*() {
+
+  // This is a bit ugly, but for MemoryPHI's, unlike PHINodes, you can't get the
+  // block from the operand in constant time.  We provide it as part of the
+  // iterator to avoid callers having to linear search.
+  BasicBlock *getPhiArgBlock() const {
+    MemoryPhi *MP = dyn_cast<MemoryPhi>(Access);
+    assert(MP && "Tried to get phi arg block when not iterating over a PHI");
+    return MP->getIncomingBlock(ArgNo);
+  }
+
+  reference operator*() const {
     if (!Access)
       llvm_unreachable("Tried to access past the end of our iterator");
-    return &CurrentPair;
+    // Go to the first argument for phis, and the defining access for everything
+    // else.
+    if (MemoryPhi *MP = dyn_cast<MemoryPhi>(Access))
+      return MP->getIncomingValue(ArgNo);
+    return Access->getDefiningAccess();
   }
-  pointer operator->() { return operator*(); }
-  upwards_memoryaccess_iterator operator++(int) {
-    upwards_memoryaccess_iterator tmp = *this;
+  pointer operator->() const { return operator*(); }
+  memoryaccess_def_iterator operator++(int) {
+    memoryaccess_def_iterator tmp = *this;
     ++*this;
     return tmp;
   }
 
-  upwards_memoryaccess_iterator &operator++() {
+  memoryaccess_def_iterator &operator++() {
     if (!Access)
       llvm_unreachable("Hit the end of the iterator");
     if (MemoryPhi *MP = dyn_cast<MemoryPhi>(Access)) {
-      if (ArgNo < MP->getNumIncomingValues()) {
-        ++ArgNo;
-      } else {
+      if (++ArgNo >= MP->getNumIncomingValues()) {
         ArgNo = 0;
         Access = nullptr;
       }
     } else {
       Access = nullptr;
     }
-
     return *this;
   }
 
 private:
-  void fillInCurrentPair() {
-    if (MemoryPhi *MP = dyn_cast<MemoryPhi>(Access)) {
-      if (Location.Ptr) {
-        PHITransAddr Translator(
-            const_cast<Value *>(Location.Ptr),
-            Access->getBlock()->getModule()->getDataLayout(), nullptr);
-        if (!Translator.PHITranslateValue(MP->getBlock(),
-                                          MP->getIncomingBlock(ArgNo), nullptr))
-          if (Translator.getAddr() != Location.Ptr)
-            CurrentPair.second = Location.getWithNewPtr(Translator.getAddr());
-      }
-
-    } else {
-
-      CurrentPair.first = Access->getDefiningAccess();
-      CurrentPair.second = Location;
-    }
-  }
-
-  AccessPair CurrentPair;
   MemoryAccess *Access;
-  AliasAnalysis::Location Location;
   unsigned ArgNo;
 };
 
-upwards_memoryaccess_iterator upwards_children_begin(const AccessPair &Pair) {
-  return upwards_memoryaccess_iterator(Pair);
+inline memoryaccess_def_iterator defs_begin(MemoryAccess *MA) {
+  return memoryaccess_def_iterator(MA);
 }
-upwards_memoryaccess_iterator upwards_children_end() {
-  return upwards_memoryaccess_iterator();
+inline memoryaccess_def_iterator defs_end() {
+  return memoryaccess_def_iterator();
 }
-
-// Enable GraphTraits for the AccessPair specialization, so that one can use all
+// Enable GraphTraits for the MemoryAccessPair specialization, so that one can
+// use all
 // of the normal graph iterators to walk
-template <> struct GraphTraits<AccessPair *> {
-  typedef AccessPair NodeType;
-  typedef upwards_memoryaccess_iterator ChildIteratorType;
+template <> struct GraphTraits<MemoryAccess *> {
+  typedef MemoryAccess NodeType;
+  typedef memoryaccess_def_iterator ChildIteratorType;
 
   static NodeType *getEntryNode(NodeType *N) { return N; }
   static inline ChildIteratorType child_begin(NodeType *N) {
-    return upwards_children_begin(*N);
+    return defs_begin(N);
+  }
+  static inline ChildIteratorType child_end(NodeType *N) { return defs_end(); }
+};
+
+// This iterator, while somewhat specialized, is what most clients actually want
+// when walking upwards through MemorySSA def chains.
+// It takes a pair of MemoryAccess, memory location, and walks defs, properly
+// translating the memory location through phi nodes for the user.
+class upward_defs_iterator : public std::iterator<std::forward_iterator_tag,
+                                                  MemoryAccessPair, ptrdiff_t> {
+  typedef std::iterator<std::forward_iterator_tag, MemoryAccessPair, ptrdiff_t>
+      super;
+
+public:
+  typedef typename super::pointer pointer;
+  typedef typename super::reference reference;
+
+  upward_defs_iterator(const MemoryAccessPair &Info)
+      : DefIterator(Info.first), Location(Info.second),
+        OriginalAccess(Info.first) {
+    if (Info.first)
+      WalkingPhi = isa<MemoryPhi>(Info.first);
+    fillInCurrentPair();
+  }
+  upward_defs_iterator() : DefIterator(), Location(), OriginalAccess() {}
+  bool operator==(const upward_defs_iterator &Other) const {
+    return DefIterator == Other.DefIterator;
+  }
+  bool operator!=(const upward_defs_iterator &Other) const {
+    return !operator==(Other);
+  }
+  reference operator*() {
+    if (DefIterator == defs_end())
+      llvm_unreachable("Tried to access past the end of our iterator");
+    return CurrentPair;
+  }
+  pointer operator->() { return &operator*(); }
+  upward_defs_iterator operator++(int) {
+    upward_defs_iterator tmp = *this;
+    ++*this;
+    return tmp;
+  }
+
+  upward_defs_iterator &operator++() {
+    if (DefIterator == defs_end())
+      llvm_unreachable("Hit the end of the iterator");
+    ++DefIterator;
+    if (DefIterator != defs_end())
+      fillInCurrentPair();
+    return *this;
+  }
+
+  BasicBlock *getPhiArgBlock() const { return DefIterator.getPhiArgBlock(); }
+
+private:
+  void fillInCurrentPair() {
+    CurrentPair.first = *DefIterator;
+    if (WalkingPhi) {
+      if (Location.Ptr) {
+        PHITransAddr Translator(
+            const_cast<Value *>(Location.Ptr),
+            OriginalAccess->getBlock()->getModule()->getDataLayout(), nullptr);
+        if (!Translator.PHITranslateValue(OriginalAccess->getBlock(),
+                                          DefIterator.getPhiArgBlock(),
+                                          nullptr))
+          if (Translator.getAddr() != Location.Ptr) {
+            CurrentPair.second = Location.getWithNewPtr(Translator.getAddr());
+            return;
+          }
+      }
+    }
+    CurrentPair.second = Location;
+  }
+
+  MemoryAccessPair CurrentPair;
+  memoryaccess_def_iterator DefIterator;
+  AliasAnalysis::Location Location;
+  bool WalkingPhi;
+  MemoryAccess *OriginalAccess;
+};
+
+inline upward_defs_iterator upward_defs_begin(const MemoryAccessPair &Pair) {
+  return upward_defs_iterator(Pair);
+}
+inline upward_defs_iterator upward_defs_end() { return upward_defs_iterator(); }
+
+// Enable GraphTraits for the MemoryAccessPair specialization, so that one can
+// use all
+// of the normal graph iterators to walk
+template <> struct GraphTraits<MemoryAccessPair *> {
+  typedef MemoryAccessPair NodeType;
+  typedef upward_defs_iterator ChildIteratorType;
+
+  static NodeType *getEntryNode(NodeType *N) { return N; }
+  static inline ChildIteratorType child_begin(NodeType *N) {
+    return upward_defs_begin(*N);
   }
   static inline ChildIteratorType child_end(NodeType *N) {
-    return upwards_children_end();
+    return upward_defs_end();
   }
 };
 }
