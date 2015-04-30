@@ -71,8 +71,10 @@
 #ifndef LLVM_TRANSFORMS_UTILS_MEMORYSSA_H
 #define LLVM_TRANSFORMS_UTILS_MEMORYSSA_H
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/Analysis/PHITransAddr.h"
 #include "llvm/ADT/ilist_node.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/Dominators.h"
@@ -720,6 +722,113 @@ private:
   DenseMap<const MemoryAccess *, MemoryAccess *> CachedUpwardsClobberingCall;
   AliasAnalysis *AA;
   DominatorTree *DT;
+};
+
+typedef std::pair<MemoryAccess *, AliasAnalysis::Location> AccessPair;
+
+// This iterator, while somewhat specialized, is what most clients actually want
+// when walking upwards through MemorySSA chains (IE in the direction of defs).
+// It takes a pair of MemoryAccess, memory location, and walks defs, properly
+// translating the memory location through phi nodes for the user.
+class upwards_memoryaccess_iterator
+    : public std::iterator<std::forward_iterator_tag, AccessPair, ptrdiff_t,
+                           AccessPair *, AccessPair *> {
+  typedef std::iterator<std::forward_iterator_tag, AccessPair, ptrdiff_t,
+                        AccessPair *, AccessPair *> super;
+
+public:
+  typedef typename super::pointer pointer;
+  typedef typename super::reference reference;
+
+  upwards_memoryaccess_iterator(const AccessPair &Info)
+      : Access(Info.first), Location(Info.second), ArgNo(0) {
+    fillInCurrentPair();
+  }
+  upwards_memoryaccess_iterator() : Access(nullptr), ArgNo(0) {}
+  bool operator==(const upwards_memoryaccess_iterator &Other) const {
+    if (Access == nullptr)
+      return Other.Access == nullptr;
+    return Access == Other.Access && ArgNo == Other.ArgNo &&
+           Location == Other.Location;
+  }
+  bool operator!=(const upwards_memoryaccess_iterator &Other) const {
+    return !operator==(Other);
+  }
+  reference operator*() {
+    if (!Access)
+      llvm_unreachable("Tried to access past the end of our iterator");
+    return &CurrentPair;
+  }
+  pointer operator->() { return operator*(); }
+  upwards_memoryaccess_iterator operator++(int) {
+    upwards_memoryaccess_iterator tmp = *this;
+    ++*this;
+    return tmp;
+  }
+
+  upwards_memoryaccess_iterator &operator++() {
+    if (!Access)
+      llvm_unreachable("Hit the end of the iterator");
+    if (MemoryPhi *MP = dyn_cast<MemoryPhi>(Access)) {
+      if (ArgNo < MP->getNumIncomingValues()) {
+        ++ArgNo;
+      } else {
+        ArgNo = 0;
+        Access = nullptr;
+      }
+    } else {
+      Access = nullptr;
+    }
+
+    return *this;
+  }
+
+private:
+  void fillInCurrentPair() {
+    if (MemoryPhi *MP = dyn_cast<MemoryPhi>(Access)) {
+      if (Location.Ptr) {
+        PHITransAddr Translator(
+            const_cast<Value *>(Location.Ptr),
+            Access->getBlock()->getModule()->getDataLayout(), nullptr);
+        if (!Translator.PHITranslateValue(MP->getBlock(),
+                                          MP->getIncomingBlock(ArgNo), nullptr))
+          if (Translator.getAddr() != Location.Ptr)
+            CurrentPair.second = Location.getWithNewPtr(Translator.getAddr());
+      }
+
+    } else {
+
+      CurrentPair.first = Access->getDefiningAccess();
+      CurrentPair.second = Location;
+    }
+  }
+
+  AccessPair CurrentPair;
+  MemoryAccess *Access;
+  AliasAnalysis::Location Location;
+  unsigned ArgNo;
+};
+
+upwards_memoryaccess_iterator upwards_children_begin(const AccessPair &Pair) {
+  return upwards_memoryaccess_iterator(Pair);
+}
+upwards_memoryaccess_iterator upwards_children_end() {
+  return upwards_memoryaccess_iterator();
+}
+
+// Enable GraphTraits for the AccessPair specialization, so that one can use all
+// of the normal graph iterators to walk
+template <> struct GraphTraits<AccessPair *> {
+  typedef AccessPair NodeType;
+  typedef upwards_memoryaccess_iterator ChildIteratorType;
+
+  static NodeType *getEntryNode(NodeType *N) { return N; }
+  static inline ChildIteratorType child_begin(NodeType *N) {
+    return upwards_children_begin(*N);
+  }
+  static inline ChildIteratorType child_end(NodeType *N) {
+    return upwards_children_end();
+  }
 };
 }
 
