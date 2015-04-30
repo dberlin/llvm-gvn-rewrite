@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------===//
 #include "llvm/Transforms/Scalar.h"
+#include "llvm/ADT/BreadthFirstIterator.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/DepthFirstIterator.h"
@@ -847,7 +848,7 @@ struct CachingMemorySSAWalker::UpwardsMemoryQuery {
   // This is the instruction we were querying about.
   const Instruction *Inst;
   // Set of visited Instructions for this query.
-  DenseSet<std::pair<const MemoryAccess *, AliasAnalysis::Location>> Visited;
+  DenseSet<MemoryAccessPair> Visited;
   // Set of visited call accesses for this query This is separated out because
   // you can always cache and lookup the result of call queries (IE when
   // isCall == true) for every call in the chain. The calls have no AA
@@ -977,7 +978,7 @@ std::pair<MemoryAccess *, AliasAnalysis::Location>
 CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
                                              PathMap &Prev,
                                              UpwardsMemoryQuery &Q) {
-  std::queue<PathInfo> Worklist;
+  std::queue<MemoryAccessPair> Worklist;
   Q.Visited.insert({StartingAccess, Q.StartingLoc});
   Worklist.emplace(StartingAccess, Q.StartingLoc);
   MemoryAccess *ModifyingAccess = nullptr;
@@ -987,15 +988,44 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
   AliasAnalysis::Location Loc;
   while (!Worklist.empty()) {
     N++;
-    assert(N < 1000 && "In the loop too many times");
-    MemoryAccess *CurrAccess = Worklist.front().first;
-    Q.Loc = Loc = Worklist.front().second;
+    assert(N < 10000 && "In the walk for too long");
+    const MemoryAccessPair Pair = Worklist.front();
+    MemoryAccess *CurrAccess = Pair.first;
+    Q.Loc = Loc = Pair.second;
     Worklist.pop();
-    // If it's a phi node, and we have already visited it, skip it
-    if (MemoryPhi *MP = dyn_cast<MemoryPhi>(CurrAccess)) {
-      // Don't try to walk past an incomplete phi node during construction
-      if (MP->getNumIncomingValues() != MP->getNumPreds())
+    if (MemoryDef *MD = dyn_cast<MemoryDef>(CurrAccess)) {
+      // If we hit the top, stop following this path
+      if (MSSA->isLiveOnEntryDef(MD))
         continue;
+
+      if (instructionClobbersQuery(MD, Q)) {
+        ModifyingAccess = CurrAccess;
+        break;
+      }
+    }
+    bool IsPhi = isa<MemoryPhi>(CurrAccess);
+    for (auto MPI = upward_defs_begin(Pair), MPE = upward_defs_end();
+         MPI != MPE; ++MPI) {
+      if (IsPhi && !Q.SawBackedgePhi &&
+          DT->dominates(CurrAccess->getBlock(), MPI.getPhiArgBlock()))
+        Q.SawBackedgePhi = true;
+      // We may have already visited this argument along another path
+      if (!Q.Visited.insert(*MPI).second)
+        continue;
+
+      assert(Prev.count(*MPI) == 0 &&
+             "This part of the map is already filled in!");
+
+      // Finally, enqueue the argument and new pointer, and set the map to
+      // say we got here from the phi and the old pointer.
+      Prev[*MPI] = Pair;
+      DEBUG(dbgs() << "Prev of " << *(MPI->first) << " is " << *(Pair.first)
+                   << "\n");
+      Worklist.emplace(*MPI);
+    }
+#if 0
+      
+    if (MemoryPhi *MP = dyn_cast<MemoryPhi>(CurrAccess)) {
 
       // Enqueue each pred
       for (unsigned i = 0; i < MP->getNumIncomingValues(); ++i) {
@@ -1005,7 +1035,7 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
 
         // If we dominate the predecessor, it must be a backedge
         if (!Q.SawBackedgePhi &&
-            DT->dominates(MP->getBlock(), MP->getIncomingBlock(i)))
+            DT->dominates(MP->getBlock(), MP->getIncomingBlock(i)w))
           Q.SawBackedgePhi = true;
 
         // See if our pointer is defined by a phi node, if so, translate it
@@ -1087,6 +1117,7 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
         Worklist.emplace(MD->getDefiningAccess(), Loc);
       }
     }
+#endif
   }
 
   // If we emptied the worklist, it means every path to the beginning of the
@@ -1167,8 +1198,8 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
     CurrAccess = PrevResult.first;
     CurrLoc = &PrevResult.second;
     ++N;
-    assert(N < 1000 && "In the loop too many times");
-    if (N >= 1000)
+    assert(N < 10000 && "In the loop too many times");
+    if (N >= 10000)
       report_fatal_error("In the loop too many times");
   }
   MemoryAccess *FinalAccess = CurrAccess;
@@ -1193,8 +1224,8 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
     CurrAccess = PrevResult.first;
     CurrLoc = &PrevResult.second;
     ++N;
-    assert(N < 1000 && "In the second loop too many times");
-    if (N >= 1000)
+    assert(N < 10000 && "In the second loop too many times");
+    if (N >= 10000)
       report_fatal_error("In the second loop too many times");
   }
 
