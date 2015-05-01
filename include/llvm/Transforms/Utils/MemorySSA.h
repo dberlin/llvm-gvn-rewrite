@@ -715,6 +715,10 @@ private:
   UpwardsBFSWalkAccess(MemoryAccess *, PathMap &, struct UpwardsMemoryQuery &);
   MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
                                           struct UpwardsMemoryQuery &);
+  MemoryAccessPair
+  findDominatingAccess(const MemoryAccess *, const MemoryAccessPair &,
+                       const PathMap &,
+                       const struct UpwardsMemoryQuery &) const;
   bool instructionClobbersQuery(const MemoryDef *,
                                 struct UpwardsMemoryQuery &) const;
   typedef SmallDenseMap<AliasAnalysis::Location, MemoryAccess *> InnerCacheType;
@@ -865,19 +869,16 @@ public:
 private:
   void fillInCurrentPair() {
     CurrentPair.first = *DefIterator;
-    if (WalkingPhi) {
-      if (Location.Ptr) {
-        PHITransAddr Translator(
-            const_cast<Value *>(Location.Ptr),
-            OriginalAccess->getBlock()->getModule()->getDataLayout(), nullptr);
-        if (!Translator.PHITranslateValue(OriginalAccess->getBlock(),
-                                          DefIterator.getPhiArgBlock(),
-                                          nullptr))
-          if (Translator.getAddr() != Location.Ptr) {
-            CurrentPair.second = Location.getWithNewPtr(Translator.getAddr());
-            return;
-          }
-      }
+    if (WalkingPhi && Location.Ptr) {
+      PHITransAddr Translator(
+          const_cast<Value *>(Location.Ptr),
+          OriginalAccess->getBlock()->getModule()->getDataLayout(), nullptr);
+      if (!Translator.PHITranslateValue(OriginalAccess->getBlock(),
+                                        DefIterator.getPhiArgBlock(), nullptr))
+        if (Translator.getAddr() != Location.Ptr) {
+          CurrentPair.second = Location.getWithNewPtr(Translator.getAddr());
+          return;
+        }
     }
     CurrentPair.second = Location;
   }
