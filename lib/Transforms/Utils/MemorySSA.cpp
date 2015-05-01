@@ -100,6 +100,8 @@ struct RenamePassData {
 };
 }
 
+namespace llvm {
+
 /// \brief Rename a single basic block into MemorySSA form.
 /// Uses the standard SSA renaming algorithm.
 /// \returns The new incoming value.
@@ -993,11 +995,19 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
     MemoryAccess *CurrAccess = Pair.first;
     Q.Loc = Loc = Pair.second;
     Worklist.pop();
+    if (MSSA->isLiveOnEntryDef(CurrAccess))
+      continue;
     // If this is a MemoryDef, check whether it clobbers our current query.
     if (MemoryDef *MD = dyn_cast<MemoryDef>(CurrAccess)) {
       // If we hit the top, stop following this path
-      if (MSSA->isLiveOnEntryDef(MD))
-        continue;
+      // While we can do lookups, we can't sanely do inserts here unless we
+      // were to track every thing we saw along the way, since we don't
+      // know where we will stop.
+      if (auto CacheResult = doCacheLookup(CurrAccess, Q)) {
+        if (Q.Visited.insert({CacheResult, Loc}).second)
+          Prev[{CacheResult, Loc}] = {CurrAccess, Q.Loc};
+        return {CacheResult, Loc};
+      }
 
       if (instructionClobbersQuery(MD, Q)) {
         ModifyingAccess = CurrAccess;
@@ -1026,101 +1036,6 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
                    << "\n");
       Worklist.emplace(*MPI);
     }
-#if 0
-      
-    if (MemoryPhi *MP = dyn_cast<MemoryPhi>(CurrAccess)) {
-
-      // Enqueue each pred
-      for (unsigned i = 0; i < MP->getNumIncomingValues(); ++i) {
-        MemoryAccess *Arg = MP->getIncomingValue(i);
-        // Reset Loc, since it may get changed on each iteration.
-        Loc = Q.Loc;
-
-        // If we dominate the predecessor, it must be a backedge
-        if (!Q.SawBackedgePhi &&
-            DT->dominates(MP->getBlock(), MP->getIncomingBlock(i)w))
-          Q.SawBackedgePhi = true;
-
-        // See if our pointer is defined by a phi node, if so, translate it
-        if (!Q.isCall) {
-          PHITransAddr Translator(const_cast<Value *>(Loc.Ptr), *(Q.DL),
-                                  nullptr);
-          if (!Translator.PHITranslateValue(MP->getBlock(),
-                                            MP->getIncomingBlock(i), nullptr))
-            if (Translator.getAddr() != Loc.Ptr)
-              Loc = Loc.getWithNewPtr(Translator.getAddr());
-        }
-#if 0
-        // Don't revisit
-        if (Q.Visited.count({Arg, Loc}))
-          continue;
-#endif
-        // We may have already visited this argument along another path
-        if (!Q.Visited.insert({Arg, Loc}).second)
-          continue;
-
-        assert(Prev.count({Arg, Loc}) == 0 &&
-               "This part of the map is already filled in!");
-
-        // Finally, enqueue the argument and new pointer, and set the map to
-        // say we got here from the phi and the old pointer.
-        Prev[{Arg, Loc}] = {MP, Q.Loc};
-        DEBUG(dbgs() << "Prev of " << *Arg << " is " << *MP << "\n");
-        Worklist.emplace(Arg, Loc);
-      }
-    } else {
-      const MemoryDef *MD = dyn_cast<MemoryDef>(CurrAccess);
-      assert(MD && "Use linked to something that is not a def");
-      // If we hit the top, stop following this path
-      if (MSSA->isLiveOnEntryDef(MD))
-        continue;
-      // While we can do lookups, we can't sanely do inserts here unless we
-      // were to track every thing we saw along the way, since we don't
-      // know where we will stop.
-      if (auto CacheResult = doCacheLookup(CurrAccess, Q)) {
-#if 0
-        // If we have a cache result, and the worklist is not empty, put it on
-        // the worklist, as it means that is where we end up after exploring all
-        // paths from this particular access.  Because we may be in the middle
-        // of exploring multiple paths (in which case, multiple things will be
-        // on the worklist), it is not correct to simply retur the result unless
-        // the worklist is empty.  In that case, the cache only tells us
-        // something about following *this* path, not the other ones.
-        if (Worklist.empty()) {
-          return {CacheResult, Loc};
-        } else {
-#if 1
-          // This may eventually lead to a place we've already visited
-          if (!Q.Visited.insert({CacheResult, Loc}).second)
-#endif
-            Worklist.emplace(CacheResult, Loc);
-          continue;
-      }
-#else
-        if (Q.Visited.insert({CacheResult, Loc}).second)
-          Prev[{CacheResult, Loc}] = {CurrAccess, Q.Loc};
-        return {CacheResult, Loc};
-#endif
-      } else {
-        if (instructionClobbersQuery(MD, Q)) {
-          ModifyingAccess = CurrAccess;
-          break;
-        }
-        // Don't revisit
-        if (!Q.Visited.insert({MD->getDefiningAccess(), Loc}).second)
-          continue;
-
-        assert(Prev.count({MD->getDefiningAccess(), Loc}) == 0 &&
-               "This part of the map is already filled in!");
-        // Enqueue the next one up the chain.
-        Prev[{MD->getDefiningAccess(), Loc}] = {CurrAccess, Q.Loc};
-        DEBUG(dbgs() << "Prev of " << *(MD->getDefiningAccess()) << " is "
-                     << *CurrAccess << "\n");
-
-        Worklist.emplace(MD->getDefiningAccess(), Loc);
-      }
-    }
-#endif
   }
 
   // If we emptied the worklist, it means every path to the beginning of the
@@ -1150,24 +1065,7 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
   Q.Loc = CurrAccessPair.second;
   doCacheInsert(CurrAccessPair.first, CurrAccessPair.first, Q);
   // Now find the thing that dominates us from the path we found to the
-  // clobbering access. This means walking the prev pointers backwards to figure
-  // out how we go to this clobber, stopping when we find something that
-  // dominates the original access.
-  // If we saw a phi node with a backedge, the thing that we found in our block
-  // may in fact be below us, in which case, we need to check local domination
-  // if the found access is in the same block as the starting access.
-
-  // Since this code may be a little confusing, here is what is happening:
-  // First we extract the block of the original access that the user queried
-  // about, I.E. the access for the instruction they passed to
-  // getClobberingAccess.
-  // This may or may *not* be the same as StartingAccess (for a MemoryUse, the
-  // StartingAccess might be the RHS def, depending on which query function was
-  // used).
-  // However, we know that StartingAccess dominates our OriginalAccess, so
-  // either we should find something "better", or we should get back to
-  // StartingAccess.  The null check below is just to make sure the loop
-  // terminates. We assert that it does not happen.
+  // clobbering access.
   DEBUG(dbgs() << "Before starting walk, Prev Map is:");
 
   for (auto &PrevEntry : Prev) {
@@ -1186,31 +1084,14 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
       DEBUG(dbgs() << "nullptr");
     DEBUG(dbgs() << "}\n");
   }
-
-  const BasicBlock *OriginalBlock = Q.OriginalAccess->getBlock();
-  MemoryAccess *CurrAccess = CurrAccessPair.first;
-  const AliasAnalysis::Location *CurrLoc = &CurrAccessPair.second;
-  unsigned int N = 0;
-  while (CurrAccess && CurrAccess != StartingAccess) {
-    BasicBlock *CurrBlock = CurrAccess->getBlock();
-    if (DT->dominates(CurrBlock, OriginalBlock) &&
-        (CurrBlock != OriginalBlock || !Q.SawBackedgePhi ||
-         MSSA->locallyDominates(CurrAccess, Q.OriginalAccess)))
-      break;
-    const auto &PrevResult = Prev.lookup({CurrAccess, *CurrLoc});
-    CurrAccess = PrevResult.first;
-    CurrLoc = &PrevResult.second;
-    ++N;
-    assert(N < 10000 && "In the loop too many times");
-    if (N >= 10000)
-      report_fatal_error("In the loop too many times");
-  }
-  MemoryAccess *FinalAccess = CurrAccess;
-
-  if (!CurrAccess)
+  MemoryAccessPair FinalAccessPair =
+      findDominatingAccess(StartingAccess, CurrAccessPair, Prev, Q);
+  MemoryAccess *FinalAccess = FinalAccessPair.first;
+  AliasAnalysis::Location FinalLoc = FinalAccessPair.second;
+  if (!FinalAccess)
     report_fatal_error(
         "Should have found something that dominated our original access");
-  assert(CurrAccess &&
+  assert(FinalAccess &&
          "Should have found something that dominated our original access");
   // Everything along the rest of the path now terminates at CurrAccess
   // TODO
@@ -1219,27 +1100,65 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
   // 2. We also know that anything in the Prev map with the same Loc that is
   // dominated by FinalAccess, also terminates in FinalAccess (by the definition
   // of the domination). We could cache these as well.
-  N = 0;
-  while (CurrAccess) {
-    Q.Loc = *CurrLoc;
-    doCacheInsert(CurrAccess, FinalAccess, Q);
-    const auto &PrevResult = Prev.lookup({CurrAccess, *CurrLoc});
-    CurrAccess = PrevResult.first;
-    CurrLoc = &PrevResult.second;
+  unsigned N = 0;
+  while (FinalAccess) {
+    Q.Loc = FinalLoc;
+    doCacheInsert(FinalAccess, FinalAccess, Q);
+    const auto &PrevResult = Prev.lookup({FinalAccess, FinalLoc});
+    FinalAccess = PrevResult.first;
+    FinalLoc = PrevResult.second;
     ++N;
     assert(N < 10000 && "In the second loop too many times");
     if (N >= 10000)
       report_fatal_error("In the second loop too many times");
   }
 
-#if 0
-  for (auto &Entry : Prev) {
-    Q.Loc = Entry.second.second;
-    doCacheInsert(Entry.second.first, CurrAccess, Q);
-  }
-#endif
   Q.Loc = Q.StartingLoc;
   return FinalAccess;
+}
+
+MemoryAccessPair CachingMemorySSAWalker::findDominatingAccess(
+    const MemoryAccess *StartingAccess, const MemoryAccessPair &FinalAccessPair,
+    const PathMap &Path, const struct UpwardsMemoryQuery &Q) const {
+  // This means walking the prev pointers backwards to figure
+  // out how we go to this clobber, stopping when we find something that
+  // dominates the original access.
+  // If we saw a phi node with a backedge, the thing that we found in our block
+  // may in fact be below us, in which case, we need to check local domination
+  // if the found access is in the same block as the starting access.
+
+  // Since this code may be a little confusing, here is what is happening:
+  // First we extract the block of the original access that the user queried
+  // about, I.E. the access for the instruction they passed to
+  // getClobberingAccess.
+  // This may or may *not* be the same as StartingAccess (for a MemoryUse, the
+  // StartingAccess might be the RHS def, depending on which query function was
+  // used).
+  // However, we know that StartingAccess dominates our OriginalAccess, so
+  // either we should find something "better", or we should get back to
+  // StartingAccess.  The null check below is just to make sure the loop
+  // terminates. We assert that it does not happen.
+
+  const BasicBlock *OriginalBlock = Q.OriginalAccess->getBlock();
+  MemoryAccess *FinalAccess = FinalAccessPair.first;
+  AliasAnalysis::Location FinalLoc = FinalAccessPair.second;
+  unsigned int N = 0;
+  while (FinalAccess && FinalAccess != StartingAccess) {
+    BasicBlock *CurrBlock = FinalAccess->getBlock();
+    if (DT->dominates(CurrBlock, OriginalBlock) &&
+        (CurrBlock != OriginalBlock || !Q.SawBackedgePhi ||
+         MSSA->locallyDominates(FinalAccess, Q.OriginalAccess)))
+      break;
+
+    const auto &PrevResult = Path.lookup({FinalAccess, FinalLoc});
+    FinalAccess = PrevResult.first;
+    FinalLoc = PrevResult.second;
+    ++N;
+    assert(N < 10000 && "In the loop too many times");
+    if (N >= 10000)
+      report_fatal_error("In the loop too many times");
+  }
+  return {FinalAccess, FinalLoc};
 }
 
 MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
@@ -1379,4 +1298,5 @@ MemoryAccess *DoNothingMemorySSAWalker::getClobberingMemoryAccess(
   if (isa<MemoryPhi>(StartingAccess))
     return StartingAccess;
   return StartingAccess->getDefiningAccess();
+}
 }
