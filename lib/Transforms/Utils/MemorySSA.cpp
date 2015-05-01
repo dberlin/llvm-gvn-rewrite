@@ -993,6 +993,7 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
     MemoryAccess *CurrAccess = Pair.first;
     Q.Loc = Loc = Pair.second;
     Worklist.pop();
+    // If this is a MemoryDef, check whether it clobbers our current query.
     if (MemoryDef *MD = dyn_cast<MemoryDef>(CurrAccess)) {
       // If we hit the top, stop following this path
       if (MSSA->isLiveOnEntryDef(MD))
@@ -1003,6 +1004,8 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
         break;
       }
     }
+    // We need to know whether it is a phi so we can track backedges.
+    // Otherwise, walk all upward defs.
     bool IsPhi = isa<MemoryPhi>(CurrAccess);
     for (auto MPI = upward_defs_begin(Pair), MPE = upward_defs_end();
          MPI != MPE; ++MPI) {
