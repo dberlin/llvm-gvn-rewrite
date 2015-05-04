@@ -11,7 +11,6 @@
 //
 //===----------------------------------------------------------------===//
 #include "llvm/Transforms/Scalar.h"
-#include "llvm/ADT/BreadthFirstIterator.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/DepthFirstIterator.h"
