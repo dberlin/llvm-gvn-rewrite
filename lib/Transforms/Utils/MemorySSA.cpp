@@ -1100,12 +1100,14 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
   // dominated by FinalAccess, also terminates in FinalAccess (by the definition
   // of the domination). We could cache these as well.
   unsigned N = 0;
-  while (FinalAccess) {
-    Q.Loc = FinalLoc;
-    doCacheInsert(FinalAccess, FinalAccess, Q);
-    const auto &PrevResult = Prev.lookup({FinalAccess, FinalLoc});
-    FinalAccess = PrevResult.first;
-    FinalLoc = PrevResult.second;
+  MemoryAccess *CacheAccess = FinalAccess;
+  AliasAnalysis::Location CacheLoc = FinalAccessPair.second;
+  while (CacheAccess) {
+    Q.Loc = CacheLoc;
+    doCacheInsert(CacheAccess, FinalAccess, Q);
+    const auto &PrevResult = Prev.lookup({CacheAccess, CacheLoc});
+    CacheAccess = PrevResult.first;
+    CacheLoc = PrevResult.second;
     ++N;
     assert(N < 10000 && "In the second loop too many times");
     if (N >= 10000)
