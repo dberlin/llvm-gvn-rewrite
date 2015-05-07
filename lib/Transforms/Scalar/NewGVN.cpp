@@ -2334,7 +2334,7 @@ bool NewGVN::runOnFunction(Function &F) {
 // may be cyclic anyway, we order the congruence classes by how many things
 // depend on them.  This is a good approximation, and will cut down the number
 // of iterations.
-#if 1
+#if 0
   SmallDenseMap<CongruenceClass *, unsigned> UsedCount;
   SmallPtrSet<CongruenceClass *, 16> VisitedClasses;
 
