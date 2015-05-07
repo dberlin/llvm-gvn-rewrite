@@ -87,6 +87,11 @@ namespace llvm {
 class BasicBlock;
 class DominatorTree;
 class Function;
+class MemoryAccess;
+template <class T> class memoryaccess_def_iterator_base;
+typedef memoryaccess_def_iterator_base<MemoryAccess> memoryaccess_def_iterator;
+typedef memoryaccess_def_iterator_base<const MemoryAccess>
+    const_memoryaccess_def_iterator;
 
 // \brief The base for all memory accesses. All memory accesses in a
 // block are linked together using an intrusive list.
@@ -133,6 +138,14 @@ public:
   iterator_range<const_iterator> uses() const {
     return iterator_range<const_iterator>(user_begin(), user_end());
   }
+
+  /// \brief This iterator walks over all of the defs in a given
+  /// MemoryAccess. For MemoryPhi nodes, this walks arguments.  For
+  /// MemoryUse/MemoryDef, this walks the defining access.
+  memoryaccess_def_iterator defs_begin();
+  const_memoryaccess_def_iterator defs_begin() const;
+  memoryaccess_def_iterator defs_end();
+  const_memoryaccess_def_iterator defs_end() const;
 
 protected:
   friend class MemorySSA;
@@ -729,26 +742,25 @@ private:
   DominatorTree *DT;
 };
 
-/// \brief This iterator walks over all of the defs in a given MemoryAccess. For
-/// MemoryPhi nodes, this walks arguments.  For MemoryUse/MemoryDef, this walks
-/// the defining access.
-class memoryaccess_def_iterator
-    : public std::iterator<std::forward_iterator_tag, MemoryAccess, ptrdiff_t,
-                           MemoryAccess *, MemoryAccess *> {
-  typedef std::iterator<std::forward_iterator_tag, MemoryAccess, ptrdiff_t,
-                        MemoryAccess *, MemoryAccess *> super;
+/// \brief Iterator base class used to implement const and non-const iterators
+/// over the defining accesses of a MemoryAccess.
+template <class T>
+class memoryaccess_def_iterator_base
+    : public std::iterator<std::forward_iterator_tag, T, ptrdiff_t, T *, T *> {
+  typedef std::iterator<std::forward_iterator_tag, T, ptrdiff_t, T *, T *>
+      super;
 
 public:
   typedef typename super::pointer pointer;
   typedef typename super::reference reference;
-  memoryaccess_def_iterator(MemoryAccess *Start) : Access(Start), ArgNo(0) {}
-  memoryaccess_def_iterator() : Access(nullptr), ArgNo(0) {}
-  bool operator==(const memoryaccess_def_iterator &Other) const {
+  memoryaccess_def_iterator_base(T *Start) : Access(Start), ArgNo(0) {}
+  memoryaccess_def_iterator_base() : Access(nullptr), ArgNo(0) {}
+  bool operator==(const memoryaccess_def_iterator_base &Other) const {
     if (Access == nullptr)
       return Other.Access == nullptr;
     return Access == Other.Access && ArgNo == Other.ArgNo;
   }
-  bool operator!=(const memoryaccess_def_iterator &Other) const {
+  bool operator!=(const memoryaccess_def_iterator_base &Other) const {
     return !operator==(Other);
   }
 
@@ -792,16 +804,25 @@ public:
   }
 
 private:
-  MemoryAccess *Access;
+  T *Access;
   unsigned ArgNo;
 };
 
-inline memoryaccess_def_iterator defs_begin(MemoryAccess *MA) {
-  return memoryaccess_def_iterator(MA);
+inline memoryaccess_def_iterator MemoryAccess::defs_begin() {
+  return memoryaccess_def_iterator(this);
 }
-inline memoryaccess_def_iterator defs_end() {
+inline const_memoryaccess_def_iterator MemoryAccess::defs_begin() const {
+  return const_memoryaccess_def_iterator(this);
+}
+
+inline memoryaccess_def_iterator MemoryAccess::defs_end() {
   return memoryaccess_def_iterator();
 }
+
+inline const_memoryaccess_def_iterator MemoryAccess::defs_end() const {
+  return const_memoryaccess_def_iterator();
+}
+
 // Enable GraphTraits for the MemoryAccessPair specialization, so that one can
 // use all
 // of the normal graph iterators to walk
@@ -811,9 +832,11 @@ template <> struct GraphTraits<MemoryAccess *> {
 
   static NodeType *getEntryNode(NodeType *N) { return N; }
   static inline ChildIteratorType child_begin(NodeType *N) {
-    return defs_begin(N);
+    return N->defs_begin();
   }
-  static inline ChildIteratorType child_end(NodeType *N) { return defs_end(); }
+  static inline ChildIteratorType child_end(NodeType *N) {
+    return N->defs_end();
+  }
 };
 
 // This iterator, while somewhat specialized, is what most clients actually want
@@ -844,7 +867,7 @@ public:
     return !operator==(Other);
   }
   reference operator*() {
-    if (DefIterator == defs_end())
+    if (DefIterator == OriginalAccess->defs_end())
       llvm_unreachable("Tried to access past the end of our iterator");
     return CurrentPair;
   }
@@ -856,10 +879,10 @@ public:
   }
 
   upward_defs_iterator &operator++() {
-    if (DefIterator == defs_end())
+    if (DefIterator == OriginalAccess->defs_end())
       llvm_unreachable("Hit the end of the iterator");
     ++DefIterator;
-    if (DefIterator != defs_end())
+    if (DefIterator != OriginalAccess->defs_end())
       fillInCurrentPair();
     return *this;
   }

@@ -1086,7 +1086,6 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
   MemoryAccessPair FinalAccessPair =
       findDominatingAccess(StartingAccess, CurrAccessPair, Prev, Q);
   MemoryAccess *FinalAccess = FinalAccessPair.first;
-  AliasAnalysis::Location FinalLoc = FinalAccessPair.second;
   if (!FinalAccess)
     report_fatal_error(
         "Should have found something that dominated our original access");
