@@ -717,12 +717,21 @@ public:
 
 protected:
   struct UpwardsMemoryQuery;
-  MemoryAccess *doCacheLookup(const MemoryAccess *, const UpwardsMemoryQuery &);
+  MemoryAccess *doCacheLookup(const MemoryAccess *, const UpwardsMemoryQuery &,
+                              const AliasAnalysis::Location &);
+
   void doCacheInsert(const MemoryAccess *, MemoryAccess *,
-                     const UpwardsMemoryQuery &);
-  void doCacheRemove(const MemoryAccess *, const UpwardsMemoryQuery &);
+                     const UpwardsMemoryQuery &,
+                     const AliasAnalysis::Location &);
+
+  void doCacheRemove(const MemoryAccess *, const UpwardsMemoryQuery &,
+                     const AliasAnalysis::Location &);
 
 private:
+  MemoryAccessPair UpwardsDFSWalk(MemoryAccess *,
+                                  const AliasAnalysis::Location &,
+                                  UpwardsMemoryQuery &, bool);
+
   typedef SmallDenseMap<MemoryAccessPair, MemoryAccessPair> PathMap;
   std::pair<MemoryAccess *, AliasAnalysis::Location>
   UpwardsBFSWalkAccess(MemoryAccess *, PathMap &, struct UpwardsMemoryQuery &);
@@ -732,10 +741,11 @@ private:
   findDominatingAccess(const MemoryAccess *, const MemoryAccessPair &,
                        const PathMap &,
                        const struct UpwardsMemoryQuery &) const;
-  bool instructionClobbersQuery(const MemoryDef *,
-                                struct UpwardsMemoryQuery &) const;
-  typedef SmallDenseMap<AliasAnalysis::Location, MemoryAccess *> InnerCacheType;
-  SmallDenseMap<const MemoryAccess *, std::unique_ptr<InnerCacheType>>
+  bool instructionClobbersQuery(const MemoryDef *, struct UpwardsMemoryQuery &,
+                                const AliasAnalysis::Location &Loc) const;
+  typedef SmallDenseMap<AliasAnalysis::Location, MemoryAccess *, 32>
+      InnerCacheType;
+  SmallDenseMap<const MemoryAccess *, std::unique_ptr<InnerCacheType>, 32>
       CachedUpwardsClobberingAccess;
   DenseMap<const MemoryAccess *, MemoryAccess *> CachedUpwardsClobberingCall;
   AliasAnalysis *AA;
@@ -774,8 +784,7 @@ public:
   }
 
   reference operator*() const {
-    if (!Access)
-      llvm_unreachable("Tried to access past the end of our iterator");
+    assert(Access && "Tried to access past the end of our iterator");
     // Go to the first argument for phis, and the defining access for everything
     // else.
     if (MemoryPhi *MP = dyn_cast<MemoryPhi>(Access))
@@ -785,13 +794,12 @@ public:
   pointer operator->() const { return operator*(); }
   memoryaccess_def_iterator operator++(int) {
     memoryaccess_def_iterator tmp = *this;
-    ++*this;
+    operator++();
     return tmp;
   }
 
   memoryaccess_def_iterator &operator++() {
-    if (!Access)
-      llvm_unreachable("Hit the end of the iterator");
+    assert(Access && "Hit end of iterator");
     if (MemoryPhi *MP = dyn_cast<MemoryPhi>(Access)) {
       if (++ArgNo >= MP->getNumIncomingValues()) {
         ArgNo = 0;
@@ -855,11 +863,15 @@ public:
   upward_defs_iterator(const MemoryAccessPair &Info)
       : DefIterator(Info.first), Location(Info.second),
         OriginalAccess(Info.first) {
+    CurrentPair.first = nullptr;
+
     if (Info.first)
       WalkingPhi = isa<MemoryPhi>(Info.first);
     fillInCurrentPair();
   }
-  upward_defs_iterator() : DefIterator(), Location(), OriginalAccess() {}
+  upward_defs_iterator() : DefIterator(), Location(), OriginalAccess() {
+    CurrentPair.first = nullptr;
+  }
   bool operator==(const upward_defs_iterator &Other) const {
     return DefIterator == Other.DefIterator;
   }
@@ -867,8 +879,8 @@ public:
     return !operator==(Other);
   }
   reference operator*() {
-    if (DefIterator == OriginalAccess->defs_end())
-      llvm_unreachable("Tried to access past the end of our iterator");
+    assert(DefIterator != OriginalAccess->defs_end() &&
+           "Tried to access past the end of our iterator");
     return CurrentPair;
   }
   pointer operator->() { return &operator*(); }
@@ -879,8 +891,8 @@ public:
   }
 
   upward_defs_iterator &operator++() {
-    if (DefIterator == OriginalAccess->defs_end())
-      llvm_unreachable("Hit the end of the iterator");
+    assert(DefIterator != OriginalAccess->defs_end() &&
+           "Tried to access past the end of the iterator");
     ++DefIterator;
     if (DefIterator != OriginalAccess->defs_end())
       fillInCurrentPair();

@@ -1940,7 +1940,7 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
     ConstantInt *CI;
     BasicBlock *TrueSucc = BR->getSuccessor(0);
     BasicBlock *FalseSucc = BR->getSuccessor(1);
-    if (CondEvaluated &&(CI = dyn_cast<ConstantInt>(CondEvaluated))) {
+    if (CondEvaluated && (CI = dyn_cast<ConstantInt>(CondEvaluated))) {
       if (CI->isOne()) {
         DEBUG(dbgs() << "Condition for Terminator " << *TI
                      << " evaluated to true\n");
