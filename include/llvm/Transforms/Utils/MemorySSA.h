@@ -436,6 +436,7 @@ public:
   /// \brief Build Memory SSA, and return the walker we used during building,
   /// for later reuse.  If MemorySSA is already built, just return the walker.
   MemorySSAWalker *buildMemorySSA(AliasAnalysis *, DominatorTree *);
+  bool isFinishedBuilding() const { return builtAlready; }
 
   /// \brief Given a memory Mod/Ref'ing instruction, get the MemorySSA
   /// access associaed with it.  If passed a basic block gets the memory phi
@@ -701,8 +702,9 @@ public:
   MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
                                           AliasAnalysis::Location &) override;
 };
-
 typedef std::pair<MemoryAccess *, AliasAnalysis::Location> MemoryAccessPair;
+typedef std::pair<const MemoryAccess *, AliasAnalysis::Location>
+    ConstMemoryAccessPair;
 
 /// \brief A MemorySSAWalker that does AA walks and caching of lookups to
 /// disambiguate accesses.
@@ -743,9 +745,7 @@ private:
                        const struct UpwardsMemoryQuery &) const;
   bool instructionClobbersQuery(const MemoryDef *, struct UpwardsMemoryQuery &,
                                 const AliasAnalysis::Location &Loc) const;
-  typedef SmallDenseMap<AliasAnalysis::Location, MemoryAccess *, 32>
-      InnerCacheType;
-  SmallDenseMap<const MemoryAccess *, std::unique_ptr<InnerCacheType>, 32>
+  SmallDenseMap<ConstMemoryAccessPair, MemoryAccess *>
       CachedUpwardsClobberingAccess;
   DenseMap<const MemoryAccess *, MemoryAccess *> CachedUpwardsClobberingCall;
   AliasAnalysis *AA;

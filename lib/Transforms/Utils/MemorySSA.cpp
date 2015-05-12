@@ -46,7 +46,7 @@
 using namespace llvm;
 STATISTIC(NumClobberCacheLookups, "Number of Memory SSA version cache lookups");
 STATISTIC(NumClobberCacheHits, "Number of Memory SSA version cache hits");
-
+STATISTIC(NumClobberCacheInserts, "Number of MemorySSA version cache inserts");
 INITIALIZE_PASS_WITH_OPTIONS_BEGIN(MemorySSAPrinterPass, "print-memoryssa",
                                    "Memory SSA", true, true)
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
@@ -866,34 +866,21 @@ void CachingMemorySSAWalker::doCacheRemove(const MemoryAccess *M,
                                            const AliasAnalysis::Location &Loc) {
   if (Q.isCall)
     CachedUpwardsClobberingCall.erase(M);
-  else {
-    auto It = CachedUpwardsClobberingAccess.find(M);
-    if (It != CachedUpwardsClobberingAccess.end()) {
-      auto &Cache = It->second;
-      Cache->erase(Loc);
-      if (Cache->empty())
-        CachedUpwardsClobberingAccess.erase(It);
-    }
-  }
+  else
+    CachedUpwardsClobberingAccess.erase({M, Loc});
 }
 
 void CachingMemorySSAWalker::doCacheInsert(const MemoryAccess *M,
                                            MemoryAccess *Result,
                                            const UpwardsMemoryQuery &Q,
                                            const AliasAnalysis::Location &Loc) {
+  ++NumClobberCacheInserts;
   if (Q.isCall)
     CachedUpwardsClobberingCall[M] = Result;
   else {
     DEBUG(dbgs() << "Insert: M is " << *M << " Loc.Ptr is " << *(Loc.Ptr)
                  << " Result will be " << *Result << "\n");
-    auto It = CachedUpwardsClobberingAccess.insert({M, nullptr});
-    if (!It.second) {
-      auto &Cache = It.first->second;
-      (*Cache)[Loc] = Result;
-    } else {
-      It.first->second.reset(new InnerCacheType);
-      (*It.first->second)[Loc] = Result;
-    }
+    CachedUpwardsClobberingAccess[{M, Loc}] = Result;
   }
 }
 
@@ -909,13 +896,7 @@ CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
   else {
     DEBUG(dbgs() << "Lookup: M is " << *M << " Loc.Ptr is " << *(Loc.Ptr)
                  << "\n");
-    auto It = CachedUpwardsClobberingAccess.find(M);
-    if (It != CachedUpwardsClobberingAccess.end()) {
-      auto &Cache = It->second;
-      auto CacheIt = Cache->find(Loc);
-      if (CacheIt != Cache->end())
-        Result = CacheIt->second;
-    }
+    Result = CachedUpwardsClobberingAccess.lookup({M, Loc});
   }
 
   if (Result) {
@@ -1036,8 +1017,6 @@ MemoryAccessPair CachingMemorySSAWalker::UpwardsDFSWalk(
   const BasicBlock *OriginalBlock = Q.OriginalAccess->getBlock();
   unsigned N = DFI.getPathLength();
   MemoryAccess *FinalAccess = ModifyingAccess;
-  if (0 && !FollowingBackedge)
-    return {ModifyingAccess, Loc};
 
   for (; N != 0; --N) {
     ModifyingAccess = DFI.getPath(N - 1);
@@ -1156,28 +1135,8 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
   // hit the liveOnEntry. Check for liveOnEntry.
   if (MSSA->isLiveOnEntryDef(CurrAccessPair.first))
     return CurrAccessPair.first;
-// Now find the thing that dominates us from the path we found to the
-// clobbering access.
-#if 0
-  DEBUG(dbgs() << "Before starting walk, Prev Map is:");
-  
-  for (auto &PrevEntry : Prev) {
-    const Value *LocPtr = PrevEntry.first.second.Ptr;
-    DEBUG(dbgs() << "Prev of {" << *(PrevEntry.first.first) << ",");
-    if (LocPtr)
-      DEBUG(dbgs() << *LocPtr);
-    else
-      DEBUG(dbgs() << "nullptr");
-    DEBUG(dbgs() << "}");
-    LocPtr = PrevEntry.second.second.Ptr;
-    DEBUG(dbgs() << " is {" << *(PrevEntry.second.first) << ",");
-    if (LocPtr)
-      DEBUG(dbgs() << *LocPtr);
-    else
-      DEBUG(dbgs() << "nullptr");
-    DEBUG(dbgs() << "}\n");
-  }
-#endif
+  // Now find the thing that dominates us from the path we found to the
+  // clobbering access.
   MemoryAccessPair FinalAccessPair =
       findDominatingAccess(StartingAccess, CurrAccessPair, Prev, Q);
   MemoryAccess *FinalAccess = FinalAccessPair.first;
