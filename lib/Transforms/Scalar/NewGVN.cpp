@@ -2208,7 +2208,7 @@ bool NewGVN::runOnFunction(Function &F) {
   AC = &getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
   TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
   AA = &getAnalysis<AliasAnalysis>();
-  SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(AA, DT));
+  //  SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(AA, DT));
   MSSA = &getAnalysis<MemorySSALazy>().getMSSA();
   MSSAWalker = MSSA->buildMemorySSA(AA, DT);
 
