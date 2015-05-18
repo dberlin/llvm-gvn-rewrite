@@ -73,6 +73,7 @@
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/PHITransAddr.h"
 #include "llvm/ADT/ilist_node.h"
+#include "llvm/ADT/iterator.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/SmallVector.h"
@@ -756,22 +757,18 @@ private:
 /// over the defining accesses of a MemoryAccess.
 template <class T>
 class memoryaccess_def_iterator_base
-    : public std::iterator<std::forward_iterator_tag, T, ptrdiff_t, T *, T *> {
-  typedef std::iterator<std::forward_iterator_tag, T, ptrdiff_t, T *, T *>
-      super;
+    : public iterator_facade_base<memoryaccess_def_iterator_base<T>,
+                                  std::forward_iterator_tag, T, ptrdiff_t, T *,
+                                  T *> {
+  typedef typename memoryaccess_def_iterator_base::iterator_facade_base BaseT;
 
 public:
-  typedef typename super::pointer pointer;
-  typedef typename super::reference reference;
   memoryaccess_def_iterator_base(T *Start) : Access(Start), ArgNo(0) {}
   memoryaccess_def_iterator_base() : Access(nullptr), ArgNo(0) {}
   bool operator==(const memoryaccess_def_iterator_base &Other) const {
     if (Access == nullptr)
       return Other.Access == nullptr;
     return Access == Other.Access && ArgNo == Other.ArgNo;
-  }
-  bool operator!=(const memoryaccess_def_iterator_base &Other) const {
-    return !operator==(Other);
   }
 
   // This is a bit ugly, but for MemoryPHI's, unlike PHINodes, you can't get the
@@ -782,8 +779,7 @@ public:
     assert(MP && "Tried to get phi arg block when not iterating over a PHI");
     return MP->getIncomingBlock(ArgNo);
   }
-
-  reference operator*() const {
+  typename BaseT::iterator::pointer operator*() const {
     assert(Access && "Tried to access past the end of our iterator");
     // Go to the first argument for phis, and the defining access for everything
     // else.
@@ -791,13 +787,7 @@ public:
       return MP->getIncomingValue(ArgNo);
     return Access->getDefiningAccess();
   }
-  pointer operator->() const { return operator*(); }
-  memoryaccess_def_iterator operator++(int) {
-    memoryaccess_def_iterator tmp = *this;
-    operator++();
-    return tmp;
-  }
-
+  using BaseT::operator++;
   memoryaccess_def_iterator &operator++() {
     assert(Access && "Hit end of iterator");
     if (MemoryPhi *MP = dyn_cast<MemoryPhi>(Access)) {
@@ -831,9 +821,8 @@ inline const_memoryaccess_def_iterator MemoryAccess::defs_end() const {
   return const_memoryaccess_def_iterator();
 }
 
-// Enable GraphTraits for the MemoryAccessPair specialization, so that one can
-// use all
-// of the normal graph iterators to walk
+/// \brief GraphTraits for a MemoryAccess, which walks defs in the normal case,
+/// and uses in the inverse case.
 template <> struct GraphTraits<MemoryAccess *> {
   typedef MemoryAccess NodeType;
   typedef memoryaccess_def_iterator ChildIteratorType;
@@ -847,19 +836,34 @@ template <> struct GraphTraits<MemoryAccess *> {
   }
 };
 
-// This iterator, while somewhat specialized, is what most clients actually want
-// when walking upwards through MemorySSA def chains.
-// It takes a pair of MemoryAccess, memory location, and walks defs, properly
-// translating the memory location through phi nodes for the user.
-class upward_defs_iterator : public std::iterator<std::forward_iterator_tag,
-                                                  MemoryAccessPair, ptrdiff_t> {
-  typedef std::iterator<std::forward_iterator_tag, MemoryAccessPair, ptrdiff_t>
-      super;
+template <> struct GraphTraits<Inverse<MemoryAccess *>> {
+  typedef MemoryAccess NodeType;
+  typedef MemoryAccess::iterator ChildIteratorType;
+
+  static NodeType *getEntryNode(NodeType *N) { return N; }
+  static inline ChildIteratorType child_begin(NodeType *N) {
+    return N->user_begin();
+  }
+  static inline ChildIteratorType child_end(NodeType *N) {
+    return N->user_end();
+  }
+};
+
+/// \brief Provide an iterator that walks defs, giving both the memory access,
+/// and the current pointer location, updating the pointer location as it
+/// changes due to phi node translation.
+///
+/// This iterator, while somewhat specialized, is what most clients actually
+/// want when walking upwards through MemorySSA def chains.  It takes a pair of
+/// MemoryAccess, memory location, and walks defs, properly translating the
+/// memory location through phi nodes for the user.
+class upward_defs_iterator
+    : public iterator_facade_base<upward_defs_iterator,
+                                  std::forward_iterator_tag,
+                                  const MemoryAccessPair> {
+  typedef typename upward_defs_iterator::iterator_facade_base BaseT;
 
 public:
-  typedef typename super::pointer pointer;
-  typedef typename super::reference reference;
-
   upward_defs_iterator(const MemoryAccessPair &Info)
       : DefIterator(Info.first), Location(Info.second),
         OriginalAccess(Info.first) {
@@ -875,20 +879,13 @@ public:
   bool operator==(const upward_defs_iterator &Other) const {
     return DefIterator == Other.DefIterator;
   }
-  bool operator!=(const upward_defs_iterator &Other) const {
-    return !operator==(Other);
-  }
-  reference operator*() {
+
+  typename BaseT::iterator::reference operator*() const {
     assert(DefIterator != OriginalAccess->defs_end() &&
            "Tried to access past the end of our iterator");
     return CurrentPair;
   }
-  pointer operator->() { return &operator*(); }
-  upward_defs_iterator operator++(int) {
-    upward_defs_iterator tmp = *this;
-    ++*this;
-    return tmp;
-  }
+  using BaseT::operator++;
 
   upward_defs_iterator &operator++() {
     assert(DefIterator != OriginalAccess->defs_end() &&
@@ -929,22 +926,6 @@ inline upward_defs_iterator upward_defs_begin(const MemoryAccessPair &Pair) {
   return upward_defs_iterator(Pair);
 }
 inline upward_defs_iterator upward_defs_end() { return upward_defs_iterator(); }
-
-// Enable GraphTraits for the MemoryAccessPair specialization, so that one can
-// use all
-// of the normal graph iterators to walk
-template <> struct GraphTraits<MemoryAccessPair *> {
-  typedef MemoryAccessPair NodeType;
-  typedef upward_defs_iterator ChildIteratorType;
-
-  static NodeType *getEntryNode(NodeType *N) { return N; }
-  static inline ChildIteratorType child_begin(NodeType *N) {
-    return upward_defs_begin(*N);
-  }
-  static inline ChildIteratorType child_end(NodeType *N) {
-    return upward_defs_end();
-  }
-};
 }
 
 #endif

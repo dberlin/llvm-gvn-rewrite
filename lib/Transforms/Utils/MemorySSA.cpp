@@ -41,7 +41,6 @@
 #include <algorithm>
 #include <queue>
 
-#define OPTIMIZE_AFTER_CONSTRUCTION 1
 #define DEBUG_TYPE "memoryssa"
 using namespace llvm;
 STATISTIC(NumClobberCacheLookups, "Number of Memory SSA version cache lookups");
@@ -116,10 +115,6 @@ MemoryAccess *MemorySSA::renameBlock(BasicBlock *BB, MemoryAccess *IncomingVal,
         IncomingVal = &L;
       } else if (MemoryUse *MU = dyn_cast<MemoryUse>(&L)) {
         MU->setDefiningAccess(IncomingVal);
-#if !OPTIMIZE_AFTER_CONSTRUCTION
-        auto RealVal = Walker->getClobberingMemoryAccess(MU->getMemoryInst());
-        MU->setDefiningAccess(RealVal);
-#endif
       } else if (MemoryDef *MD = dyn_cast<MemoryDef>(&L)) {
         // We can't legally optimize defs, because we only allow single
         // memory phis/uses on operations, and if we optimize these, we can
@@ -134,7 +129,6 @@ MemoryAccess *MemorySSA::renameBlock(BasicBlock *BB, MemoryAccess *IncomingVal,
   for (auto S : successors(BB)) {
     auto It = PerBlockAccesses.find(S);
     // Rename the phi nodes in our successor block
-
     if (It != PerBlockAccesses.end() && isa<MemoryPhi>(It->second->front())) {
       auto &Accesses = It->second;
       MemoryPhi *Phi = cast<MemoryPhi>(&Accesses->front());
@@ -262,48 +256,50 @@ MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
     }
   }
 
-  // Determine where our PHI's should go
+  // Determine where our MemoryPhi's should go
   IDFCalculator IDFs(*DT);
   IDFs.setDefiningBlocks(DefiningBlocks);
   SmallVector<BasicBlock *, 32> IDFBlocks;
   IDFs.calculate(IDFBlocks);
 
-  // Place MemoryPHI nodes
+  // Now place MemoryPhi nodes.
   for (auto &BB : IDFBlocks) {
     // Insert phi node
     auto &Accesses = getOrCreateAccessList(BB);
     MemoryPhi *Phi = new MemoryPhi(
         BB, std::distance(pred_begin(BB), pred_end(BB)), nextID++);
     InstructionToMemoryAccess.insert(std::make_pair(BB, Phi));
-    // Phi goes first
+    // Phi's always are placed at the front of the block.
     Accesses->push_front(Phi);
   }
 
-  // Now do regular SSA renaming
+  // Now do regular SSA renaming on the MemoryDef/MemoryUse.
   SmallPtrSet<BasicBlock *, 16> Visited;
   renamePass(DT->getRootNode(), LiveOnEntryDef, Visited, Walker);
 
-#if OPTIMIZE_AFTER_CONSTRUCTION
-  bool SomeUnvisited = Visited.size() != F.size();
+  // Now optimize the MemoryUse's defining access to point to the nearest
+  // dominating clobbering def.
+  // This ensures that MemoryUse's that are killed by the same store are users
+  // of that store.
   for (auto DomNode : depth_first(DT)) {
     BasicBlock *BB = DomNode->getBlock();
-    if (!SomeUnvisited || Visited.count(BB)) {
-      auto AI = PerBlockAccesses.find(BB);
-      if (AI == PerBlockAccesses.end())
-        continue;
-      auto &Accesses = AI->second;
-      for (auto &MA : *Accesses) {
-        if (MemoryUse *MU = dyn_cast<MemoryUse>(&MA)) {
-          auto RealVal = Walker->getClobberingMemoryAccess(MU->getMemoryInst());
-          MU->setDefiningAccess(RealVal);
-        }
+    auto AI = PerBlockAccesses.find(BB);
+    if (AI == PerBlockAccesses.end())
+      continue;
+    auto &Accesses = AI->second;
+    for (auto &MA : *Accesses) {
+      if (MemoryUse *MU = dyn_cast<MemoryUse>(&MA)) {
+        auto RealVal = Walker->getClobberingMemoryAccess(MU->getMemoryInst());
+        MU->setDefiningAccess(RealVal);
       }
-    } else {
-      markUnreachableAsLiveOnEntry(BB);
     }
   }
 
-#endif
+  // Mark the uses in unreachable blocks as live on entry, so that they go
+  // somewhere.
+  for (auto &BB : F)
+    if (!Visited.count(&BB))
+      markUnreachableAsLiveOnEntry(&BB);
 
   builtAlready = true;
   return Walker;
@@ -877,11 +873,8 @@ void CachingMemorySSAWalker::doCacheInsert(const MemoryAccess *M,
   ++NumClobberCacheInserts;
   if (Q.isCall)
     CachedUpwardsClobberingCall[M] = Result;
-  else {
-    DEBUG(dbgs() << "Insert: M is " << *M << " Loc.Ptr is " << *(Loc.Ptr)
-                 << " Result will be " << *Result << "\n");
+  else
     CachedUpwardsClobberingAccess[{M, Loc}] = Result;
-  }
 }
 
 MemoryAccess *
@@ -893,16 +886,10 @@ CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
 
   if (Q.isCall)
     Result = CachedUpwardsClobberingCall.lookup(M);
-  else {
-    DEBUG(dbgs() << "Lookup: M is " << *M << " Loc.Ptr is " << *(Loc.Ptr)
-                 << "\n");
+  else
     Result = CachedUpwardsClobberingAccess.lookup({M, Loc});
-  }
 
   if (Result) {
-    DEBUG(dbgs() << "Lookup - found: M is " << *M << " Loc.Ptr is "
-                 << *(Loc.Ptr) << " Result is " << *Result << "\n");
-
     ++NumClobberCacheHits;
     return Result;
   }
@@ -1100,13 +1087,12 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
         continue;
 
       assert(Prev.count(*MPI) == 0 &&
-             "This part of the map is already filled in!");
+             "This part of the map should not  already be filled in!");
 
       // Finally, enqueue the argument and new pointer, and set the map to
       // say we got here from the phi and the old pointer.
       Prev[*MPI] = Pair;
-      DEBUG(dbgs() << "Prev of " << *(MPI->first) << " is " << *(Pair.first)
-                   << "\n");
+
       Worklist.emplace(*MPI);
     }
   }
@@ -1303,9 +1289,8 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   // If it is, we will not get a better result.
   if (MSSA->isLiveOnEntryDef(StartingAccess))
     return StartingAccess;
-  //  MemoryAccess *FinalAccess = getClobberingMemoryAccess(StartingAccess, Q);
-  MemoryAccess *FinalAccess =
-      UpwardsDFSWalk(StartingAccess, Q.StartingLoc, Q, false).first;
+  MemoryAccess *FinalAccess = getClobberingMemoryAccess(StartingAccess, Q);
+
   doCacheInsert(Q.OriginalAccess, FinalAccess, Q, Q.StartingLoc);
   if (Q.isCall) {
     for (const auto &C : Q.VisitedCalls)
