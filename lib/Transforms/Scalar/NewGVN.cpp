@@ -1456,12 +1456,11 @@ void NewGVN::markDominatedSingleUserEquivalences(CongruenceClass *CC,
                                                  const BasicBlockEdge &Root) {
 
   // The MultipleEdgesOneReachable case means we know there are multiple edges
-  // to the block,  but *only one from us is reachable*.  This occurs if, for
-  // example, we
-  // discover the value of a switch's condition is constant, and it normally had
-  // multiple case values that go to the same block.  Because the dominators API
-  // asserts isSingleEdge, we have to special case this, since we know
-  // isSingleEdge doesn't matter.
+  // to the block, but *only one from us is reachable*.  This occurs if, for
+  // example, we discover the value of a switch's condition is constant, and it
+  // normally had multiple case values that go to the same block.  Because the
+  // dominators API asserts isSingleEdge, we have to special case this, since we
+  // know isSingleEdge doesn't matter.
 
   for (const auto &U : From->uses()) {
     bool Dominates = false;
