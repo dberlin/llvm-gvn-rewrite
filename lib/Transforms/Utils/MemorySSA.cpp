@@ -23,6 +23,7 @@
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/IteratedDominanceFrontier.h"
+#include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/PHITransAddr.h"
 #include "llvm/IR/AssemblyAnnotationWriter.h"
 #include "llvm/IR/DataLayout.h"
@@ -1266,7 +1267,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
     Q.Inst = I;
   } else {
     Q.isCall = false;
-    Q.StartingLoc = AA->getLocation(I);
+    Q.StartingLoc = MemoryLocation::get(I);
     Q.Inst = I;
   }
   Q.DL = &Q.Inst->getParent()->getModule()->getDataLayout();
@@ -1314,7 +1315,7 @@ void CachingMemorySSAWalker::invalidateInfo(MemoryAccess *MA) {
       Q.Inst = I;
     } else {
       Q.isCall = false;
-      Q.StartingLoc = AA->getLocation(I);
+      Q.StartingLoc = MemoryLocation::get(I);
       Q.Inst = I;
     }
   }

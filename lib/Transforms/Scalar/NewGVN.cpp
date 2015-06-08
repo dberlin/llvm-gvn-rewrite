@@ -37,6 +37,7 @@
 #include "llvm/Analysis/Loads.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
 #include "llvm/Analysis/MemoryDependenceAnalysis.h"
+#include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/PHITransAddr.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/DataLayout.h"
@@ -3792,7 +3793,7 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     LoadInst *LI = LE->getLoadInst();
     AliasAnalysis::Location Loc;
     if (LI) {
-      Loc = AA->getLocation(LI);
+      Loc = MemoryLocation::get(LI);
       Loc = Loc.getWithNewPtr(NLE->getOperand(0));
     } else {
       Loc.Ptr = NLE->getOperand(0);
