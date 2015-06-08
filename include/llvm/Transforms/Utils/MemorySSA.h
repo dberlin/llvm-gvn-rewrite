@@ -906,7 +906,7 @@ private:
           const_cast<Value *>(Location.Ptr),
           OriginalAccess->getBlock()->getModule()->getDataLayout(), nullptr);
       if (!Translator.PHITranslateValue(OriginalAccess->getBlock(),
-                                        DefIterator.getPhiArgBlock(), nullptr))
+                                        DefIterator.getPhiArgBlock(), nullptr, false))
         if (Translator.getAddr() != Location.Ptr) {
           CurrentPair.second = Location.getWithNewPtr(Translator.getAddr());
           return;
