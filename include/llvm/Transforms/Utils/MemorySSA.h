@@ -681,8 +681,8 @@ public:
   /// given a MemoryDef that clobbers the pointer as the starting access, it
   /// will return that MemoryDef, whereas the above would return the clobber
   /// starting from the use side of  the memory def.
-  virtual MemoryAccess *
-  getClobberingMemoryAccess(MemoryAccess *, AliasAnalysis::Location &) = 0;
+  virtual MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
+                                                  MemoryLocation &) = 0;
 
   /// \brief Given a memory access, invalidate anything this walker knows about
   /// that access.
@@ -701,11 +701,10 @@ class DoNothingMemorySSAWalker final : public MemorySSAWalker {
 public:
   MemoryAccess *getClobberingMemoryAccess(const Instruction *) override;
   MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
-                                          AliasAnalysis::Location &) override;
+                                          MemoryLocation &) override;
 };
-typedef std::pair<MemoryAccess *, AliasAnalysis::Location> MemoryAccessPair;
-typedef std::pair<const MemoryAccess *, AliasAnalysis::Location>
-    ConstMemoryAccessPair;
+typedef std::pair<MemoryAccess *, MemoryLocation> MemoryAccessPair;
+typedef std::pair<const MemoryAccess *, MemoryLocation> ConstMemoryAccessPair;
 
 /// \brief A MemorySSAWalker that does AA walks and caching of lookups to
 /// disambiguate accesses.
@@ -715,28 +714,26 @@ public:
   virtual ~CachingMemorySSAWalker();
   MemoryAccess *getClobberingMemoryAccess(const Instruction *) override;
   MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
-                                          AliasAnalysis::Location &) override;
+                                          MemoryLocation &) override;
   void invalidateInfo(MemoryAccess *) override;
 
 protected:
   struct UpwardsMemoryQuery;
   MemoryAccess *doCacheLookup(const MemoryAccess *, const UpwardsMemoryQuery &,
-                              const AliasAnalysis::Location &);
+                              const MemoryLocation &);
 
   void doCacheInsert(const MemoryAccess *, MemoryAccess *,
-                     const UpwardsMemoryQuery &,
-                     const AliasAnalysis::Location &);
+                     const UpwardsMemoryQuery &, const MemoryLocation &);
 
   void doCacheRemove(const MemoryAccess *, const UpwardsMemoryQuery &,
-                     const AliasAnalysis::Location &);
+                     const MemoryLocation &);
 
 private:
-  MemoryAccessPair UpwardsDFSWalk(MemoryAccess *,
-                                  const AliasAnalysis::Location &,
+  MemoryAccessPair UpwardsDFSWalk(MemoryAccess *, const MemoryLocation &,
                                   UpwardsMemoryQuery &, bool);
 
   typedef SmallDenseMap<MemoryAccessPair, MemoryAccessPair> PathMap;
-  std::pair<MemoryAccess *, AliasAnalysis::Location>
+  std::pair<MemoryAccess *, MemoryLocation>
   UpwardsBFSWalkAccess(MemoryAccess *, PathMap &, struct UpwardsMemoryQuery &);
   MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
                                           struct UpwardsMemoryQuery &);
@@ -745,7 +742,7 @@ private:
                        const PathMap &,
                        const struct UpwardsMemoryQuery &) const;
   bool instructionClobbersQuery(const MemoryDef *, struct UpwardsMemoryQuery &,
-                                const AliasAnalysis::Location &Loc) const;
+                                const MemoryLocation &Loc) const;
   SmallDenseMap<ConstMemoryAccessPair, MemoryAccess *>
       CachedUpwardsClobberingAccess;
   DenseMap<const MemoryAccess *, MemoryAccess *> CachedUpwardsClobberingCall;
@@ -906,7 +903,8 @@ private:
           const_cast<Value *>(Location.Ptr),
           OriginalAccess->getBlock()->getModule()->getDataLayout(), nullptr);
       if (!Translator.PHITranslateValue(OriginalAccess->getBlock(),
-                                        DefIterator.getPhiArgBlock(), nullptr, false))
+                                        DefIterator.getPhiArgBlock(), nullptr,
+                                        false))
         if (Translator.getAddr() != Location.Ptr) {
           CurrentPair.second = Location.getWithNewPtr(Translator.getAddr());
           return;
@@ -917,7 +915,7 @@ private:
 
   MemoryAccessPair CurrentPair;
   memoryaccess_def_iterator DefIterator;
-  AliasAnalysis::Location Location;
+  MemoryLocation Location;
   bool WalkingPhi;
   MemoryAccess *OriginalAccess;
 };

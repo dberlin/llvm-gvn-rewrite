@@ -3791,7 +3791,7 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     if (!phiTranslateArguments(LE, NLE, Pred, MustDominate))
       return nullptr;
     LoadInst *LI = LE->getLoadInst();
-    AliasAnalysis::Location Loc;
+    MemoryLocation Loc;
     if (LI) {
       Loc = MemoryLocation::get(LI);
       Loc = Loc.getWithNewPtr(NLE->getOperand(0));

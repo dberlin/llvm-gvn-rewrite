@@ -842,7 +842,7 @@ struct CachingMemorySSAWalker::UpwardsMemoryQuery {
   bool isCall;
   // The pointer location we started the query with. This will be
   // empty if isCall is true.
-  AliasAnalysis::Location StartingLoc;
+  MemoryLocation StartingLoc;
   // This is the instruction we were querying about.
   const Instruction *Inst;
   // Set of visited Instructions for this query.
@@ -860,7 +860,7 @@ struct CachingMemorySSAWalker::UpwardsMemoryQuery {
 
 void CachingMemorySSAWalker::doCacheRemove(const MemoryAccess *M,
                                            const UpwardsMemoryQuery &Q,
-                                           const AliasAnalysis::Location &Loc) {
+                                           const MemoryLocation &Loc) {
   if (Q.isCall)
     CachedUpwardsClobberingCall.erase(M);
   else
@@ -870,7 +870,7 @@ void CachingMemorySSAWalker::doCacheRemove(const MemoryAccess *M,
 void CachingMemorySSAWalker::doCacheInsert(const MemoryAccess *M,
                                            MemoryAccess *Result,
                                            const UpwardsMemoryQuery &Q,
-                                           const AliasAnalysis::Location &Loc) {
+                                           const MemoryLocation &Loc) {
   ++NumClobberCacheInserts;
   if (Q.isCall)
     CachedUpwardsClobberingCall[M] = Result;
@@ -878,10 +878,9 @@ void CachingMemorySSAWalker::doCacheInsert(const MemoryAccess *M,
     CachedUpwardsClobberingAccess[{M, Loc}] = Result;
 }
 
-MemoryAccess *
-CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
-                                      const UpwardsMemoryQuery &Q,
-                                      const AliasAnalysis::Location &Loc) {
+MemoryAccess *CachingMemorySSAWalker::doCacheLookup(const MemoryAccess *M,
+                                                    const UpwardsMemoryQuery &Q,
+                                                    const MemoryLocation &Loc) {
   ++NumClobberCacheLookups;
   MemoryAccess *Result = nullptr;
 
@@ -914,7 +913,7 @@ static bool possiblyAffectedBy(const Instruction *QueryInst,
 
 bool CachingMemorySSAWalker::instructionClobbersQuery(
     const MemoryDef *MD, struct UpwardsMemoryQuery &Q,
-    const AliasAnalysis::Location &Loc) const {
+    const MemoryLocation &Loc) const {
   Instruction *DefMemoryInst = MD->getMemoryInst();
   assert(DefMemoryInst && "Defining instruction not actually an instruction");
 
@@ -938,7 +937,7 @@ bool CachingMemorySSAWalker::instructionClobbersQuery(
 }
 
 MemoryAccessPair CachingMemorySSAWalker::UpwardsDFSWalk(
-    MemoryAccess *StartingAccess, const AliasAnalysis::Location &Loc,
+    MemoryAccess *StartingAccess, const MemoryLocation &Loc,
     UpwardsMemoryQuery &Q, bool FollowingBackedge) {
   MemoryAccess *ModifyingAccess = nullptr;
 
@@ -1037,7 +1036,7 @@ MemoryAccessPair CachingMemorySSAWalker::UpwardsDFSWalk(
 /// TODO: It would be really nice to have a bfs iterator that we can use to do
 /// upwards and downwards walks.  This would require making iterators for the
 /// memory access types, graphtraits, making bfs_ext iterators.
-std::pair<MemoryAccess *, AliasAnalysis::Location>
+std::pair<MemoryAccess *, MemoryLocation>
 CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
                                              PathMap &Prev,
                                              UpwardsMemoryQuery &Q) {
@@ -1048,7 +1047,7 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
   unsigned N = 0;
   Q.SawBackedgePhi = false;
 
-  AliasAnalysis::Location Loc;
+  MemoryLocation Loc;
   while (!Worklist.empty()) {
     N++;
     assert(N < 10000 && "In the walk for too long");
@@ -1146,7 +1145,7 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
 
   unsigned N = 0;
   MemoryAccess *CacheAccess = FinalAccess;
-  AliasAnalysis::Location CacheLoc = FinalAccessPair.second;
+  MemoryLocation CacheLoc = FinalAccessPair.second;
   while (CacheAccess) {
     doCacheInsert(CacheAccess, FinalAccess, Q, CacheLoc);
     const auto &PrevResult = Prev.lookup({CacheAccess, CacheLoc});
@@ -1183,7 +1182,7 @@ MemoryAccessPair CachingMemorySSAWalker::findDominatingAccess(
 
   const BasicBlock *OriginalBlock = Q.OriginalAccess->getBlock();
   MemoryAccess *FinalAccess = FinalAccessPair.first;
-  AliasAnalysis::Location FinalLoc = FinalAccessPair.second;
+  MemoryLocation FinalLoc = FinalAccessPair.second;
   unsigned int N = 0;
   while (FinalAccess && FinalAccess != StartingAccess) {
     BasicBlock *CurrBlock = FinalAccess->getBlock();
@@ -1201,8 +1200,9 @@ MemoryAccessPair CachingMemorySSAWalker::findDominatingAccess(
   return {FinalAccess, FinalLoc};
 }
 
-MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
-    MemoryAccess *StartingAccess, AliasAnalysis::Location &Loc) {
+MemoryAccess *
+CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryAccess *StartingAccess,
+                                                  MemoryLocation &Loc) {
   if (isa<MemoryPhi>(StartingAccess))
     return StartingAccess;
   if (MSSA->isLiveOnEntryDef(StartingAccess))
@@ -1256,7 +1256,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
   // clobbered
   // For calls, we store the call instruction we started with in
   // Loc.Ptr
-  AliasAnalysis::Location Loc(I);
+  MemoryLocation Loc(I);
   // We can't sanely do anything with a FenceInst, they conservatively
   // clobber all memory, and have no locations to get pointers from to
   // try to disambiguate
@@ -1332,7 +1332,7 @@ DoNothingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
 }
 
 MemoryAccess *DoNothingMemorySSAWalker::getClobberingMemoryAccess(
-    MemoryAccess *StartingAccess, AliasAnalysis::Location &) {
+    MemoryAccess *StartingAccess, MemoryLocation &) {
   if (isa<MemoryPhi>(StartingAccess))
     return StartingAccess;
   return StartingAccess->getDefiningAccess();
