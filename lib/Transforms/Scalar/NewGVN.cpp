@@ -2797,7 +2797,7 @@ Value *NewGVN::getStoreValueForLoad(Value *SrcVal, unsigned Offset,
   uint64_t StoreSize = (DL->getTypeSizeInBits(SrcVal->getType()) + 7) / 8;
   uint64_t LoadSize = (DL->getTypeSizeInBits(LoadTy) + 7) / 8;
 
-  IRBuilder<> Builder(InsertPt->getParent(), InsertPt);
+  IRBuilder<> Builder(InsertPt);
 
   // Compute which bits of the stored value are being used by the load.  Convert
   // to an integer type to start with.
@@ -2919,7 +2919,7 @@ Value *NewGVN::getMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
   LLVMContext &Ctx = LoadTy->getContext();
   uint64_t LoadSize = DL->getTypeSizeInBits(LoadTy) / 8;
 
-  IRBuilder<> Builder(InsertPt->getParent(), InsertPt);
+  IRBuilder<> Builder(InsertPt);
 
   // We know that this method is only called when the mem transfer fully
   // provides the bits for the load.
