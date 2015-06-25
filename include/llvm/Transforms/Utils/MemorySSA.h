@@ -852,7 +852,7 @@ template <> struct GraphTraits<Inverse<MemoryAccess *>> {
 ///
 /// This iterator, while somewhat specialized, is what most clients actually
 /// want when walking upwards through MemorySSA def chains.  It takes a pair of
-/// MemoryAccess, memory location, and walks defs, properly translating the
+/// <MemoryAccess,MemoryLocation>, and walks defs, properly translating the
 /// memory location through phi nodes for the user.
 class upward_defs_iterator
     : public iterator_facade_base<upward_defs_iterator,
