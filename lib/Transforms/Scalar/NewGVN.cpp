@@ -3337,9 +3337,6 @@ Value *NewGVN::constructSSAForSet(
   // If new pointer PHI nodes were created, notify alias analysis.
   if (V->getType()->getScalarType()->isPointerTy()) {
 
-    for (unsigned i = 0, e = NewPHIs.size(); i != e; ++i)
-      AA->copyValue(I, NewPHIs[i]);
-
     // Now that we've copied information to the new PHIs, scan through
     // them again and inform alias analysis that we've added potentially
     // escaping uses to any values that are operands to these PHIs.
