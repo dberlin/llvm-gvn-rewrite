@@ -3341,7 +3341,7 @@ Value *NewGVN::constructSSAForSet(
 /// the block inserted to the critical edge.
 BasicBlock *NewGVN::splitCriticalEdges(BasicBlock *Pred, BasicBlock *Succ) {
   BasicBlock *BB =
-      SplitCriticalEdge(Pred, Succ, CriticalEdgeSplittingOptions(AA, DT));
+      SplitCriticalEdge(Pred, Succ, CriticalEdgeSplittingOptions(DT));
   if (MD)
     MD->invalidateCachedPredecessors();
   return BB;
