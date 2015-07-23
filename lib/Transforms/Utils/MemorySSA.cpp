@@ -314,19 +314,11 @@ void MemorySSA::buildMemorySSA(AliasAnalysis *AA, DominatorTree *DT,
     for (auto &I : B) {
       bool use = false;
       bool def = false;
-      if (isa<LoadInst>(&I)) {
-        use = true;
-        def = false;
-      } else if (isa<StoreInst>(&I)) {
-        use = false;
+      AliasAnalysis::ModRefResult ModRef = AA->getModRefInfo(&I);
+      if (ModRef & AliasAnalysis::Mod)
         def = true;
-      } else {
-        AliasAnalysis::ModRefResult ModRef = AA->getModRefInfo(&I);
-        if (ModRef & AliasAnalysis::Mod)
-          def = true;
-        if (ModRef & AliasAnalysis::Ref)
-          use = true;
-      }
+      if (ModRef & AliasAnalysis::Ref)
+        use = true;
 
       // Defs are already uses, so use && def == def
       if (use && !def) {
