@@ -3334,21 +3334,6 @@ Value *NewGVN::constructSSAForSet(
   // Perform PHI construction.
   Value *V = SSAUpdate.GetValueInMiddleOfBlock(I->getParent());
 
-  // If new pointer PHI nodes were created, notify alias analysis.
-  if (V->getType()->getScalarType()->isPointerTy()) {
-
-    // Now that we've copied information to the new PHIs, scan through
-    // them again and inform alias analysis that we've added potentially
-    // escaping uses to any values that are operands to these PHIs.
-    for (unsigned i = 0, e = NewPHIs.size(); i != e; ++i) {
-      PHINode *P = NewPHIs[i];
-      for (unsigned ii = 0, ee = P->getNumIncomingValues(); ii != ee; ++ii) {
-        unsigned jj = PHINode::getOperandNumForIncomingValue(ii);
-        AA->addEscapingUse(P->getOperandUse(jj));
-      }
-    }
-  }
-
   return V;
 }
 
