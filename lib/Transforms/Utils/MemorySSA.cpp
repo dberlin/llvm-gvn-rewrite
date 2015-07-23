@@ -344,11 +344,11 @@ void MemorySSA::removeFromLookups(MemoryAccess *MA) {
 MemoryAccess *MemorySSA::createNewAccess(Instruction *I, bool ignoreNonMemory) {
   // There is no easy way to assert that you are replacing it with a memory
   // access, and this call will assert it for us
-  AliasAnalysis::ModRefResult ModRef = AA->getModRefInfo(I);
+  ModRefInfo ModRef = AA->getModRefInfo(I);
   bool def = false, use = false;
-  if (ModRef & AliasAnalysis::Mod)
+  if (ModRef & MRI_Mod)
     def = true;
-  if (ModRef & AliasAnalysis::Ref)
+  if (ModRef & MRI_Ref)
     use = true;
 
   // It's possible for an instruction to not modify memory at all. During
@@ -922,7 +922,7 @@ bool CachingMemorySSAWalker::instructionClobbersQuery(
     // situation.
     if (possiblyAffectedBy(Q.Inst, DefMemoryInst))
       // Check whether our memory location is modified by this instruction
-      if (AA->getModRefInfo(DefMemoryInst, Loc) & AliasAnalysis::Mod)
+      if (AA->getModRefInfo(DefMemoryInst, Loc) & MRI_Mod)
         return true;
   } else {
     // If this is a call, try then mark it for caching
@@ -930,7 +930,7 @@ bool CachingMemorySSAWalker::instructionClobbersQuery(
       Q.VisitedCalls.insert(MD);
     }
     if (AA->getModRefInfo(DefMemoryInst, ImmutableCallSite(Q.Inst)) !=
-        AliasAnalysis::NoModRef)
+        MRI_NoModRef)
       return true;
   }
   return false;
