@@ -769,8 +769,11 @@ public:
   }
 
   // This is a bit ugly, but for MemoryPHI's, unlike PHINodes, you can't get the
-  // block from the operand in constant time.  We provide it as part of the
-  // iterator to avoid callers having to linear search.
+  // block from the operand in constant time (In a PHINode, the uselist has
+  // both, so it's just subtraction).  We provide it as part of the
+  // iterator to avoid callers having to linear walk to get the block.
+  // If the operation becomes constant time on MemoryPHI's, this bit of
+  // abstraction breaking should be removed.
   BasicBlock *getPhiArgBlock() const {
     MemoryPhi *MP = dyn_cast<MemoryPhi>(Access);
     assert(MP && "Tried to get phi arg block when not iterating over a PHI");
