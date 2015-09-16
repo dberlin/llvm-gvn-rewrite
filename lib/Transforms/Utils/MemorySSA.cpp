@@ -22,6 +22,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/CFG.h"
+#include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/IteratedDominanceFrontier.h"
 #include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/PHITransAddr.h"
@@ -49,8 +50,9 @@ STATISTIC(NumClobberCacheHits, "Number of Memory SSA version cache hits");
 STATISTIC(NumClobberCacheInserts, "Number of MemorySSA version cache inserts");
 INITIALIZE_PASS_WITH_OPTIONS_BEGIN(MemorySSAPrinterPass, "print-memoryssa",
                                    "Memory SSA", true, true)
-INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(GlobalsAAWrapperPass)
 INITIALIZE_PASS_END(MemorySSAPrinterPass, "print-memoryssa", "Memory SSA", true,
                     true)
 
@@ -773,8 +775,10 @@ void MemorySSAPrinterPass::releaseMemory() {
 
 void MemorySSAPrinterPass::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesAll();
-  AU.addRequiredTransitive<AliasAnalysis>();
+  AU.addRequired<AAResultsWrapperPass>();
   AU.addRequired<DominatorTreeWrapperPass>();
+  AU.addPreserved<DominatorTreeWrapperPass>();
+  AU.addPreserved<GlobalsAAWrapperPass>();
 }
 
 bool MemorySSAPrinterPass::doInitialization(Module &M) {
@@ -799,7 +803,7 @@ void MemorySSAPrinterPass::print(raw_ostream &OS, const Module *M) const {
 bool MemorySSAPrinterPass::runOnFunction(Function &F) {
   this->F = &F;
   MSSA = new MemorySSA(F);
-  AliasAnalysis *AA = &getAnalysis<AliasAnalysis>();
+  AliasAnalysis *AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
   DominatorTree *DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   Walker = MSSA->buildMemorySSA(AA, DT);
 
