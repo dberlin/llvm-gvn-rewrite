@@ -33,6 +33,7 @@
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/CFGPrinter.h"
 #include "llvm/Analysis/ConstantFolding.h"
+#include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/Loads.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
@@ -284,11 +285,11 @@ private:
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<TargetLibraryInfoWrapperPass>();
     AU.addRequired<MemorySSALazy>();
-    AU.addRequired<AliasAnalysis>();
+    AU.addRequired<AAResultsWrapperPass>();
 
     AU.addPreserved<MemoryDependenceAnalysis>();
     AU.addPreserved<DominatorTreeWrapperPass>();
-    AU.addPreserved<AliasAnalysis>();
+    AU.addPreserved<GlobalsAAWrapperPass>();
   }
 
   // expression handling
@@ -539,7 +540,8 @@ INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
 INITIALIZE_PASS_DEPENDENCY(MemorySSALazy)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
-INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(GlobalsAAWrapperPass)
 INITIALIZE_PASS_END(NewGVN, "newgvn", "Global Value Numbering", false, false)
 PHIExpression *NewGVN::createPHIExpression(Instruction *I) {
   BasicBlock *PhiBlock = I->getParent();
@@ -2207,7 +2209,8 @@ bool NewGVN::runOnFunction(Function &F) {
   DL = &F.getParent()->getDataLayout();
   AC = &getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
   TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
-  AA = &getAnalysis<AliasAnalysis>();
+  AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
+  
   //  SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(AA, DT));
   MSSA = &getAnalysis<MemorySSALazy>().getMSSA();
   MSSAWalker = MSSA->buildMemorySSA(AA, DT);
