@@ -3215,10 +3215,14 @@ void AssemblyWriter::printUseLists(const Function *F) {
 //                       External Interface declarations
 //===----------------------------------------------------------------------===//
 
-void Function::print(raw_ostream &ROS, AssemblyAnnotationWriter *AAW) const {
+void Function::print(raw_ostream &ROS, AssemblyAnnotationWriter *AAW,
+                     bool ShouldPreserveUseListOrder,
+                     bool IsForDebug) const {
   SlotTracker SlotTable(this->getParent());
   formatted_raw_ostream OS(ROS);
-  AssemblyWriter W(OS, SlotTable, this->getParent(), AAW);
+  AssemblyWriter W(OS, SlotTable, this->getParent(), AAW,
+                   IsForDebug,
+                   ShouldPreserveUseListOrder);
   W.printFunction(this);
 }
 
