@@ -1898,7 +1898,7 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
       // values will get propagated to if necessary
       auto BI = To->begin();
       while (isa<PHINode>(BI)) {
-        TouchedInstructions.set(InstrDFS[BI]);
+        TouchedInstructions.set(InstrDFS[&*BI]);
         ++BI;
       }
       // Propagate the change downstream.
@@ -2590,8 +2590,8 @@ void NewGVN::deleteInstructionsInBlock(BasicBlock *BB) {
   Instruction *EndInst = BB->getTerminator(); // Last not to be deleted.
   while (EndInst != BB->begin()) {
     // Delete the next to last instruction.
-    BasicBlock::iterator I = EndInst;
-    Instruction *Inst = --I;
+    BasicBlock::iterator I = EndInst->getIterator();
+    Instruction *Inst = &*--I;
     if (!Inst->use_empty())
       Inst->replaceAllUsesWith(UndefValue::get(Inst->getType()));
     if (isa<LandingPadInst>(Inst)) {
