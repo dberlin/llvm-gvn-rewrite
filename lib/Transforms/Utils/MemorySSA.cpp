@@ -696,7 +696,7 @@ bool MemorySSA::locallyDominates(const MemoryAccess *Dominator,
          "Asking for local domination when accesses are in different blocks!");
   // Get the access list for the block
   const auto *AccessList = getBlockAccesses(Dominator->getBlock());
-  AccessListType::const_reverse_iterator It(Dominator);
+  AccessListType::const_reverse_iterator It(Dominator->getIterator());
 
   // If we hit the beginning of the access list before we hit dominatee, we must
   // dominate it
