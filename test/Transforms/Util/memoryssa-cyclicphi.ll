@@ -4,9 +4,9 @@ target datalayout = "e-i64:64-f80:128-n8:16:32:64-S128"
 
 %struct.hoge = type { i32, %struct.widget }
 %struct.widget = type { i64 }
-define hidden void @quux() align 2 {
-  %tmp = getelementptr inbounds %struct.hoge, %struct.hoge* undef, i64 0, i32 1, i32 0
-  %tmp24 = getelementptr inbounds %struct.hoge, %struct.hoge* undef, i64 0, i32 1
+define hidden void @quux(%struct.hoge *%f) align 2 {
+  %tmp = getelementptr inbounds %struct.hoge, %struct.hoge* %f, i64 0, i32 1, i32 0
+  %tmp24 = getelementptr inbounds %struct.hoge, %struct.hoge* %f, i64 0, i32 1
   %tmp25 = bitcast %struct.widget* %tmp24 to i64**
   br label %bb26
 
