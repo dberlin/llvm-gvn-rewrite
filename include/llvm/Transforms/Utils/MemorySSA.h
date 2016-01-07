@@ -567,9 +567,9 @@ private:
   MemoryAccess *createNewAccess(Instruction *, bool ignoreNonMemory = false);
   MemoryAccess *findDominatingDef(BasicBlock *, enum InsertionPlace);
 
-  MemoryAccess *renameBlock(BasicBlock *, MemoryAccess *, MemorySSAWalker *);
+  MemoryAccess *renameBlock(BasicBlock *, MemoryAccess *);
   void renamePass(DomTreeNode *, MemoryAccess *IncomingVal,
-                  SmallPtrSet<BasicBlock *, 16> &Visited, MemorySSAWalker *);
+                  SmallPtrSet<BasicBlock *, 16> &Visited);
   std::unique_ptr<AccessListType> &getOrCreateAccessList(BasicBlock *);
   bool replaceAllOccurrences(MemoryPhi *, MemoryAccess *, MemoryAccess *);
   AliasAnalysis *AA;

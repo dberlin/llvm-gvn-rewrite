@@ -105,8 +105,7 @@ namespace llvm {
 /// \brief Rename a single basic block into MemorySSA form.
 /// Uses the standard SSA renaming algorithm.
 /// \returns The new incoming value.
-MemoryAccess *MemorySSA::renameBlock(BasicBlock *BB, MemoryAccess *IncomingVal,
-                                     MemorySSAWalker *Walker) {
+MemoryAccess *MemorySSA::renameBlock(BasicBlock *BB, MemoryAccess *IncomingVal) {
   auto It = PerBlockAccesses.find(BB);
   // Skip most processing if the list is empty.
   if (It != PerBlockAccesses.end()) {
@@ -148,10 +147,9 @@ MemoryAccess *MemorySSA::renameBlock(BasicBlock *BB, MemoryAccess *IncomingVal,
 /// We walk the dominator tree in preorder, renaming accesses, and then filling
 /// in phi nodes in our successors.
 void MemorySSA::renamePass(DomTreeNode *Root, MemoryAccess *IncomingVal,
-                           SmallPtrSet<BasicBlock *, 16> &Visited,
-                           MemorySSAWalker *Walker) {
+                           SmallPtrSet<BasicBlock *, 16> &Visited) {
   SmallVector<RenamePassData, 32> WorkStack;
-  IncomingVal = renameBlock(Root->getBlock(), IncomingVal, Walker);
+  IncomingVal = renameBlock(Root->getBlock(), IncomingVal);
   WorkStack.push_back({Root, Root->begin(), IncomingVal});
   Visited.insert(Root->getBlock());
 
@@ -167,7 +165,7 @@ void MemorySSA::renamePass(DomTreeNode *Root, MemoryAccess *IncomingVal,
       ++WorkStack.back().ChildIt;
       BasicBlock *BB = Child->getBlock();
       Visited.insert(BB);
-      IncomingVal = renameBlock(BB, IncomingVal, Walker);
+      IncomingVal = renameBlock(BB, IncomingVal);
       WorkStack.push_back({Child, Child->begin(), IncomingVal});
     }
   }
@@ -284,8 +282,7 @@ MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
   // Now do regular SSA renaming on the MemoryDef/MemoryUse. Visited will get
   // filled in with all blocks.
   SmallPtrSet<BasicBlock *, 16> Visited;
-  renamePass(DT->getRootNode(), LiveOnEntryDef, Visited, Walker);
-
+  renamePass(DT->getRootNode(), LiveOnEntryDef, Visited);
   // Now optimize the MemoryUse's defining access to point to the nearest
   // dominating clobbering def.
   // This ensures that MemoryUse's that are killed by the same store are
@@ -947,95 +944,6 @@ bool CachingMemorySSAWalker::instructionClobbersQuery(
       return true;
   }
   return false;
-}
-
-MemoryAccessPair CachingMemorySSAWalker::UpwardsDFSWalk(
-    MemoryAccess *StartingAccess, const MemoryLocation &Loc,
-    UpwardsMemoryQuery &Q, bool FollowingBackedge) {
-  MemoryAccess *ModifyingAccess = nullptr;
-
-  auto DFI = df_begin(StartingAccess);
-  for (auto DFE = df_end(StartingAccess); DFI != DFE;) {
-    MemoryAccess *CurrAccess = *DFI;
-    if (MSSA->isLiveOnEntryDef(CurrAccess))
-      return {CurrAccess, Loc};
-    if (auto CacheResult = doCacheLookup(CurrAccess, Q, Loc)) {
-      return {CacheResult, Loc};
-    }
-    // If this is a MemoryDef, check whether it clobbers our current query.
-    if (MemoryDef *MD = dyn_cast<MemoryDef>(CurrAccess)) {
-      // If we hit the top, stop following this path
-      // While we can do lookups, we can't sanely do inserts here unless we
-      // were to track every thing we saw along the way, since we don't
-      // know where we will stop.
-      if (instructionClobbersQuery(MD, Q, Loc)) {
-        ModifyingAccess = CurrAccess;
-        break;
-      }
-    }
-    // We need to know whether it is a phi so we can track backedges.
-    // Otherwise, walk all upward defs.
-    bool IsPhi = isa<MemoryPhi>(CurrAccess);
-    // Recurse on PHI nodes, since we need to change locations.
-    // TODO: Allow graphtraits on pairs, which would turn this whole function
-    // into a normal single depth first walk.
-    if (IsPhi) {
-      MemoryAccess *FirstDef = nullptr;
-      DFI = DFI.skipChildren();
-      const MemoryAccessPair PHIPair(CurrAccess, Loc);
-      if (Q.Visited.count(PHIPair))
-        return PHIPair;
-      for (auto MPI = upward_defs_begin(PHIPair), MPE = upward_defs_end();
-           MPI != MPE; ++MPI) {
-        bool Backedge = false;
-        // Don't follow this path again if we've followed it once
-        if (!Q.Visited.insert(*MPI).second)
-          continue;
-        if (IsPhi && !FollowingBackedge &&
-            DT->dominates(CurrAccess->getBlock(), MPI.getPhiArgBlock()))
-          Backedge = true;
-        MemoryAccessPair CurrentPair =
-            UpwardsDFSWalk(MPI->first, MPI->second, Q, Backedge);
-        // All the phi arguments should reach the same point if we can bypass
-        // this phi.  The alternative is that they hit this phi node, which
-        // means we can skip this argument.
-        if (FirstDef && (CurrentPair.first != PHIPair.first &&
-                         FirstDef != CurrentPair.first)) {
-          ModifyingAccess = CurrAccess;
-          break;
-        } else if (!FirstDef) {
-          FirstDef = CurrentPair.first;
-        }
-      }
-    } else {
-      // You can't call skipchildren and also increment the iterator
-      ++DFI;
-    }
-  }
-  if (!ModifyingAccess)
-    return {MSSA->getLiveOnEntryDef(), Q.StartingLoc};
-  const BasicBlock *OriginalBlock = Q.OriginalAccess->getBlock();
-  unsigned N = DFI.getPathLength();
-  MemoryAccess *FinalAccess = ModifyingAccess;
-
-  for (; N != 0; --N) {
-    ModifyingAccess = DFI.getPath(N - 1);
-    BasicBlock *CurrBlock = ModifyingAccess->getBlock();
-    if (!FollowingBackedge)
-      doCacheInsert(ModifyingAccess, FinalAccess, Q, Loc);
-    if (DT->dominates(CurrBlock, OriginalBlock) &&
-        (CurrBlock != OriginalBlock || !FollowingBackedge ||
-         MSSA->locallyDominates(ModifyingAccess, Q.OriginalAccess)))
-      break;
-  }
-  // Cache everything else on the way back
-  for (; N != 0; --N) {
-    MemoryAccess *CacheAccess = DFI.getPath(N - 1);
-    doCacheInsert(CacheAccess, ModifyingAccess, Q, Loc);
-  }
-  assert(Q.Visited.size() < 1000 && "Visited too much");
-
-  return {ModifyingAccess, Loc};
 }
 
 /// \brief Perform a BFS walking, starting at \p StartingAccess, and going
