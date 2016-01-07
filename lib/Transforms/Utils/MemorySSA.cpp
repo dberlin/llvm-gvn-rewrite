@@ -55,12 +55,11 @@ INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(GlobalsAAWrapperPass)
 INITIALIZE_PASS_END(MemorySSAPrinterPass, "print-memoryssa", "Memory SSA", true,
                     true)
-
 INITIALIZE_PASS(MemorySSALazy, "memoryssalazy", "Memory SSA", true, true)
 
 namespace llvm {
 
-/// \brief An annotator class to print Memory SSA information in comments.
+/// \brief An assembly annotator class to print Memory SSA information in comments.
 class MemorySSAAnnotatedWriter : public AssemblyAnnotationWriter {
   friend class MemorySSA;
   const MemorySSA *MSSA;
@@ -109,8 +108,7 @@ namespace llvm {
 MemoryAccess *MemorySSA::renameBlock(BasicBlock *BB, MemoryAccess *IncomingVal,
                                      MemorySSAWalker *Walker) {
   auto It = PerBlockAccesses.find(BB);
-  // Skip if the list is empty, but we still have to pass thru the
-  // incoming value info/etc to successors
+  // Skip most processing if the list is empty.
   if (It != PerBlockAccesses.end()) {
     auto &Accesses = It->second;
     for (auto &L : *Accesses) {
@@ -129,6 +127,7 @@ MemoryAccess *MemorySSA::renameBlock(BasicBlock *BB, MemoryAccess *IncomingVal,
     }
   }
 
+  // Pass through values to our successors
   for (auto S : successors(BB)) {
     auto It = PerBlockAccesses.find(S);
     // Rename the phi nodes in our successor block
@@ -235,16 +234,22 @@ MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
   this->DT = DT;
 
   // We create an access to represent "live on entry", for things like
-  // arguments or users of globals. We do not actually insert it in to
-  // the IR.
+  // arguments or users of globals, where the memory they use is defined before
+  // the beginning of the function. We do not actually insert it in to the IR.
+  // We do not define a live on exit for the immediate uses, and thus our
+  // semantics do *not* imply that something with no immediate uses can simply be
+  // removed.
   BasicBlock &StartingPoint = F.getEntryBlock();
   LiveOnEntryDef = new MemoryDef(nullptr, nullptr, &StartingPoint, nextID++);
 
-  // We temporarily maintain lists of memory accesses per-block,
-  // trading time for memory. We could just look up the memory access
-  // for every possible instruction in the stream.
+  // We maintain lists of memory accesses per-block, trading memory for time. We
+  // could just look up the memory access for every possible instruction in the
+  // stream.
   SmallPtrSet<BasicBlock *, 32> DefiningBlocks;
 
+
+  // Go through each block, figure out where defs occur, and chain together all
+  // the accesses.
   for (auto &B : F) {
     AccessListType *Accesses = nullptr;
     for (auto &I : B) {
@@ -276,14 +281,15 @@ MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
     Accesses->push_front(Phi);
   }
 
-  // Now do regular SSA renaming on the MemoryDef/MemoryUse.
+  // Now do regular SSA renaming on the MemoryDef/MemoryUse. Visited will get
+  // filled in with all blocks.
   SmallPtrSet<BasicBlock *, 16> Visited;
   renamePass(DT->getRootNode(), LiveOnEntryDef, Visited, Walker);
 
   // Now optimize the MemoryUse's defining access to point to the nearest
   // dominating clobbering def.
-  // This ensures that MemoryUse's that are killed by the same store are users
-  // of that store.
+  // This ensures that MemoryUse's that are killed by the same store are
+  // immediate users of that store, one of the invariants we guarantee.
   for (auto DomNode : depth_first(DT)) {
     BasicBlock *BB = DomNode->getBlock();
     auto AI = PerBlockAccesses.find(BB);
@@ -344,8 +350,7 @@ void MemorySSA::removeFromLookups(MemoryAccess *MA) {
 
 /// \brief Helper function to create new memory accesses
 MemoryAccess *MemorySSA::createNewAccess(Instruction *I, bool ignoreNonMemory) {
-  // There is no easy way to assert that you are replacing it with a memory
-  // access, and this call will assert it for us
+  // Find out what affect this instruction has on memory.
   ModRefInfo ModRef = AA->getModRefInfo(I);
   bool def = false, use = false;
   if (ModRef & MRI_Mod)
@@ -689,6 +694,10 @@ MemoryAccess *MemorySSA::getMemoryAccess(const Value *I) const {
   return InstructionToMemoryAccess.lookup(I);
 }
 
+
+/// \brief Determine, for two memory accesses in the same block,
+/// whether \p Dominator dominates \p Dominatee.
+/// \returns True if \p Dominator dominates \p Dominatee.
 bool MemorySSA::locallyDominates(const MemoryAccess *Dominator,
                                  const MemoryAccess *Dominatee) const {
 
@@ -1048,20 +1057,26 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
   Q.Visited.insert({StartingAccess, Q.StartingLoc});
   Worklist.emplace(StartingAccess, Q.StartingLoc);
   MemoryAccess *ModifyingAccess = nullptr;
-  unsigned N = 0;
   Q.SawBackedgePhi = false;
 
   MemoryLocation Loc;
   while (!Worklist.empty()) {
-    N++;
-    assert(N < 10000 && "In the walk for too long");
     const MemoryAccessPair Pair = Worklist.front();
     MemoryAccess *CurrAccess = Pair.first;
     Loc = Pair.second;
     Worklist.pop();
+
+    // If we hit the live on entry def, this path stops
     if (MSSA->isLiveOnEntryDef(CurrAccess))
       continue;
+
+    // See if we've already followed this path with this set of memory
+    // information.
     if (auto CacheResult = doCacheLookup(CurrAccess, Q, Loc)) {
+      // If we have followed this path in the past, we still need to make sure
+      // we mark it visited for our *current walk* and fill out the prev table
+      // if we haven't already, because the cached information may be from a
+      // previous walk.
       if (Q.Visited.insert({CacheResult, Loc}).second)
         Prev[{CacheResult, Loc}] = {CurrAccess, Loc};
       return {CacheResult, Loc};
@@ -1083,6 +1098,8 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
     bool IsPhi = isa<MemoryPhi>(CurrAccess);
     for (auto MPI = upward_defs_begin(Pair), MPE = upward_defs_end();
          MPI != MPE; ++MPI) {
+
+      // If we hit a phi that goes across a backedge, mark it
       if (IsPhi && !Q.SawBackedgePhi &&
           DT->dominates(CurrAccess->getBlock(), MPI.getPhiArgBlock()))
         Q.SawBackedgePhi = true;
@@ -1169,9 +1186,9 @@ MemoryAccessPair CachingMemorySSAWalker::findDominatingAccess(
   // out how we go to this clobber, stopping when we find something that
   // dominates the original access.
   // If we saw a phi node with a backedge, the thing that we found in our block
-  // may in fact be below us, in which case, we need to check local domination
-  // if the found access is in the same block as the starting access.
-
+  // may in fact be after us in the current block, in which case, we need to
+  // check local domination to make sure we give a correct answer.
+  
   // Since this code may be a little confusing, here is what is happening:
   // First we extract the block of the original access that the user queried
   // about, I.E. the access for the instruction they passed to
@@ -1187,20 +1204,27 @@ MemoryAccessPair CachingMemorySSAWalker::findDominatingAccess(
   const BasicBlock *OriginalBlock = Q.OriginalAccess->getBlock();
   MemoryAccess *FinalAccess = FinalAccessPair.first;
   MemoryLocation FinalLoc = FinalAccessPair.second;
-  unsigned int N = 0;
+
+  // Walk backwards until we hit the starting access
   while (FinalAccess && FinalAccess != StartingAccess) {
     BasicBlock *CurrBlock = FinalAccess->getBlock();
+    // Stop if we hit the dominating access
     if (DT->dominates(CurrBlock, OriginalBlock) &&
         (CurrBlock != OriginalBlock || !Q.SawBackedgePhi ||
          MSSA->locallyDominates(FinalAccess, Q.OriginalAccess)))
       break;
 
+    // Otherwise lookup the next entry in the path we took through BFS and go
+    // there. 
     const auto &PrevResult = Path.lookup({FinalAccess, FinalLoc});
     FinalAccess = PrevResult.first;
     FinalLoc = PrevResult.second;
-    ++N;
-    assert(N < 10000 && "In the loop too many times");
   }
+  // We should have always found *something*, or hit the StartingAccess.
+  // If we found nothing, then the walk was done wrong (since the walk started
+  // at StartingAccess, walking the path backwards should always terminate there).
+  assert ((FinalAccess || FinalAccess == StartingAccess) && "Path walk was not done properly");
+  
   return {FinalAccess, FinalLoc};
 }
 
@@ -1213,8 +1237,10 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryAccess *StartingAccess,
     return StartingAccess;
 
   Instruction *I = StartingAccess->getMemoryInst();
-
+  
   struct UpwardsMemoryQuery Q;
+  // Conservatively, fences are always clobbers, so don't perform the walk if we
+  // hit a fence.
   if (isa<FenceInst>(I))
     return StartingAccess;
 
