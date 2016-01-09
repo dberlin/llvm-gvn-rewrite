@@ -734,7 +734,8 @@ private:
 
   typedef SmallDenseMap<MemoryAccessPair, MemoryAccessPair> PathMap;
   std::pair<MemoryAccess *, MemoryLocation>
-  UpwardsBFSWalkAccess(MemoryAccess *, PathMap &, struct UpwardsMemoryQuery &);
+  UpwardsBFSWalkAccess(MemoryAccess *, const MemoryLocation &, PathMap &,
+                       struct UpwardsMemoryQuery &);
   MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
                                           struct UpwardsMemoryQuery &);
   MemoryAccessPair

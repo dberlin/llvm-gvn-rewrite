@@ -59,7 +59,8 @@ INITIALIZE_PASS(MemorySSALazy, "memoryssalazy", "Memory SSA", true, true)
 
 namespace llvm {
 
-/// \brief An assembly annotator class to print Memory SSA information in comments.
+/// \brief An assembly annotator class to print Memory SSA information in
+/// comments.
 class MemorySSAAnnotatedWriter : public AssemblyAnnotationWriter {
   friend class MemorySSA;
   const MemorySSA *MSSA;
@@ -105,7 +106,8 @@ namespace llvm {
 /// \brief Rename a single basic block into MemorySSA form.
 /// Uses the standard SSA renaming algorithm.
 /// \returns The new incoming value.
-MemoryAccess *MemorySSA::renameBlock(BasicBlock *BB, MemoryAccess *IncomingVal) {
+MemoryAccess *MemorySSA::renameBlock(BasicBlock *BB,
+                                     MemoryAccess *IncomingVal) {
   auto It = PerBlockAccesses.find(BB);
   // Skip most processing if the list is empty.
   if (It != PerBlockAccesses.end()) {
@@ -235,7 +237,8 @@ MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
   // arguments or users of globals, where the memory they use is defined before
   // the beginning of the function. We do not actually insert it in to the IR.
   // We do not define a live on exit for the immediate uses, and thus our
-  // semantics do *not* imply that something with no immediate uses can simply be
+  // semantics do *not* imply that something with no immediate uses can simply
+  // be
   // removed.
   BasicBlock &StartingPoint = F.getEntryBlock();
   LiveOnEntryDef = new MemoryDef(nullptr, nullptr, &StartingPoint, nextID++);
@@ -244,7 +247,6 @@ MemorySSAWalker *MemorySSA::buildMemorySSA(AliasAnalysis *AA,
   // could just look up the memory access for every possible instruction in the
   // stream.
   SmallPtrSet<BasicBlock *, 32> DefiningBlocks;
-
 
   // Go through each block, figure out where defs occur, and chain together all
   // the accesses.
@@ -691,7 +693,6 @@ MemoryAccess *MemorySSA::getMemoryAccess(const Value *I) const {
   return InstructionToMemoryAccess.lookup(I);
 }
 
-
 /// \brief Determine, for two memory accesses in the same block,
 /// whether \p Dominator dominates \p Dominatee.
 /// \returns True if \p Dominator dominates \p Dominatee.
@@ -946,6 +947,95 @@ bool CachingMemorySSAWalker::instructionClobbersQuery(
   return false;
 }
 
+MemoryAccessPair CachingMemorySSAWalker::UpwardsDFSWalk(
+    MemoryAccess *StartingAccess, const MemoryLocation &Loc,
+    UpwardsMemoryQuery &Q, bool FollowingBackedge) {
+  MemoryAccess *ModifyingAccess = nullptr;
+
+  auto DFI = df_begin(StartingAccess);
+  for (auto DFE = df_end(StartingAccess); DFI != DFE;) {
+    MemoryAccess *CurrAccess = *DFI;
+    if (MSSA->isLiveOnEntryDef(CurrAccess))
+      return {CurrAccess, Loc};
+    if (auto CacheResult = doCacheLookup(CurrAccess, Q, Loc)) {
+      return {CacheResult, Loc};
+    }
+    // If this is a MemoryDef, check whether it clobbers our current query.
+    if (MemoryDef *MD = dyn_cast<MemoryDef>(CurrAccess)) {
+      // If we hit the top, stop following this path
+      // While we can do lookups, we can't sanely do inserts here unless we
+      // were to track every thing we saw along the way, since we don't
+      // know where we will stop.
+      if (instructionClobbersQuery(MD, Q, Loc)) {
+        ModifyingAccess = CurrAccess;
+        break;
+      }
+    }
+    // We need to know whether it is a phi so we can track backedges.
+    // Otherwise, walk all upward defs.
+    bool IsPhi = isa<MemoryPhi>(CurrAccess);
+    // Recurse on PHI nodes, since we need to change locations.
+    // TODO: Allow graphtraits on pairs, which would turn this whole function
+    // into a normal single depth first walk.
+    if (IsPhi) {
+      MemoryAccess *FirstDef = nullptr;
+      DFI = DFI.skipChildren();
+      const MemoryAccessPair PHIPair(CurrAccess, Loc);
+      if (Q.Visited.count(PHIPair))
+        return PHIPair;
+      for (auto MPI = upward_defs_begin(PHIPair), MPE = upward_defs_end();
+           MPI != MPE; ++MPI) {
+        bool Backedge = false;
+        // Don't follow this path again if we've followed it once
+        if (!Q.Visited.insert(*MPI).second)
+          continue;
+        if (IsPhi && !FollowingBackedge &&
+            DT->dominates(CurrAccess->getBlock(), MPI.getPhiArgBlock()))
+          Backedge = true;
+        MemoryAccessPair CurrentPair =
+            UpwardsDFSWalk(MPI->first, MPI->second, Q, Backedge);
+        // All the phi arguments should reach the same point if we can bypass
+        // this phi.  The alternative is that they hit this phi node, which
+        // means we can skip this argument.
+        if (FirstDef && (CurrentPair.first != PHIPair.first &&
+                         FirstDef != CurrentPair.first)) {
+          ModifyingAccess = CurrAccess;
+          break;
+        } else if (!FirstDef) {
+          FirstDef = CurrentPair.first;
+        }
+      }
+    } else {
+      // You can't call skipchildren and also increment the iterator
+      ++DFI;
+    }
+  }
+  if (!ModifyingAccess)
+    return {MSSA->getLiveOnEntryDef(), Q.StartingLoc};
+  const BasicBlock *OriginalBlock = Q.OriginalAccess->getBlock();
+  unsigned N = DFI.getPathLength();
+  MemoryAccess *FinalAccess = ModifyingAccess;
+
+  for (; N != 0; --N) {
+    ModifyingAccess = DFI.getPath(N - 1);
+    BasicBlock *CurrBlock = ModifyingAccess->getBlock();
+    if (!FollowingBackedge)
+      doCacheInsert(ModifyingAccess, FinalAccess, Q, Loc);
+    if (DT->dominates(CurrBlock, OriginalBlock) &&
+        (CurrBlock != OriginalBlock || !FollowingBackedge ||
+         MSSA->locallyDominates(ModifyingAccess, Q.OriginalAccess)))
+      break;
+  }
+  // Cache everything else on the way back
+  for (; N != 0; --N) {
+    MemoryAccess *CacheAccess = DFI.getPath(N - 1);
+    doCacheInsert(CacheAccess, ModifyingAccess, Q, Loc);
+  }
+  assert(Q.Visited.size() < 1000 && "Visited too much");
+
+  return {ModifyingAccess, Loc};
+}
+
 /// \brief Perform a BFS walking, starting at \p StartingAccess, and going
 /// upwards (IE through defining accesses) until we reach something that
 /// Mod's StartingAccess's memory location.
@@ -959,11 +1049,12 @@ bool CachingMemorySSAWalker::instructionClobbersQuery(
 /// memory access types, graphtraits, making bfs_ext iterators.
 std::pair<MemoryAccess *, MemoryLocation>
 CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
+                                             const MemoryLocation &StartingLoc,
                                              PathMap &Prev,
                                              UpwardsMemoryQuery &Q) {
   std::queue<MemoryAccessPair> Worklist;
-  Q.Visited.insert({StartingAccess, Q.StartingLoc});
-  Worklist.emplace(StartingAccess, Q.StartingLoc);
+  Q.Visited.insert({StartingAccess, StartingLoc});
+  Worklist.emplace(StartingAccess, StartingLoc);
   MemoryAccess *ModifyingAccess = nullptr;
   Q.SawBackedgePhi = false;
 
@@ -1001,28 +1092,64 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
         break;
       }
     }
-    // We need to know whether it is a phi so we can track backedges.
+    // We need to know whether it is a phi so we can track backedges and check
+    // whether we can bypass it.
     // Otherwise, walk all upward defs.
     bool IsPhi = isa<MemoryPhi>(CurrAccess);
-    for (auto MPI = upward_defs_begin(Pair), MPE = upward_defs_end();
-         MPI != MPE; ++MPI) {
+    if (IsPhi) {
+      MemoryAccess *FirstDef = nullptr;
+      const MemoryAccessPair PHIPair(CurrAccess, Loc);
+      for (auto MPI = upward_defs_begin(Pair), MPE = upward_defs_end();
+           MPI != MPE; ++MPI) {
+        // If we hit a phi that goes across a backedge, mark it
+        if (!Q.SawBackedgePhi &&
+            DT->dominates(CurrAccess->getBlock(), MPI.getPhiArgBlock()))
+          Q.SawBackedgePhi = true;
+        // We may have already visited this argument along another path
+        if (!Q.Visited.insert(*MPI).second)
+          continue;
 
-      // If we hit a phi that goes across a backedge, mark it
-      if (IsPhi && !Q.SawBackedgePhi &&
-          DT->dominates(CurrAccess->getBlock(), MPI.getPhiArgBlock()))
-        Q.SawBackedgePhi = true;
-      // We may have already visited this argument along another path
-      if (!Q.Visited.insert(*MPI).second)
-        continue;
+        assert(Prev.count(*MPI) == 0 &&
+               "This part of the map should not already be filled in!");
+        MemoryAccessPair CurrentPair =
+            UpwardsBFSWalkAccess(MPI->first, MPI->second, Prev, Q);
+        // All the phi arguments should reach the same point if we can bypass
+        // this phi.  The alternative is that they hit this phi node, which
+        // means we can skip this argument.
+        if (FirstDef && (CurrentPair.first != PHIPair.first &&
+                         FirstDef != CurrentPair.first)) {
+          ModifyingAccess = CurrAccess;
+          break;
+        } else if (!FirstDef) {
+          FirstDef = CurrentPair.first;
+        }
+        // Finally, enqueue the argument and new pointer, and set the map to
+        // say we got here from the phi and the old pointer.
+        Prev[*MPI] = Pair;
 
-      assert(Prev.count(*MPI) == 0 &&
-             "This part of the map should not  already be filled in!");
+        Worklist.emplace(*MPI);
+      }
+    } else {
+      for (auto MPI = upward_defs_begin(Pair), MPE = upward_defs_end();
+           MPI != MPE; ++MPI) {
 
-      // Finally, enqueue the argument and new pointer, and set the map to
-      // say we got here from the phi and the old pointer.
-      Prev[*MPI] = Pair;
+        // If we hit a phi that goes across a backedge, mark it
+        if (IsPhi && !Q.SawBackedgePhi &&
+            DT->dominates(CurrAccess->getBlock(), MPI.getPhiArgBlock()))
+          Q.SawBackedgePhi = true;
+        // We may have already visited this argument along another path
+        if (!Q.Visited.insert(*MPI).second)
+          continue;
 
-      Worklist.emplace(*MPI);
+        assert(Prev.count(*MPI) == 0 &&
+               "This part of the map should not  already be filled in!");
+
+        // Finally, enqueue the argument and new pointer, and set the map to
+        // say we got here from the phi and the old pointer.
+        Prev[*MPI] = Pair;
+
+        Worklist.emplace(*MPI);
+      }
     }
   }
 
@@ -1032,7 +1159,7 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
   // liveOnEntryDef at his point. If, for example, the last path we followed led
   // into a cycle, it will be something else.
   if (!ModifyingAccess && Worklist.empty())
-    return {MSSA->getLiveOnEntryDef(), Q.StartingLoc};
+    return {MSSA->getLiveOnEntryDef(), StartingLoc};
 
   return {ModifyingAccess, Loc};
 }
@@ -1045,7 +1172,12 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
 MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
     MemoryAccess *StartingAccess, struct UpwardsMemoryQuery &Q) {
   PathMap Prev;
-  auto CurrAccessPair = UpwardsBFSWalkAccess(StartingAccess, Prev, Q);
+#if 1
+  auto CurrAccessPair =
+      UpwardsBFSWalkAccess(StartingAccess, Q.StartingLoc, Prev, Q);
+#else
+  auto CurrAccessPair = UpwardsDFSWalk(StartingAccess, Q.StartingLoc, Q, false);
+#endif
   // Either we will have found something that conflicts with us, or we will have
   // hit the liveOnEntry. Check for liveOnEntry.
   if (MSSA->isLiveOnEntryDef(CurrAccessPair.first))
@@ -1096,7 +1228,7 @@ MemoryAccessPair CachingMemorySSAWalker::findDominatingAccess(
   // If we saw a phi node with a backedge, the thing that we found in our block
   // may in fact be after us in the current block, in which case, we need to
   // check local domination to make sure we give a correct answer.
-  
+
   // Since this code may be a little confusing, here is what is happening:
   // First we extract the block of the original access that the user queried
   // about, I.E. the access for the instruction they passed to
@@ -1123,16 +1255,18 @@ MemoryAccessPair CachingMemorySSAWalker::findDominatingAccess(
       break;
 
     // Otherwise lookup the next entry in the path we took through BFS and go
-    // there. 
+    // there.
     const auto &PrevResult = Path.lookup({FinalAccess, FinalLoc});
     FinalAccess = PrevResult.first;
     FinalLoc = PrevResult.second;
   }
   // We should have always found *something*, or hit the StartingAccess.
   // If we found nothing, then the walk was done wrong (since the walk started
-  // at StartingAccess, walking the path backwards should always terminate there).
-  assert ((FinalAccess || FinalAccess == StartingAccess) && "Path walk was not done properly");
-  
+  // at StartingAccess, walking the path backwards should always terminate
+  // there).
+  assert((FinalAccess || FinalAccess == StartingAccess) &&
+         "Path walk was not done properly");
+
   return {FinalAccess, FinalLoc};
 }
 
@@ -1145,7 +1279,7 @@ CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryAccess *StartingAccess,
     return StartingAccess;
 
   Instruction *I = StartingAccess->getMemoryInst();
-  
+
   struct UpwardsMemoryQuery Q;
   // Conservatively, fences are always clobbers, so don't perform the walk if we
   // hit a fence.
