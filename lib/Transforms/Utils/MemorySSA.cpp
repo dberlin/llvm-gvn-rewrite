@@ -1172,7 +1172,7 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
 MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
     MemoryAccess *StartingAccess, struct UpwardsMemoryQuery &Q) {
   PathMap Prev;
-#if 1
+#if 0
   auto CurrAccessPair =
       UpwardsBFSWalkAccess(StartingAccess, Q.StartingLoc, Prev, Q);
 #else
