@@ -1171,13 +1171,10 @@ CachingMemorySSAWalker::UpwardsBFSWalkAccess(MemoryAccess *StartingAccess,
 /// node.
 MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
     MemoryAccess *StartingAccess, struct UpwardsMemoryQuery &Q) {
-  PathMap Prev;
 #if 0
+  PathMap Prev;
   auto CurrAccessPair =
       UpwardsBFSWalkAccess(StartingAccess, Q.StartingLoc, Prev, Q);
-#else
-  auto CurrAccessPair = UpwardsDFSWalk(StartingAccess, Q.StartingLoc, Q, false);
-#endif
   // Either we will have found something that conflicts with us, or we will have
   // hit the liveOnEntry. Check for liveOnEntry.
   if (MSSA->isLiveOnEntryDef(CurrAccessPair.first))
@@ -1189,6 +1186,11 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
   MemoryAccess *FinalAccess = FinalAccessPair.first;
   assert(FinalAccessPair.first &&
          "Should have found something that dominated our original access");
+#else
+  auto CurrAccessPair = UpwardsDFSWalk(StartingAccess, Q.StartingLoc, Q, false);
+  MemoryAccess *FinalAccess = CurrAccessPair.first;
+#endif
+#if 0
   // Everything along the rest of the path now terminates at CurrAccess
   // TODO
   // 1. We could cache the rest of the prev map as partial cache info and
@@ -1200,11 +1202,11 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
   // This just avoids doing a cache insert of the same thing twice, in the case
   // that our walk terminated in something that dominated our original access.
   // In that case, we would insert both here and in the loop below.
+
+
   if (FinalAccess != CurrAccessPair.first)
     doCacheInsert(CurrAccessPair.first, CurrAccessPair.first, Q,
                   CurrAccessPair.second);
-
-  unsigned N = 0;
   MemoryAccess *CacheAccess = FinalAccess;
   MemoryLocation CacheLoc = FinalAccessPair.second;
   while (CacheAccess) {
@@ -1212,10 +1214,8 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
     const auto &PrevResult = Prev.lookup({CacheAccess, CacheLoc});
     CacheAccess = PrevResult.first;
     CacheLoc = PrevResult.second;
-    ++N;
-    assert(N < 10000 && "In the second loop too many times");
   }
-
+#endif
   return FinalAccess;
 }
 
