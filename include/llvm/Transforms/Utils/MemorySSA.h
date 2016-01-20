@@ -732,16 +732,8 @@ private:
   MemoryAccessPair UpwardsDFSWalk(MemoryAccess *, const MemoryLocation &,
                                   UpwardsMemoryQuery &, bool);
 
-  typedef SmallDenseMap<MemoryAccessPair, MemoryAccessPair> PathMap;
-  std::pair<MemoryAccess *, MemoryLocation>
-  UpwardsBFSWalkAccess(MemoryAccess *, const MemoryLocation &, PathMap &,
-                       struct UpwardsMemoryQuery &);
   MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
                                           struct UpwardsMemoryQuery &);
-  MemoryAccessPair
-  findDominatingAccess(const MemoryAccess *, const MemoryAccessPair &,
-                       const PathMap &,
-                       const struct UpwardsMemoryQuery &) const;
   bool instructionClobbersQuery(const MemoryDef *, struct UpwardsMemoryQuery &,
                                 const MemoryLocation &Loc) const;
   SmallDenseMap<ConstMemoryAccessPair, MemoryAccess *>
