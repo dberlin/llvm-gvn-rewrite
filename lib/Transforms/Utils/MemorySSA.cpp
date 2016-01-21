@@ -982,14 +982,14 @@ MemoryAccessPair CachingMemorySSAWalker::UpwardsDFSWalk(
       MemoryAccess *FirstDef = nullptr;
       DFI = DFI.skipChildren();
       const MemoryAccessPair PHIPair(CurrAccess, Loc);
-      if (Q.Visited.count(PHIPair))
-        return PHIPair;
+      bool VisitedOnlyOne = true;
       for (auto MPI = upward_defs_begin(PHIPair), MPE = upward_defs_end();
            MPI != MPE; ++MPI) {
         bool Backedge = false;
         // Don't follow this path again if we've followed it once
         if (!Q.Visited.insert(*MPI).second)
           continue;
+
         if (IsPhi && !FollowingBackedge &&
             DT->dominates(CurrAccess->getBlock(), MPI.getPhiArgBlock()))
           Backedge = true;
@@ -999,13 +999,25 @@ MemoryAccessPair CachingMemorySSAWalker::UpwardsDFSWalk(
         // this phi.  The alternative is that they hit this phi node, which
         // means we can skip this argument.
         if (FirstDef && (CurrentPair.first != PHIPair.first &&
-                         FirstDef != CurrentPair.first)) {
+                         CurrentPair.first != FirstDef)) {
           ModifyingAccess = CurrAccess;
           break;
         } else if (!FirstDef) {
           FirstDef = CurrentPair.first;
+        } else {
+          VisitedOnlyOne = false;
         }
       }
+      // The above loop determines if all arguments of the phi node reach the
+      // same place. However we skip arguments that are cyclically dependent
+      // only on the value of this phi node.  This means in some cases, we may
+      // only visit one argument of the phi node, and the above loop will
+      // happily say that all the arguments are the same. However, in that case,
+      // we still can't walk past the phi node, because that argument still
+      // kills the access unless we hit the top of the function when walking
+      // that argument.
+      if (VisitedOnlyOne && FirstDef && !MSSA->isLiveOnEntryDef(FirstDef))
+        ModifyingAccess = CurrAccess;
     } else {
       // You can't call skipchildren and also increment the iterator
       ++DFI;
@@ -1037,7 +1049,6 @@ MemoryAccessPair CachingMemorySSAWalker::UpwardsDFSWalk(
   return {ModifyingAccess, Loc};
 }
 
-
 /// \brief Walk the use-def chains starting at \p MA and find
 /// the MemoryAccess that actually clobbers Loc.
 ///
@@ -1047,7 +1058,6 @@ MemoryAccess *CachingMemorySSAWalker::getClobberingMemoryAccess(
     MemoryAccess *StartingAccess, struct UpwardsMemoryQuery &Q) {
   return UpwardsDFSWalk(StartingAccess, Q.StartingLoc, Q, false).first;
 }
-
 
 MemoryAccess *
 CachingMemorySSAWalker::getClobberingMemoryAccess(MemoryAccess *StartingAccess,
