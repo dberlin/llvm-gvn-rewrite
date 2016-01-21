@@ -580,7 +580,10 @@ bool NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
                                     const BasicBlock *B) {
   bool AllConstant = true;
   bool UsedEquiv = false;
-  E->setType(I->getType());
+  if (auto GEP = dyn_cast<GetElementPtrInst>(I))
+    E->setType(GEP->getSourceElementType());
+  else
+    E->setType(I->getType());
   E->setOpcode(I->getOpcode());
   E->allocateOperands(ArgRecycler, ExpressionAllocator);
 
@@ -769,7 +772,8 @@ const Expression *NewGVN::createExpression(Instruction *I,
     if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
       return SimplifiedE;
   } else if (isa<GetElementPtrInst>(I)) {
-    Value *V = SimplifyGEPInst(ArrayRef<Value *>(E->ops_begin(), E->ops_end()),
+    Value *V = SimplifyGEPInst(E->getType(),
+                               ArrayRef<Value *>(E->ops_begin(), E->ops_end()),
                                *DL, TLI, DT, AC);
     if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
       return SimplifiedE;
@@ -1294,8 +1298,10 @@ const Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
 
   Value *AllSameValue = E->getOperand(0);
 
+  // See if all arguments are the same, ignoring undef arguments, because we can
+  // choose a value that is the same for them.
   for (const Value *Arg : E->operands())
-    if (Arg != AllSameValue) {
+    if (Arg != AllSameValue && !isa<UndefValue>(Arg)) {
       AllSameValue = NULL;
       break;
     }
@@ -2563,10 +2569,10 @@ static void patchReplacementInstruction(Instruction *I, Value *Repl) {
     // regions, and so we need a conservative combination of the noalias
     // scopes.
     unsigned KnownIDs[] = {
-        LLVMContext::MD_tbaa,    LLVMContext::MD_alias_scope,
-        LLVMContext::MD_noalias, LLVMContext::MD_range,
-        LLVMContext::MD_fpmath,  LLVMContext::MD_invariant_load,
-    };
+        LLVMContext::MD_tbaa,           LLVMContext::MD_alias_scope,
+        LLVMContext::MD_noalias,        LLVMContext::MD_range,
+        LLVMContext::MD_fpmath,         LLVMContext::MD_invariant_load,
+        LLVMContext::MD_invariant_group};
     combineMetadata(ReplInst, I, KnownIDs);
   }
 }
@@ -3226,9 +3232,12 @@ bool NewGVN::eliminateInstructions(Function &F) {
           DEBUG(dbgs() << "Found replacement " << *Result << " for "
                        << *MemberUse->get() << " in " << *(MemberUse->getUser())
                        << "\n");
-          if (Instruction *ReplacedInst =
-                  dyn_cast<Instruction>(MemberUse->get()))
+
+          // If we replaced something in an instruction, handle the patching of
+          // metadata
+          if (dyn_cast<Instruction>(MemberUse->get()))
             patchReplacementInstruction(ReplacedInst, Result);
+
           assert(isa<Instruction>(MemberUse->getUser()));
           MemberUse->set(Result);
           AnythingReplaced = true;
@@ -3385,19 +3394,22 @@ Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
       // FIXME: Track NSW/NUW
       return BO;
     } else if (Opcode == Instruction::MemoryOps::GetElementPtr) {
+#if FIXME
       // It wants the pointee type, which is complex, and not equivalent to
       // getType on the original GEP
       // FIXME: Store getSrcType on the GEP
       Type *PointeeType =
           cast<SequentialType>(BE->getOperand(0)->getType()->getScalarType())
               ->getElementType();
+#endif
       Value *GEP = nullptr;
       if (Value *V = SimplifyGEPInst(
-              makeArrayRef(BE->ops_begin(), BE->ops_end()), *DL, TLI, DT, AC))
+              BE->getType(), makeArrayRef(BE->ops_begin(), BE->ops_end()), *DL,
+              TLI, DT, AC))
         GEP = V;
       else
         GEP = GetElementPtrInst::Create(
-            PointeeType, BE->getOperand(0),
+            BE->getType(), BE->getOperand(0),
             makeArrayRef(BE->ops_begin(), BE->ops_end()).slice(1), "geppre",
             BB->getTerminator());
       // FIXME: Track inbounds
@@ -3824,7 +3836,8 @@ const Expression *NewGVN::trySimplifyPREExpression(const Expression *E,
           ResultExpr = createVariableExpression(V, false);
       }
     } else if (Opcode == Instruction::GetElementPtr) {
-      Value *V = SimplifyGEPInst(makeArrayRef(BE->ops_begin(), BE->ops_end()),
+      Value *V = SimplifyGEPInst(BE->getType(),
+                                 makeArrayRef(BE->ops_begin(), BE->ops_end()),
                                  *DL, TLI, DT, AC);
       if (V) {
         if (Constant *C = dyn_cast<Constant>(V))
