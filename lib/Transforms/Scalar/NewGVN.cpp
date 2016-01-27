@@ -790,7 +790,7 @@ const Expression *NewGVN::createExpression(Instruction *I,
       C.emplace_back(cast<Constant>(Arg));
 
     Value *V =
-        ConstantFoldInstOperands(E->getOpcode(), E->getType(), C, *DL, TLI);
+        ConstantFoldInstOperands(I, C, *DL, TLI);
     if (V) {
       if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
         return SimplifiedE;
@@ -1127,7 +1127,7 @@ int NewGVN::analyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
   Src = ConstantExpr::getGetElementPtr(Type::getInt8Ty(Src->getContext()), Src,
                                        OffsetCst);
   Src = ConstantExpr::getBitCast(Src, PointerType::get(LoadTy, AS));
-  if (ConstantFoldLoadFromConstPtr(Src, *DL))
+  if (ConstantFoldLoadFromConstPtr(Src, LoadTy, *DL))
     return Offset;
   return -1;
 }
@@ -2984,7 +2984,7 @@ Value *NewGVN::getMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
   Src = ConstantExpr::getGetElementPtr(Type::getInt8Ty(Src->getContext()), Src,
                                        OffsetCst);
   Src = ConstantExpr::getBitCast(Src, PointerType::get(LoadTy, AS));
-  return ConstantFoldLoadFromConstPtr(Src, *DL);
+  return ConstantFoldLoadFromConstPtr(Src, LoadTy, *DL);
 }
 
 Value *NewGVN::coerceLoad(Value *V) {
@@ -3235,7 +3235,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
 
           // If we replaced something in an instruction, handle the patching of
           // metadata
-          if (dyn_cast<Instruction>(MemberUse->get()))
+          if (Instruction *ReplacedInst = dyn_cast<Instruction>(MemberUse->get()))
             patchReplacementInstruction(ReplacedInst, Result);
 
           assert(isa<Instruction>(MemberUse->getUser()));
