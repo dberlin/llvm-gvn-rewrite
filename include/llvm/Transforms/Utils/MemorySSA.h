@@ -80,6 +80,10 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/OperandTraits.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/User.h"
+#include "llvm/IR/Value.h"
 #include "llvm/Pass.h"
 #include <list>
 
@@ -96,13 +100,19 @@ typedef memoryaccess_def_iterator_base<const MemoryAccess>
 
 // \brief The base for all memory accesses. All memory accesses in a
 // block are linked together using an intrusive list.
-class MemoryAccess : public ilist_node<MemoryAccess> {
-public:
-  enum AccessType { AccessUse, AccessDef, AccessPhi };
+class MemoryAccess : public User, public ilist_node<MemoryAccess> {
+  void *operator new(size_t, unsigned) = delete;
+  void *operator new(size_t) = delete;
 
+public:
   // Methods for support type inquiry through isa, cast, and
   // dyn_cast
   static inline bool classof(const MemoryAccess *) { return true; }
+  static inline bool classof(const Value *V) {
+    unsigned ID = V->getValueID();
+    return ID == Value::MemoryUseVal || ID == Value::MemoryPhiVal ||
+           ID == MemoryDefVal;
+  }
 
   virtual ~MemoryAccess();
   BasicBlock *getBlock() const { return Block; }
@@ -122,23 +132,9 @@ public:
   virtual void print(raw_ostream &OS) const {};
   virtual void dump() const;
 
-  typedef SmallPtrSet<MemoryAccess *, 8> UserListType;
-  typedef UserListType::iterator iterator;
-  typedef UserListType::const_iterator const_iterator;
-
-  unsigned user_size() const { return Users.size(); }
-  bool user_empty() const { return Users.empty(); }
-  iterator user_begin() { return Users.begin(); }
-  iterator user_end() { return Users.end(); }
-  iterator_range<iterator> users() {
-    return iterator_range<iterator>(user_begin(), user_end());
-  }
-
-  const_iterator user_begin() const { return Users.begin(); }
-  const_iterator user_end() const { return Users.end(); }
-  iterator_range<const_iterator> uses() const {
-    return iterator_range<const_iterator>(user_begin(), user_end());
-  }
+  /// \brief The user iterators for a memory access
+  typedef user_iterator iterator;
+  typedef const_user_iterator const_iterator;
 
   /// \brief This iterator walks over all of the defs in a given
   /// MemoryAccess. For MemoryPhi nodes, this walks arguments.  For
@@ -153,24 +149,13 @@ protected:
   friend class MemoryUse;
   friend class MemoryDef;
   friend class MemoryPhi;
-  AccessType getAccessType() const { return AccessType; }
 
   /// \brief Set the instruction that this MemoryUse represents.
   virtual void setMemoryInst(Instruction *MI) = 0;
 
-  /// \brief Add a use of this memory access to our list of uses.
-  ///
-  /// Note: We depend on being able to add the same use multiple times and not
-  /// have it end up in our use list multiple times.
-  void addUse(MemoryAccess *Use) { Users.insert(Use); }
-
-  /// \brief Remove a use of this memory access from our list of uses.
-  void removeUse(MemoryAccess *Use) { Users.erase(Use); }
-
-  /// \brief Return true if \p Use is one of the uses of this memory access.
-  bool hasUse(MemoryAccess *Use) { return Users.count(Use); }
-
-  MemoryAccess(AccessType AT, BasicBlock *BB) : AccessType(AT), Block(BB) {}
+  MemoryAccess(LLVMContext &C, unsigned Vty, BasicBlock *BB,
+               unsigned NumOperands)
+      : User(Type::getVoidTy(C), Vty, nullptr, NumOperands), Block(BB) {}
 
   /// \brief Used internally to give IDs to MemoryAccesses for printing
   virtual unsigned int getID() const = 0;
@@ -178,9 +163,7 @@ protected:
 private:
   MemoryAccess(const MemoryAccess &);
   void operator=(const MemoryAccess &);
-  AccessType AccessType;
   BasicBlock *Block;
-  UserListType Users;
 };
 
 template <>
@@ -211,48 +194,50 @@ inline raw_ostream &operator<<(raw_ostream &OS, const MemoryAccess &MA) {
 /// MemoryUse's is exactly the set of Instructions for which
 /// AliasAnalysis::getModRefInfo returns "Ref".
 class MemoryUse : public MemoryAccess {
+  void *operator new(size_t, unsigned) = delete;
+
 public:
-  MemoryUse(MemoryAccess *DMA, Instruction *MI, BasicBlock *BB)
-      : MemoryUse(DMA, AccessUse, MI, BB) {}
+  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(MemoryAccess);
+
+  // allocate space for exactly one operand
+  void *operator new(size_t s) { return User::operator new(s, 1); }
+  MemoryUse(LLVMContext &C, MemoryAccess *DMA, Instruction *MI, BasicBlock *BB)
+      : MemoryUse(C, DMA, Value::MemoryUseVal, MI, BB) {}
 
   virtual MemoryAccess *getDefiningAccess() const final {
-    return DefiningAccess;
+    return getOperand(0);
   }
 
   virtual Instruction *getMemoryInst() const final { return MemoryInst; }
 
   static inline bool classof(const MemoryUse *) { return true; }
   static inline bool classof(const MemoryAccess *MA) {
-    return MA->getAccessType() == AccessUse;
+    return MA->getValueID() == MemoryUseVal;
   }
   virtual void print(raw_ostream &OS) const;
 
 protected:
   friend class MemorySSA;
 
-  MemoryUse(MemoryAccess *DMA, enum AccessType AT, Instruction *MI,
+  MemoryUse(LLVMContext &C, MemoryAccess *DMA, unsigned Vty, Instruction *MI,
             BasicBlock *BB)
-      : MemoryAccess(AT, BB), DefiningAccess(nullptr), MemoryInst(MI) {
+      : MemoryAccess(C, Vty, BB, 1), MemoryInst(MI) {
     setDefiningAccess(DMA);
   }
   virtual void setMemoryInst(Instruction *MI) final { MemoryInst = MI; }
   virtual void setDefiningAccess(MemoryAccess *DMA) final {
-    if (DefiningAccess != DMA) {
-      if (DefiningAccess)
-        DefiningAccess->removeUse(this);
-      if (DMA)
-        DMA->addUse(this);
-    }
-    DefiningAccess = DMA;
+    setOperand(0, DMA);
   }
   virtual unsigned int getID() const {
     llvm_unreachable("MemoryUse's do not have ID's");
   }
 
 private:
-  MemoryAccess *DefiningAccess;
   Instruction *MemoryInst;
 };
+template <>
+struct OperandTraits<MemoryUse> : public FixedNumOperandTraits<MemoryUse, 1> {};
+DEFINE_TRANSPARENT_OPERAND_ACCESSORS(MemoryUse, MemoryAccess)
 
 /// \brief Represents a read-write access to memory, whether it is a must-alias,
 /// or a may-alias.
@@ -264,17 +249,25 @@ private:
 /// associated with them.  This use points to the nearest reaching
 /// MemoryDef/MemoryPhi.
 class MemoryDef final : public MemoryUse {
+  void *operator new(size_t, unsigned) = delete;
+
 public:
-  MemoryDef(MemoryAccess *DMA, Instruction *MI, BasicBlock *BB, unsigned Ver)
-      : MemoryUse(DMA, AccessDef, MI, BB), ID(Ver) {}
+  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(MemoryAccess);
+
+  // allocate space for exactly one operand
+  void *operator new(size_t s) { return User::operator new(s, 1); }
+
+  MemoryDef(LLVMContext &C, MemoryAccess *DMA, Instruction *MI, BasicBlock *BB,
+            unsigned Ver)
+      : MemoryUse(C, DMA, Value::MemoryDefVal, MI, BB), ID(Ver) {}
 
   static inline bool classof(const MemoryDef *) { return true; }
   static inline bool classof(const MemoryUse *MA) {
-    return MA->getAccessType() == AccessDef;
+    return MA->getValueID() == MemoryDefVal;
   }
 
   static inline bool classof(const MemoryAccess *MA) {
-    return MA->getAccessType() == AccessDef;
+    return MA->getValueID() == MemoryDefVal;
   }
   virtual void print(raw_ostream &OS) const;
 
@@ -288,6 +281,9 @@ protected:
 private:
   const unsigned int ID;
 };
+template <>
+struct OperandTraits<MemoryDef> : public FixedNumOperandTraits<MemoryDef, 1> {};
+DEFINE_TRANSPARENT_OPERAND_ACCESSORS(MemoryDef, MemoryAccess)
 
 /// \brief Represents phi nodes for memory accesses.
 ///
@@ -322,10 +318,18 @@ private:
 /// Because MemoryUse's do not generate new definitions, they do not have this
 /// issue.
 class MemoryPhi final : public MemoryAccess {
+  void *operator new(size_t, unsigned) = delete;
+  // allocate space for exactly zero operands
+  void *operator new(size_t s) { return User::operator new(s); }
+
 public:
-  MemoryPhi(BasicBlock *BB, unsigned int NP, unsigned int Ver)
-      : MemoryAccess(AccessPhi, BB), ID(Ver), NumPreds(NP) {
-    Operands.reserve(NumPreds);
+  /// Provide fast operand accessors
+  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(MemoryAccess);
+
+  MemoryPhi(LLVMContext &C, BasicBlock *BB, unsigned int NP, unsigned int Ver)
+      : MemoryAccess(C, Value::MemoryPhiVal, BB, 0), ID(Ver),
+        ReservedSpace(NP) {
+    allocHungoffUses(ReservedSpace);
   }
 
   virtual Instruction *getMemoryInst() const final {
@@ -336,70 +340,120 @@ public:
   virtual MemoryAccess *getDefiningAccess() const final {
     llvm_unreachable("MemoryPhi's do not have a single defining access");
   }
+  // Block iterator interface. This provides access to the list of incoming
+  // basic blocks, which parallels the list of incoming values.
 
-  /// \brief This is the number of actual predecessors this phi node has.
-  unsigned int getNumPreds() const { return NumPreds; }
+  typedef BasicBlock **block_iterator;
+  typedef BasicBlock *const *const_block_iterator;
 
-  /// \brief This is the number of incoming values currently in use
+  block_iterator block_begin() {
+    Use::UserRef *ref =
+        reinterpret_cast<Use::UserRef *>(op_begin() + ReservedSpace);
+    return reinterpret_cast<block_iterator>(ref + 1);
+  }
+
+  const_block_iterator block_begin() const {
+    const Use::UserRef *ref =
+        reinterpret_cast<const Use::UserRef *>(op_begin() + ReservedSpace);
+    return reinterpret_cast<const_block_iterator>(ref + 1);
+  }
+
+  block_iterator block_end() { return block_begin() + getNumOperands(); }
+
+  const_block_iterator block_end() const {
+    return block_begin() + getNumOperands();
+  }
+
+  op_range incoming_values() { return operands(); }
+
+  const_op_range incoming_values() const { return operands(); }
+
+  /// getNumIncomingValues - Return the number of incoming edges
   ///
-  /// During SSA construction, we differentiate between this and NumPreds to
-  /// know when the PHI node is fully constructed.
-  unsigned int getNumIncomingValues() const { return Operands.size(); }
+  unsigned getNumIncomingValues() const { return getNumOperands(); }
 
-  /// \brief Set the memory access of argument \p v of this phi node to be \p MA
+  /// getIncomingValue - Return incoming value number x
   ///
-  /// This function updates use lists.
-  void setIncomingValue(unsigned int v, MemoryAccess *MA) {
-    std::pair<BasicBlock *, MemoryAccess *> &Val = Operands[v];
-    // We need to update use lists.  Because our uses are not to specific
-    // operands, but instead to this MemoryAccess, and because a given memory
-    // access may appear multiple times in the phi argument list, we need to be
-    // careful not to remove the use of this phi, from MA, until we check to
-    // make sure MA does not appear elsewhere in the phi argument list.
-    if (Val.second != MA) {
-      if (Val.second) {
-        bool existsElsewhere = false;
-        for (unsigned i = 0, e = Operands.size(); i != e; ++i) {
-          if (i == v)
-            continue;
-          if (Operands[i].second == Val.second)
-            existsElsewhere = true;
-        }
-        if (!existsElsewhere)
-          Val.second->removeUse(this);
-      }
-      MA->addUse(this);
-      Val.second = MA;
-    }
+  MemoryAccess *getIncomingValue(unsigned i) const { return getOperand(i); }
+  void setIncomingValue(unsigned i, MemoryAccess *V) {
+    assert(V && "PHI node got a null value!");
+    assert(getType() == V->getType() &&
+           "All operands to PHI node must be the same type as the PHI node!");
+    setOperand(i, V);
+  }
+  static unsigned getOperandNumForIncomingValue(unsigned i) { return i; }
+  static unsigned getIncomingValueNumForOperand(unsigned i) { return i; }
+
+  /// getIncomingBlock - Return incoming basic block number @p i.
+  ///
+  BasicBlock *getIncomingBlock(unsigned i) const { return block_begin()[i]; }
+
+  /// getIncomingBlock - Return incoming basic block corresponding
+  /// to an operand of the PHI.
+  ///
+  BasicBlock *getIncomingBlock(const Use &U) const {
+    assert(this == U.getUser() && "Iterator doesn't point to PHI's Uses?");
+    return getIncomingBlock(unsigned(&U - op_begin()));
   }
 
-  MemoryAccess *getIncomingValue(unsigned int v) const {
-    return Operands[v].second;
-  }
-  void setIncomingBlock(unsigned int v, BasicBlock *BB) {
-    std::pair<BasicBlock *, MemoryAccess *> &Val = Operands[v];
-    Val.first = BB;
-  }
-  BasicBlock *getIncomingBlock(unsigned int v) const {
-    return Operands[v].first;
+  /// getIncomingBlock - Return incoming basic block corresponding
+  /// to value use iterator.
+  ///
+  BasicBlock *getIncomingBlock(MemoryAccess::const_user_iterator I) const {
+    return getIncomingBlock(I.getUse());
   }
 
-  typedef SmallVector<std::pair<BasicBlock *, MemoryAccess *>, 8> OperandsType;
-  typedef OperandsType::const_iterator const_op_iterator;
-  inline const_op_iterator ops_begin() const { return Operands.begin(); }
-  inline const_op_iterator ops_end() const { return Operands.end(); }
-  inline iterator_range<const_op_iterator> operands() const {
-    return iterator_range<const_op_iterator>(ops_begin(), ops_end());
+  void setIncomingBlock(unsigned i, BasicBlock *BB) {
+    assert(BB && "PHI node got a null basic block!");
+    block_begin()[i] = BB;
+  }
+
+  /// addIncoming - Add an incoming value to the end of the PHI list
+  ///
+  void addIncoming(MemoryAccess *V, BasicBlock *BB) {
+    if (getNumOperands() == ReservedSpace)
+      growOperands(); // Get more space!
+    // Initialize some new operands.
+    setNumHungOffUseOperands(getNumOperands() + 1);
+    setIncomingValue(getNumOperands() - 1, V);
+    setIncomingBlock(getNumOperands() - 1, BB);
+  }
+
+  /// getBasicBlockIndex - Return the first index of the specified basic
+  /// block in the value list for this PHI.  Returns -1 if no instance.
+  ///
+  int getBasicBlockIndex(const BasicBlock *BB) const {
+    for (unsigned i = 0, e = getNumOperands(); i != e; ++i)
+      if (block_begin()[i] == BB)
+        return i;
+    return -1;
+  }
+
+  Value *getIncomingValueForBlock(const BasicBlock *BB) const {
+    int Idx = getBasicBlockIndex(BB);
+    assert(Idx >= 0 && "Invalid basic block argument!");
+    return getIncomingValue(Idx);
+  }
+
+  static inline bool classof(const Value *V) {
+    return V->getValueID() == MemoryPhiVal;
   }
 
   static inline bool classof(const MemoryPhi *) { return true; }
   static inline bool classof(const MemoryAccess *MA) {
-    return MA->getAccessType() == AccessPhi;
+    return MA->getValueID() == MemoryPhiVal;
   }
 
   virtual void print(raw_ostream &OS) const;
 
 protected:
+  // allocHungoffUses - this is more complicated than the generic
+  // User::allocHungoffUses, because we have to allocate Uses for the incoming
+  // values and pointers to the incoming blocks, all in one allocation.
+  void allocHungoffUses(unsigned N) {
+    User::allocHungoffUses(N, /* IsPhi */ true);
+  }
+
   friend class MemorySSA;
 
   virtual void setDefiningAccess(MemoryAccess *) final {
@@ -407,23 +461,34 @@ protected:
   }
   virtual void setMemoryInst(Instruction *MI) final {}
 
-  // MemorySSA currently cannot handle edge additions or deletions (but can
-  // handle direct replacement).  This is protected to ensure people don't try.
-  void addIncoming(MemoryAccess *MA, BasicBlock *BB) {
-    Operands.push_back(std::make_pair(BB, MA));
-    MA->addUse(this);
-  }
-
   // For debugging only. This gets used to give memory accesses pretty numbers
   // when printing them out
   virtual unsigned int getID() const final { return ID; }
 
 private:
+  /// \brief growOperands - grow operands - This grows the operand list in
+  /// response
+  /// to a push_back style of operation.  This grows the number of ops by 1.5
+  /// times.
+  ///
+  void growOperands() {
+    unsigned e = getNumOperands();
+    unsigned NumOps = e + e / 2;
+    if (NumOps < 2)
+      NumOps = 2; // 2 op PHI nodes are VERY common.
+
+    ReservedSpace = NumOps;
+    growHungoffUses(ReservedSpace, /* IsPhi */ true);
+  }
+
   // For debugging only
   const unsigned ID;
-  unsigned NumPreds;
-  OperandsType Operands;
+  unsigned ReservedSpace;
 };
+
+template <> struct OperandTraits<MemoryPhi> : public HungoffOperandTraits<2> {};
+
+DEFINE_TRANSPARENT_OPERAND_ACCESSORS(MemoryPhi, MemoryAccess)
 
 class MemorySSAWalker;
 

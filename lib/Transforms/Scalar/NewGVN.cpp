@@ -1240,7 +1240,8 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
     MemoryAccess *LoadAccess = MSSA->getMemoryAccess(LI);
     // Okay, so uh, we couldn't use the defining access to grab a value out of
     // See if we can reuse any of it's uses by widening a load.
-    for (const MemoryAccess *MA : DefiningAccess->users()) {
+    for (const User *U : DefiningAccess->users()) {
+      const MemoryAccess *MA = cast<MemoryAccess>(U);
       if (MA == LoadAccess)
         continue;
       if (isa<MemoryPhi>(MA))
@@ -3712,9 +3713,9 @@ Value *NewGVN::findPRELeader(const Expression *E, const BasicBlock *BB,
 MemoryAccess *NewGVN::phiTranslateMemoryAccess(MemoryAccess *MA,
                                                const BasicBlock *Pred) {
   if (MemoryPhi *MP = dyn_cast<MemoryPhi>(MA)) {
-    for (auto A : MP->operands()) {
-      if (A.first == Pred) {
-        return A.second;
+    for (auto &A : MP->operands()) {
+      if (MP->getIncomingBlock(A) == Pred) {
+        return cast<MemoryAccess>(A);
       }
     }
     // We should have found something
