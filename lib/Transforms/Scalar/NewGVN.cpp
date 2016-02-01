@@ -338,9 +338,9 @@ private:
   const Expression *checkSimplificationResults(Expression *, Instruction *,
                                                Value *);
   const Expression *performSymbolicEvaluation(Value *, const BasicBlock *);
-  const Expression *
-  performSymbolicLoadCoercionFromPhi(Type *, Value *, LoadInst *, 
-                                     MemoryPhi *, const BasicBlock *);
+  const Expression *performSymbolicLoadCoercionFromPhi(Type *, Value *,
+                                                       LoadInst *, MemoryPhi *,
+                                                       const BasicBlock *);
   const Expression *performSymbolicLoadCoercion(Type *, Value *, LoadInst *,
                                                 Instruction *, MemoryAccess *,
                                                 const BasicBlock *);
@@ -399,8 +399,8 @@ private:
   Value *coerceAvailableValueToLoadType(Value *, Type *, Instruction *);
   Value *getStoreValueForLoad(Value *, unsigned, Type *, Instruction *);
   Value *getLoadValueForLoad(LoadInst *, unsigned, Type *, Instruction *);
-  Value *getMemInstValueForLoad(MemIntrinsic *, unsigned, Type *,
-                                Instruction *);
+  Value *getMemInstValueForLoad(MemIntrinsic *, unsigned, Type *, Instruction *,
+                                bool NoNewInst = false);
   Value *coerceLoad(Value *);
   // New instruction creation
   void handleNewInstruction(Instruction *){};
@@ -409,10 +409,11 @@ private:
   void cleanupTables();
   std::pair<unsigned, unsigned> assignDFSNumbers(BasicBlock *, unsigned);
 
-  // PRE
-  struct AvailableValueInBlock {
-    /// BB - The basic block in question.
-    BasicBlock *BB;
+  /// Represents a particular available value that we know how to materialize.
+  /// Materialization of an AvailableValue never fails.  An AvailableValue is
+  /// implicitly associated with a rematerialization point which is the
+  /// location of the instruction from which it was formed.
+  struct AvailableValue {
     enum ValType {
       SimpleVal, // A simple offsetted value that is accessed.
       LoadVal,   // A value produced by a load.
@@ -424,43 +425,35 @@ private:
     /// V - The value that is live out of the block.
     PointerIntPair<Value *, 2, ValType> Val;
 
-    /// Offset - The byte offset in Val that is interesting for the load
-    /// coercion.
+    /// Offset - The byte offset in Val that is interesting for the load query.
     unsigned Offset;
 
-    static AvailableValueInBlock get(BasicBlock *BB, Value *V,
-                                     unsigned Offset = 0) {
-      AvailableValueInBlock Res;
-      Res.BB = BB;
+    static AvailableValue get(Value *V, unsigned Offset = 0) {
+      AvailableValue Res;
       Res.Val.setPointer(V);
       Res.Val.setInt(SimpleVal);
       Res.Offset = Offset;
       return Res;
     }
 
-    static AvailableValueInBlock getMI(BasicBlock *BB, MemIntrinsic *MI,
-                                       unsigned Offset = 0) {
-      AvailableValueInBlock Res;
-      Res.BB = BB;
+    static AvailableValue getMI(MemIntrinsic *MI, unsigned Offset = 0) {
+      AvailableValue Res;
       Res.Val.setPointer(MI);
       Res.Val.setInt(MemIntrin);
       Res.Offset = Offset;
       return Res;
     }
 
-    static AvailableValueInBlock getLoad(BasicBlock *BB, LoadInst *LI,
-                                         unsigned Offset = 0) {
-      AvailableValueInBlock Res;
-      Res.BB = BB;
+    static AvailableValue getLoad(LoadInst *LI, unsigned Offset = 0) {
+      AvailableValue Res;
       Res.Val.setPointer(LI);
       Res.Val.setInt(LoadVal);
       Res.Offset = Offset;
       return Res;
     }
 
-    static AvailableValueInBlock getUndef(BasicBlock *BB) {
-      AvailableValueInBlock Res;
-      Res.BB = BB;
+    static AvailableValue getUndef() {
+      AvailableValue Res;
       Res.Val.setPointer(nullptr);
       Res.Val.setInt(UndefVal);
       Res.Offset = 0;
@@ -487,10 +480,52 @@ private:
       return cast<MemIntrinsic>(Val.getPointer());
     }
 
-    /// Emit code into this block to adjust the value defined here to the
-    /// specified type. This handles various coercion cases.
-    Value *MaterializeAdjustedValue(Instruction *I, NewGVN &) const;
+    /// Emit code at the specified insertion point to adjust the value defined
+    /// here to the specified type. This handles various coercion cases.
+    Value *MaterializeAdjustedValue(LoadInst *LI, Instruction *InsertPt,
+                                    NewGVN &gvn) const;
   };
+
+  /// Represents an AvailableValue which can be rematerialized at the end of
+  /// the associated BasicBlock.
+  struct AvailableValueInBlock {
+    /// BB - The basic block in question.
+    BasicBlock *BB;
+
+    /// AV - The actual available value
+    AvailableValue AV;
+
+    static AvailableValueInBlock get(BasicBlock *BB, AvailableValue &&AV) {
+      AvailableValueInBlock Res;
+      Res.BB = BB;
+      Res.AV = std::move(AV);
+      return Res;
+    }
+
+    static AvailableValueInBlock get(BasicBlock *BB, Value *V,
+                                     unsigned Offset = 0) {
+      return get(BB, AvailableValue::get(V, Offset));
+    }
+    static AvailableValueInBlock getMI(BasicBlock *BB, MemIntrinsic *MI,
+                                       unsigned Offset = 0) {
+      return get(BB, AvailableValue::getMI(MI, Offset));
+    }
+    static AvailableValueInBlock getLoad(BasicBlock *BB, LoadInst *LI,
+                                         unsigned Offset = 0) {
+      return get(BB, AvailableValue::getLoad(LI, Offset));
+    }
+    static AvailableValueInBlock getUndef(BasicBlock *BB) {
+      return get(BB, AvailableValue::getUndef());
+    }
+
+    /// Emit code at the end of this block to adjust the value defined here to
+    /// the specified type. This handles various coercion cases.
+    Value *MaterializeAdjustedValue(LoadInst *LI, NewGVN &gvn) const {
+      return AV.MaterializeAdjustedValue(LI, BB->getTerminator(), gvn);
+    }
+  };
+
+  // PRE
   typedef SmallVector<AvailableValueInBlock, 64> AvailValInBlkVect;
   typedef SmallVector<std::pair<BasicBlock *, const Expression *>, 64>
       UnavailBlkVect;
@@ -1141,9 +1176,69 @@ const Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
   return E;
 }
 
-const Expression *NewGVN::performSymbolicLoadCoercionFromPhi(
-    Type *LoadType, Value *LoadPtr, LoadInst *LI, 
-    MemoryPhi *DefiningPhi, const BasicBlock *B) {
+const Expression *
+NewGVN::performSymbolicLoadCoercionFromPhi(Type *LoadType, Value *LoadPtr,
+                                           LoadInst *LI, MemoryPhi *DefiningPhi,
+                                           const BasicBlock *B) {
+  if (!LoadPtr)
+    return nullptr;
+  AvailValInBlkVect ValuesPerBlock;
+  for (auto &Op : DefiningPhi->operands()) {
+    // If the block is not reachable, it's undef
+    if (!ReachableBlocks.count(Op.first)) {
+      ValuesPerBlock.push_back(AvailableValueInBlock::getUndef(Op.first));
+      continue;
+    }
+    // FIXME: We don't support phi over phi
+    if (isa<MemoryPhi>(Op.second))
+      return nullptr;
+    const MemoryDef *Def = cast<MemoryDef>(Op.second);
+    Instruction *Inst = Op.second->getMemoryInst();
+    if (!Inst)
+      return nullptr;
+    // If the dependence is to a store that writes to a superset of the bits
+    // read by the load, we can extract the bits we need for the load from the
+    // stored value.
+    if (StoreInst *DepSI = dyn_cast<StoreInst>(Inst)) {
+      int Offset = analyzeLoadFromClobberingStore(LoadType, LoadPtr, DepSI);
+      if (Offset != -1) {
+        ValuesPerBlock.push_back(AvailableValueInBlock::get(
+            Def->getBlock(), DepSI->getValueOperand(), Offset));
+        continue;
+      }
+    }
+    // Check to see if we have something like this:
+    //    load i32* P
+    //    load i8* (P+1)
+    // if we have this, replace the later with an extraction from the former.
+    if (LoadInst *DepLI = dyn_cast<LoadInst>(Inst)) {
+      // If this is a clobber and L is the first instruction in its block, then
+      // we have the first instruction in the entry block.
+      if (DepLI != LI) {
+        int Offset = analyzeLoadFromClobberingLoad(LoadType, LoadPtr, DepLI);
+
+        if (Offset != -1) {
+          ValuesPerBlock.push_back(
+              AvailableValueInBlock::getLoad(Def->getBlock(), DepLI, Offset));
+          continue;
+        }
+      }
+    }
+    // If the clobbering value is a memset/memcpy/memmove, see if we can
+    // forward a value on from it.
+    if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Inst)) {
+      int Offset = analyzeLoadFromClobberingMemInst(LoadType, LoadPtr, DepMI);
+      if (Offset != -1) {
+        Value *PossibleConstant =
+            getMemInstValueForLoad(DepMI, Offset, LoadType, LI, true);
+        ValuesPerBlock.push_back(
+            AvailableValueInBlock::getMI(Def->getBlock(), DepMI, Offset));
+        continue;
+      }
+    }
+    return nullptr;
+  }
+  assert(ValuesPerBlock.size() == DefiningPhi->getNumIncomingValues());
   return nullptr;
 }
 
@@ -2933,7 +3028,8 @@ Value *NewGVN::getLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
 /// GetMemInstValueForLoad - This function is called when we have a
 /// memdep query of a load that ends up being a clobbering mem intrinsic.
 Value *NewGVN::getMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
-                                      Type *LoadTy, Instruction *InsertPt) {
+                                      Type *LoadTy, Instruction *InsertPt,
+                                      bool NoNewInst) {
 
   LLVMContext &Ctx = LoadTy->getContext();
   uint64_t LoadSize = DL->getTypeSizeInBits(LoadTy) / 8;
@@ -2947,6 +3043,8 @@ Value *NewGVN::getMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
     // independently of what the offset is.
     Value *Val = MSI->getValue();
     if (LoadSize != 1) {
+      if (NoNewInst)
+        return nullptr;
       Val = Builder.CreateZExt(Val, IntegerType::get(Ctx, LoadSize * 8));
       if (Instruction *I = dyn_cast<Instruction>(Val))
         handleNewInstruction(I);
@@ -2956,6 +3054,9 @@ Value *NewGVN::getMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
 
     // Splat the value out to the right number of bits.
     for (unsigned NumBytesSet = 1; NumBytesSet != LoadSize;) {
+      if (NoNewInst)
+        return nullptr;
+
       // If we can double the number of bytes set, do it.
       if (NumBytesSet * 2 <= LoadSize) {
         Value *ShVal = Builder.CreateShl(Val, NumBytesSet * 8);
@@ -3285,6 +3386,46 @@ bool NewGVN::eliminateInstructions(Function &F) {
   return AnythingReplaced;
 }
 
+Value *NewGVN::AvailableValue::MaterializeAdjustedValue(LoadInst *LI,
+                                                        Instruction *InsertPt,
+                                                        NewGVN &gvn) const {
+  Value *Res;
+  Type *LoadTy = LI->getType();
+
+  if (isSimpleValue()) {
+    Res = getSimpleValue();
+    if (Res->getType() != LoadTy) {
+      Res = gvn.getStoreValueForLoad(Res, Offset, LoadTy, InsertPt);
+
+      DEBUG(dbgs() << "GVN COERCED NONLOCAL VAL:\nOffset: " << Offset << "  "
+                   << *getSimpleValue() << '\n' << *Res << '\n' << "\n\n\n");
+    }
+  } else if (isCoercedLoadValue()) {
+    LoadInst *Load = getCoercedLoadValue();
+    if (Load->getType() == LoadTy && Offset == 0) {
+      Res = Load;
+    } else {
+      Res = gvn.getLoadValueForLoad(Load, Offset, LoadTy, InsertPt);
+
+      DEBUG(dbgs() << "GVN COERCED NONLOCAL LOAD:\nOffset: " << Offset << "  "
+                   << *getCoercedLoadValue() << '\n' << *Res << '\n'
+                   << "\n\n\n");
+    }
+  } else if (isMemIntrinValue()) {
+    Res = gvn.getMemInstValueForLoad(getMemIntrinValue(), Offset, LoadTy,
+                                     InsertPt);
+    DEBUG(dbgs() << "GVN COERCED NONLOCAL MEM INTRIN:\nOffset: " << Offset
+                 << "  " << *getMemIntrinValue() << '\n' << *Res << '\n'
+                 << "\n\n\n");
+  } else {
+    assert(isUndefValue() && "Should be UndefVal");
+    DEBUG(dbgs() << "GVN COERCED NONLOCAL Undef:\n";);
+    return UndefValue::get(LoadTy);
+  }
+  assert(Res && "failed to materialize?");
+  return Res;
+}
+#if 0
 Value *
 NewGVN::AvailableValueInBlock::MaterializeAdjustedValue(Instruction *I,
                                                         NewGVN &gvn) const {
@@ -3332,15 +3473,16 @@ NewGVN::AvailableValueInBlock::MaterializeAdjustedValue(Instruction *I,
   }
   return Res;
 }
-
+#endif
 Value *NewGVN::constructSSAForSet(
     Instruction *I, SmallVectorImpl<AvailableValueInBlock> &ValuesPerBlock) {
   // Check for the fully redundant, dominating load case.  In this case, we can
   // just use the dominating value directly.
   if (ValuesPerBlock.size() == 1 &&
       DT->properlyDominates(ValuesPerBlock[0].BB, I->getParent())) {
-    assert(!ValuesPerBlock[0].isUndefValue() && "Dead BB dominate this block");
-    return ValuesPerBlock[0].MaterializeAdjustedValue(I, *this);
+    assert(!ValuesPerBlock[0].AV.isUndefValue() &&
+           "Dead BB dominate this block");
+    return ValuesPerBlock[0].MaterializeAdjustedValue(cast<LoadInst>(I), *this);
   }
   // Otherwise, we have to construct SSA form.
   SmallVector<PHINode *, 8> NewPHIs;
@@ -3354,7 +3496,8 @@ Value *NewGVN::constructSSAForSet(
     if (SSAUpdate.HasValueForBlock(BB))
       continue;
 
-    SSAUpdate.AddAvailableValue(BB, AV.MaterializeAdjustedValue(I, *this));
+    SSAUpdate.AddAvailableValue(
+        BB, AV.MaterializeAdjustedValue(cast<LoadInst>(I), *this));
   }
 
   // Perform PHI construction.
