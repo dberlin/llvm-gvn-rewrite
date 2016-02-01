@@ -338,6 +338,9 @@ private:
   const Expression *checkSimplificationResults(Expression *, Instruction *,
                                                Value *);
   const Expression *performSymbolicEvaluation(Value *, const BasicBlock *);
+  const Expression *
+  performSymbolicLoadCoercionFromPhi(Type *, Value *, LoadInst *, 
+                                     MemoryPhi *, const BasicBlock *);
   const Expression *performSymbolicLoadCoercion(Type *, Value *, LoadInst *,
                                                 Instruction *, MemoryAccess *,
                                                 const BasicBlock *);
@@ -789,8 +792,7 @@ const Expression *NewGVN::createExpression(Instruction *I,
     for (Value *Arg : E->operands())
       C.emplace_back(cast<Constant>(Arg));
 
-    Value *V =
-        ConstantFoldInstOperands(I, C, *DL, TLI);
+    Value *V = ConstantFoldInstOperands(I, C, *DL, TLI);
     if (V) {
       if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
         return SimplifiedE;
@@ -1139,6 +1141,12 @@ const Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
   return E;
 }
 
+const Expression *NewGVN::performSymbolicLoadCoercionFromPhi(
+    Type *LoadType, Value *LoadPtr, LoadInst *LI, 
+    MemoryPhi *DefiningPhi, const BasicBlock *B) {
+  return nullptr;
+}
+
 const Expression *NewGVN::performSymbolicLoadCoercion(
     Type *LoadType, Value *LoadPtr, LoadInst *LI, Instruction *DepInst,
     MemoryAccess *DefiningAccess, const BasicBlock *B) {
@@ -1219,6 +1227,11 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
       const Expression *CoercionResult =
           performSymbolicLoadCoercion(LI->getType(), LI->getPointerOperand(),
                                       LI, DefiningInst, DefiningAccess, B);
+      if (CoercionResult)
+        return CoercionResult;
+    } else if (MemoryPhi *MP = dyn_cast<MemoryPhi>(DefiningAccess)) {
+      const Expression *CoercionResult = performSymbolicLoadCoercionFromPhi(
+          LI->getType(), LI->getPointerOperand(), LI, MP, B);
       if (CoercionResult)
         return CoercionResult;
     }
@@ -3235,7 +3248,8 @@ bool NewGVN::eliminateInstructions(Function &F) {
 
           // If we replaced something in an instruction, handle the patching of
           // metadata
-          if (Instruction *ReplacedInst = dyn_cast<Instruction>(MemberUse->get()))
+          if (Instruction *ReplacedInst =
+                  dyn_cast<Instruction>(MemberUse->get()))
             patchReplacementInstruction(ReplacedInst, Result);
 
           assert(isa<Instruction>(MemberUse->getUser()));
