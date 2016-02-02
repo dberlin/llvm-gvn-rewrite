@@ -195,6 +195,9 @@ public:
   MemoryAccess *getDefiningAccess() const { return getOperand(0); }
 
   static inline bool classof(const MemoryUseOrDef *) { return true; }
+  static inline bool classof(const Value *V) {
+    return V->getValueID() == MemoryUseVal || V->getValueID() == MemoryDefVal;
+  }
   static inline bool classof(const MemoryAccess *MA) {
     return MA->getValueID() == MemoryUseVal || MA->getValueID() == MemoryDefVal;
   }
@@ -236,6 +239,9 @@ public:
       : MemoryUseOrDef(C, DMA, MemoryUseVal, MI, BB) {}
 
   static inline bool classof(const MemoryUse *) { return true; }
+  static inline bool classof(const Value *V) {
+    return V->getValueID() == MemoryUseVal;
+  }
   static inline bool classof(const MemoryAccess *MA) {
     return MA->getValueID() == MemoryUseVal;
   }
@@ -276,6 +282,9 @@ public:
       : MemoryUseOrDef(C, DMA, MemoryDefVal, MI, BB), ID(Ver) {}
 
   static inline bool classof(const MemoryDef *) { return true; }
+  static inline bool classof(const Value *V) {
+    return V->getValueID() == MemoryDefVal;
+  }
   static inline bool classof(const MemoryAccess *MA) {
     return MA->getValueID() == MemoryDefVal;
   }
@@ -428,11 +437,11 @@ public:
     return getIncomingValue(Idx);
   }
 
+  static inline bool classof(const MemoryPhi *) { return true; }
   static inline bool classof(const Value *V) {
     return V->getValueID() == MemoryPhiVal;
   }
 
-  static inline bool classof(const MemoryPhi *) { return true; }
   static inline bool classof(const MemoryAccess *MA) {
     return MA->getValueID() == MemoryPhiVal;
   }
