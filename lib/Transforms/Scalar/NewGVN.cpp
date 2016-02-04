@@ -1335,7 +1335,7 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
     MemoryAccess *LoadAccess = MSSA->getMemoryAccess(LI);
     // Okay, so uh, we couldn't use the defining access to grab a value out of
     // See if we can reuse any of it's uses by widening a load.
-    for (const MemoryAccess *MA : DefiningAccess->users()) {
+    for (const MemoryAccess *MA : DefiningAccess->uses()) {
       if (MA == LoadAccess)
         continue;
       if (isa<MemoryPhi>(MA))
