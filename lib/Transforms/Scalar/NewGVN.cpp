@@ -1184,16 +1184,17 @@ NewGVN::performSymbolicLoadCoercionFromPhi(Type *LoadType, Value *LoadPtr,
     return nullptr;
   AvailValInBlkVect ValuesPerBlock;
   for (auto &Op : DefiningPhi->operands()) {
+    BasicBlock *IncomingBlock = DefiningPhi->getIncomingBlock(Op);
     // If the block is not reachable, it's undef
-    if (!ReachableBlocks.count(Op.first)) {
-      ValuesPerBlock.push_back(AvailableValueInBlock::getUndef(Op.first));
+    if (!ReachableBlocks.count(IncomingBlock)) {
+      ValuesPerBlock.push_back(AvailableValueInBlock::getUndef(IncomingBlock));
       continue;
     }
     // FIXME: We don't support phi over phi
-    if (isa<MemoryPhi>(Op.second))
+    if (isa<MemoryPhi>(Op))
       return nullptr;
-    const MemoryDef *Def = cast<MemoryDef>(Op.second);
-    Instruction *Inst = Op.second->getMemoryInst();
+    const MemoryDef *Def = cast<MemoryDef>(Op);
+    Instruction *Inst = Def->getMemoryInst();
     if (!Inst)
       return nullptr;
     // If the dependence is to a store that writes to a superset of the bits
@@ -1335,12 +1336,13 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
     MemoryAccess *LoadAccess = MSSA->getMemoryAccess(LI);
     // Okay, so uh, we couldn't use the defining access to grab a value out of
     // See if we can reuse any of it's uses by widening a load.
-    for (const MemoryAccess *MA : DefiningAccess->uses()) {
+    for (const auto &U  : DefiningAccess->uses()) {
+      MemoryAccess *MA = cast<MemoryAccess>(U);
       if (MA == LoadAccess)
         continue;
       if (isa<MemoryPhi>(MA))
         continue;
-      Instruction *DefiningInst = MA->getMemoryInst();
+      Instruction *DefiningInst = cast<MemoryUseOrDef>(MA)->getMemoryInst();
       if (LoadInst *DepLI = dyn_cast<LoadInst>(DefiningInst)) {
         BasicBlock *DefiningBlock = DefiningInst->getParent();
         if (!DT->dominates(DefiningBlock, LoadBlock))
@@ -3532,7 +3534,8 @@ void NewGVN::valueNumberNewInstruction(Value *V) {
 }
 
 Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
-  Value *V = findPRELeader(E, BB, nullptr);
+#if FIXME
+    Value *V = findPRELeader(E, BB, nullptr);
   if (V)
     return V;
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
@@ -3585,6 +3588,8 @@ Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
       llvm_unreachable("What!");
   }
   llvm_unreachable("What!");
+#endif
+  return nullptr;
 }
 
 bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
@@ -3855,9 +3860,9 @@ Value *NewGVN::findPRELeader(const Expression *E, const BasicBlock *BB,
 MemoryAccess *NewGVN::phiTranslateMemoryAccess(MemoryAccess *MA,
                                                const BasicBlock *Pred) {
   if (MemoryPhi *MP = dyn_cast<MemoryPhi>(MA)) {
-    for (auto A : MP->operands()) {
-      if (A.first == Pred) {
-        return A.second;
+    for (const auto &A : MP->operands()) {
+      if (MP->getIncomingBlock(A) == Pred) {
+        return cast<MemoryAccess>(A);
       }
     }
     // We should have found something
@@ -3973,11 +3978,11 @@ const Expression *NewGVN::trySimplifyPREExpression(const Expression *E,
   const Expression *ResultExpr = E;
   // This must come first, because LoadExpression's are BasicExpressions
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
-    MemoryAccess *MA = LE->getDefiningAccess();
-    if (isa<MemoryDef>(MA) && !MSSA->isLiveOnEntryDef(MA)) {
+    MemoryDef *MD = dyn_cast<MemoryDef>(LE->getDefiningAccess());
+    if (MD && !MSSA->isLiveOnEntryDef(MD)) {
       const Expression *Temp = performSymbolicLoadCoercion(
           LE->getType(), LE->getOperand(0), LE->getLoadInst(),
-          MA->getMemoryInst(), MA, B);
+          MD->getMemoryInst(), MD, B);
       if (Temp)
         ResultExpr = Temp;
     }
