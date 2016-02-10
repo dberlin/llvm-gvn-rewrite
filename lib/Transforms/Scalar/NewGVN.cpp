@@ -1336,7 +1336,7 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
     MemoryAccess *LoadAccess = MSSA->getMemoryAccess(LI);
     // Okay, so uh, we couldn't use the defining access to grab a value out of
     // See if we can reuse any of it's uses by widening a load.
-    for (const auto &U  : DefiningAccess->uses()) {
+    for (const auto &U  : DefiningAccess->users()) {
       MemoryAccess *MA = cast<MemoryAccess>(U);
       if (MA == LoadAccess)
         continue;
@@ -1580,7 +1580,6 @@ void NewGVN::markDominatedSingleUserEquivalences(CongruenceClass *CC,
   // normally had multiple case values that go to the same block.  Because the
   // dominators API asserts isSingleEdge, we have to special case this, since we
   // know isSingleEdge doesn't matter.
-
   for (const auto &U : From->uses()) {
     bool Dominates = false;
     if (MultipleEdgesOneReachable) {
@@ -1728,7 +1727,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
     assert(CC && "Should have found a congruence class");
     CC->equivalences.emplace_back(RHS, Root, !RootDominatesEnd);
 
-    if (!RootDominatesEnd)
+    if (RootDominatesEnd)
       markDominatedSingleUserEquivalences(CC, LHS, RHS,
                                           MultipleEdgesOneReachable, Root);
     // Replace all occurrences of 'LHS' with 'RHS' everywhere in the
