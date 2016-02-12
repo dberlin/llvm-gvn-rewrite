@@ -1336,7 +1336,7 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
     MemoryAccess *LoadAccess = MSSA->getMemoryAccess(LI);
     // Okay, so uh, we couldn't use the defining access to grab a value out of
     // See if we can reuse any of it's uses by widening a load.
-    for (const auto &U  : DefiningAccess->users()) {
+    for (const auto &U : DefiningAccess->users()) {
       MemoryAccess *MA = cast<MemoryAccess>(U);
       if (MA == LoadAccess)
         continue;
@@ -3534,7 +3534,7 @@ void NewGVN::valueNumberNewInstruction(Value *V) {
 
 Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
 #if FIXME
-    Value *V = findPRELeader(E, BB, nullptr);
+  Value *V = findPRELeader(E, BB, nullptr);
   if (V)
     return V;
   if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
