@@ -2699,11 +2699,26 @@ void NewGVN::deleteInstructionsInBlock(BasicBlock *BB) {
   if (isa<TerminatorInst>(BB->begin()))
     return;
 
-  // Delete the instructions backwards, as it has a reduced likelihood of
-  // having
+  // Delete the instructions backwards, as it has a reduced likelihood of having
+  // to update as many def-use and use-def chains.
+  // Start after the terminator
+  auto StartPoint = BB->rbegin();
+  ++StartPoint;
+  for (BasicBlock::reverse_iterator I(StartPoint), E = BB->rend(); I != E;
+       ++I) {
+    Instruction &Inst = *I;
+    if (!Inst.use_empty())
+      Inst.replaceAllUsesWith(UndefValue::get(Inst.getType()));
+    if (isa<LandingPadInst>(Inst))
+      continue;
+    I = BasicBlock::reverse_iterator(Inst.eraseFromParent());
+    ++NumGVNInstrDeleted;
+  }
+#if 0
+  // Delete the instructions backwards, as it has a reduced likelihood of having
   // to update as many def-use and use-def chains.
   Instruction *EndInst = BB->getTerminator(); // Last not to be deleted.
-  while (EndInst != BB->begin()) {
+  while (BasicBlock::iterator(EndInst) != BB->begin()) {
     // Delete the next to last instruction.
     BasicBlock::iterator I = EndInst->getIterator();
     Instruction *Inst = &*--I;
@@ -2713,9 +2728,11 @@ void NewGVN::deleteInstructionsInBlock(BasicBlock *BB) {
       EndInst = Inst;
       continue;
     }
+    Inst->eraseFromParent();
     BB->getInstList().erase(Inst);
     ++NumGVNInstrDeleted;
   }
+#endif
 }
 
 void NewGVN::markInstructionForDeletion(Instruction *I) {
