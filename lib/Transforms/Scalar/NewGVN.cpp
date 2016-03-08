@@ -2718,7 +2718,7 @@ void NewGVN::deleteInstructionsInBlock(BasicBlock *BB) {
   // Delete the instructions backwards, as it has a reduced likelihood of having
   // to update as many def-use and use-def chains.
   Instruction *EndInst = BB->getTerminator(); // Last not to be deleted.
-  while (BasicBlock::iterator(EndInst) != BB->begin()) {
+  while (EndInst->getIterator() != BB->begin()) {
     // Delete the next to last instruction.
     BasicBlock::iterator I = EndInst->getIterator();
     Instruction *Inst = &*--I;
@@ -2991,7 +2991,7 @@ Value *NewGVN::getLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
     // Insert the new load after the old load.  This ensures that subsequent
     // memdep queries will find the new load.  We can't easily remove the old
     // load completely because it is already in the value numbering table.
-    IRBuilder<> Builder(SrcVal->getParent(), ++BasicBlock::iterator(SrcVal));
+    IRBuilder<> Builder(SrcVal->getParent(), ++(SrcVal->getIterator()));
     Type *DestPTy = IntegerType::get(LoadTy->getContext(), NewLoadSize * 8);
     DestPTy =
         PointerType::get(DestPTy, PtrVal->getType()->getPointerAddressSpace());
