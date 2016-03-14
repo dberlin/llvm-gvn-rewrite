@@ -58,9 +58,7 @@ void llvm::initializeAnalysis(PassRegistry &Registry) {
   initializeLoopInfoWrapperPassPass(Registry);
   initializeMemDepPrinterPass(Registry);
   initializeMemDerefPrinterPass(Registry);
-  initializeMemoryDependenceAnalysisPass(Registry);
-  initializeMemorySSALazyPass(Registry);
-  initializeMemorySSAPrinterPassPass(Registry);
+  initializeMemoryDependenceWrapperPassPass(Registry);
   initializeModuleDebugInfoPrinterPass(Registry);
   initializeObjCARCAAWrapperPassPass(Registry);
   initializePostDominatorTreeWrapperPassPass(Registry);

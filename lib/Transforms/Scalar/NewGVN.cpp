@@ -169,7 +169,7 @@ struct CongruenceClass {
 };
 
 class NewGVN : public FunctionPass {
-  MemoryDependenceAnalysis *MD;
+  MemoryDependenceResults *MD;
   DominatorTree *DT;
   const DataLayout *DL;
   const TargetLibraryInfo *TLI;
@@ -287,7 +287,6 @@ private:
     AU.addRequired<MemorySSALazy>();
     AU.addRequired<AAResultsWrapperPass>();
 
-    AU.addPreserved<MemoryDependenceAnalysis>();
     AU.addPreserved<DominatorTreeWrapperPass>();
     AU.addPreserved<GlobalsAAWrapperPass>();
   }
@@ -1113,7 +1112,7 @@ int NewGVN::analyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
       GetPointerBaseWithConstantOffset(LoadPtr, LoadOffs, *DL);
   unsigned LoadSize = DL->getTypeStoreSize(LoadTy);
 
-  unsigned Size = MemoryDependenceAnalysis::getLoadLoadClobberFullWidthSize(
+  unsigned Size = MemoryDependenceResults::getLoadLoadClobberFullWidthSize(
       LoadBase, LoadOffs, LoadSize, DepLI);
   if (Size == 0)
     return -1;
@@ -2319,7 +2318,6 @@ bool NewGVN::runOnFunction(Function &F) {
   if (skipOptnoneFunction(F))
     return false;
 
-  MD = getAnalysisIfAvailable<MemoryDependenceAnalysis>();
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   DL = &F.getParent()->getDataLayout();
   AC = &getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
