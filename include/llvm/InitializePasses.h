@@ -237,6 +237,7 @@ void initializeModuleDebugInfoPrinterPass(PassRegistry&);
 void initializeModuleSummaryIndexWrapperPassPass(PassRegistry &);
 void initializeNameAnonFunctionPass(PassRegistry &);
 void initializeNaryReassociatePass(PassRegistry&);
+void initializeNewGVNPass(PassRegistry&);
 void initializeNoAAPass(PassRegistry&);
 void initializeObjCARCAAWrapperPassPass(PassRegistry&);
 void initializeObjCARCAPElimPass(PassRegistry&);
