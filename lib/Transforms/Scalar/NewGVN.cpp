@@ -285,7 +285,7 @@ private:
     AU.addRequired<AssumptionCacheTracker>();
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<TargetLibraryInfoWrapperPass>();
-    AU.addRequired<MemorySSALazy>();
+    AU.addRequired<MemorySSAWrapperPass>();
     AU.addRequired<AAResultsWrapperPass>();
 
     AU.addPreserved<DominatorTreeWrapperPass>();
@@ -575,7 +575,7 @@ static std::string getBlockName(const BasicBlockEdge &B) {
 #endif
 INITIALIZE_PASS_BEGIN(NewGVN, "newgvn", "Global Value Numbering", false, false)
 INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
-INITIALIZE_PASS_DEPENDENCY(MemorySSALazy)
+INITIALIZE_PASS_DEPENDENCY(MemorySSAWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
@@ -2326,8 +2326,8 @@ bool NewGVN::runOnFunction(Function &F) {
   AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
 
   //  SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(AA, DT));
-  MSSA = &getAnalysis<MemorySSALazy>().getMSSA();
-  MSSAWalker = MSSA->buildMemorySSA(AA, DT);
+  MSSA = &getAnalysis<MemorySSAWrapperPass>().getMSSA();
+  MSSAWalker = MSSA->getWalker();
 
   unsigned ICount = 0;
   // Count number of instructions for sizing of hash tables, and come
