@@ -15,7 +15,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Transforms/Scalar.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -40,6 +39,7 @@
 #include "llvm/Analysis/MemoryDependenceAnalysis.h"
 #include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/PHITransAddr.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Dominators.h"
@@ -54,15 +54,15 @@
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/GVNExpression.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/MemorySSA.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
-#include <vector>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 using namespace llvm;
 using namespace PatternMatch;
 using namespace llvm::GVNExpression;
@@ -219,11 +219,13 @@ class NewGVN : public FunctionPass {
   // users in the program for, yet. If we later see a user, we will add these to
   // it's equivalences
   std::unordered_multimap<const Expression *, Equivalence, hash_expression,
-                          expression_equal_to> PendingEquivalences;
+                          expression_equal_to>
+      PendingEquivalences;
 
   // Expression to class mapping
   typedef DenseMap<const Expression *, CongruenceClass *,
-                   ComparingExpressionInfo> ExpressionClassMap;
+                   ComparingExpressionInfo>
+      ExpressionClassMap;
   ExpressionClassMap ExpressionToClass;
 
   SmallPtrSet<Value *, 8> ChangedValues;
@@ -3419,7 +3421,9 @@ Value *NewGVN::AvailableValue::MaterializeAdjustedValue(LoadInst *LI,
       Res = gvn.getStoreValueForLoad(Res, Offset, LoadTy, InsertPt);
 
       DEBUG(dbgs() << "GVN COERCED NONLOCAL VAL:\nOffset: " << Offset << "  "
-                   << *getSimpleValue() << '\n' << *Res << '\n' << "\n\n\n");
+                   << *getSimpleValue() << '\n'
+                   << *Res << '\n'
+                   << "\n\n\n");
     }
   } else if (isCoercedLoadValue()) {
     LoadInst *Load = getCoercedLoadValue();
@@ -3429,14 +3433,16 @@ Value *NewGVN::AvailableValue::MaterializeAdjustedValue(LoadInst *LI,
       Res = gvn.getLoadValueForLoad(Load, Offset, LoadTy, InsertPt);
 
       DEBUG(dbgs() << "GVN COERCED NONLOCAL LOAD:\nOffset: " << Offset << "  "
-                   << *getCoercedLoadValue() << '\n' << *Res << '\n'
+                   << *getCoercedLoadValue() << '\n'
+                   << *Res << '\n'
                    << "\n\n\n");
     }
   } else if (isMemIntrinValue()) {
     Res = gvn.getMemInstValueForLoad(getMemIntrinValue(), Offset, LoadTy,
                                      InsertPt);
     DEBUG(dbgs() << "GVN COERCED NONLOCAL MEM INTRIN:\nOffset: " << Offset
-                 << "  " << *getMemIntrinValue() << '\n' << *Res << '\n'
+                 << "  " << *getMemIntrinValue() << '\n'
+                 << *Res << '\n'
                  << "\n\n\n");
   } else {
     assert(isUndefValue() && "Should be UndefVal");
