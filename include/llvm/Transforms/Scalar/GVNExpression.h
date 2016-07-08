@@ -84,7 +84,7 @@ public:
     return equals(Other);
   }
   bool usedEquivalence() const { return UsedEquivalence; }
-  void setUsedEquivalence(bool V) { UsedEquivalence = V; }
+  void setUsedInference(bool V) { UsedEquivalence = V; }
 
   virtual bool equals(const Expression &other) const { return true; }
 

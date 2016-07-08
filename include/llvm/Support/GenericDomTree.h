@@ -234,7 +234,7 @@ template <class NodeT> class DominatorTreeBase : public DominatorBase<NodeT> {
   }
 
 protected:
-  typedef DenseMap<NodeT *, std::unique_ptr<DomTreeNodeBase<NodeT>>>
+  typedef DenseMap<const NodeT *, std::unique_ptr<DomTreeNodeBase<NodeT>>>
       DomTreeNodeMapType;
   DomTreeNodeMapType DomTreeNodes;
   DomTreeNodeBase<NodeT> *RootNode;
@@ -371,7 +371,7 @@ public:
       return true;
 
     for (const auto &DomTreeNode : this->DomTreeNodes) {
-      NodeT *BB = DomTreeNode.first;
+      const NodeT *BB = DomTreeNode.first;
       typename DomTreeNodeMapType::const_iterator OI =
           OtherDomTreeNodes.find(BB);
       if (OI == OtherDomTreeNodes.end())
@@ -393,7 +393,7 @@ public:
   /// block.  This is the same as using operator[] on this class.  The result
   /// may (but is not required to) be null for a forward (backwards)
   /// statically unreachable block.
-  DomTreeNodeBase<NodeT> *getNode(NodeT *BB) const {
+  DomTreeNodeBase<NodeT> *getNode(const NodeT *BB) const {
     auto I = DomTreeNodes.find(BB);
     if (I != DomTreeNodes.end())
       return I->second.get();
