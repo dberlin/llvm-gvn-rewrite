@@ -1,3 +1,4 @@
+; RUN: opt -basicaa -newgvn -S %s | FileCheck %s
 ; RUN: opt -basicaa -gvn -S %s | FileCheck %s
 
 %MyStruct = type { i32, i32 }

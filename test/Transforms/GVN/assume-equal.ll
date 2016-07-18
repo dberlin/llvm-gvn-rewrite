@@ -1,3 +1,4 @@
+; RUN: opt < %s -newgvn -S | FileCheck %s
 ; RUN: opt < %s -gvn -S | FileCheck %s
 
 %struct.A = type { i32 (...)** }

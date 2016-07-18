@@ -1,3 +1,4 @@
+; RUN: opt < %s -basicaa -newgvn -S | FileCheck %s
 ; RUN: opt < %s -basicaa -gvn -S | FileCheck %s
 
 @a = external global i32		; <i32*> [#uses=7]

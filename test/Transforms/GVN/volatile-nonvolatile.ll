@@ -1,3 +1,4 @@
+; RUN: opt -tbaa -newgvn -S < %s | FileCheck %s
 ; RUN: opt -tbaa -gvn -S < %s | FileCheck %s
 
 %struct.t = type { i32* }

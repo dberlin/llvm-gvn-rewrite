@@ -1,3 +1,4 @@
+; RUN: opt -tbaa -basicaa -newgvn -S < %s | FileCheck %s
 ; RUN: opt -tbaa -basicaa -gvn -S < %s | FileCheck %s
 
 define i32 @test1(i8* %p, i8* %q) {

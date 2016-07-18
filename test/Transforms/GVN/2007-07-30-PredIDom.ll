@@ -1,3 +1,4 @@
+; RUN: opt < %s -newgvn | llvm-dis
 ; RUN: opt < %s -gvn | llvm-dis
 
 	%"struct.Block::$_16" = type { i32 }

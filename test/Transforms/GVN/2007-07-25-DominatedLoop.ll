@@ -1,3 +1,4 @@
+; RUN: opt < %s -newgvn | llvm-dis
 ; RUN: opt < %s -gvn | llvm-dis
 
 	%struct.PerlInterpreter = type { i8 }

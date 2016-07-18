@@ -1,3 +1,4 @@
+; RUN: opt -S -basicaa -newgvn < %s | FileCheck %s
 ; RUN: opt -S -basicaa -gvn < %s | FileCheck %s
 
 ; We can value forward across the fence since we can (semantically) 

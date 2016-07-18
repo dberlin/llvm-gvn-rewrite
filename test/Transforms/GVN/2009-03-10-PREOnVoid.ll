@@ -1,3 +1,4 @@
+; RUN: opt < %s -newgvn -disable-output
 ; RUN: opt < %s -gvn -disable-output
 ; PR3775
 

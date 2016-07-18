@@ -1,3 +1,4 @@
+; RUN: opt < %s -basicaa -newgvn -S | FileCheck %s
 ; RUN: opt < %s -basicaa -gvn -S | FileCheck %s
 ; Should delete the second call to strlen even though the intervening strchr call exists.
 

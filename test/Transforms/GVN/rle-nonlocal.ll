@@ -1,3 +1,4 @@
+; RUN: opt < %s -basicaa -newgvn -S | FileCheck %s
 ; RUN: opt < %s -basicaa -gvn -S | FileCheck %s
 
 define i32 @main(i32** %p, i32 %x, i32 %y) {

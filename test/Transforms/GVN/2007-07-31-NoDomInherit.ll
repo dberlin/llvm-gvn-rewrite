@@ -1,3 +1,4 @@
+; RUN: opt < %s -basicaa -newgvn -S | FileCheck %s
 ; RUN: opt < %s -basicaa -gvn -S | FileCheck %s
 
 	%struct.anon = type { i32 (i32, i32, i32)*, i32, i32, [3 x i32], i8*, i8*, i8* }

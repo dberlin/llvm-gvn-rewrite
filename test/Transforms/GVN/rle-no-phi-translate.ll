@@ -1,3 +1,4 @@
+; RUN: opt < %s -newgvn -S | FileCheck %s
 ; RUN: opt < %s -gvn -S | FileCheck %s
 ; XFAIL: *
 ; FIXME: This should be promotable, but memdep/gvn don't track values

@@ -1,5 +1,6 @@
 ; Test to make sure malloc's bitcast does not block detection of a store 
 ; to aliased memory; GVN should not optimize away the load in this program.
+; RUN: opt < %s -newgvn -S | FileCheck %s
 ; RUN: opt < %s -gvn -S | FileCheck %s
 
 define i64 @test() {

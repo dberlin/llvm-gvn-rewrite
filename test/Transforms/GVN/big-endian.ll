@@ -1,3 +1,4 @@
+; RUN: opt -newgvn -S < %s | FileCheck %s
 ; RUN: opt -gvn -S < %s | FileCheck %s
 
 target datalayout = "E-m:e-i64:64-n32:64"                                                                                         

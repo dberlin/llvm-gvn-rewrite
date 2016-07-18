@@ -1,4 +1,6 @@
+; RUN: opt -S -basicaa -newgvn < %s | FileCheck %s
 ; RUN: opt -S -basicaa -gvn < %s | FileCheck %s
+; RUN: opt -S -basicaa -newgvn -disable-simplify-libcalls < %s | FileCheck %s -check-prefix=CHECK_NO_LIBCALLS
 ; RUN: opt -S -basicaa -gvn -disable-simplify-libcalls < %s | FileCheck %s -check-prefix=CHECK_NO_LIBCALLS
 ; Check that loads from calloc are recognized as being zero.
 

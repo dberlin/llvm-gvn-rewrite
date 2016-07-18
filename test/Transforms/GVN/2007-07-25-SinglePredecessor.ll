@@ -1,3 +1,4 @@
+; RUN: opt < %s -newgvn | llvm-dis
 ; RUN: opt < %s -gvn | llvm-dis
 
 	%struct.ggBRDF = type { i32 (...)** }

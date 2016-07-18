@@ -3,6 +3,7 @@
 ; expressions. As a result, the compilation never fisished.
 ; This test checks that we are folding constant expression
 ; PR 28418
+; RUN: opt -newgvn -S < %s | FileCheck %s
 ; RUN: opt -gvn -S < %s | FileCheck %s
 
 %2 = type { i32, i32, i32, i32, i32 }

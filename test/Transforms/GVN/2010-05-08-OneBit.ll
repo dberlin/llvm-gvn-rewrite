@@ -1,3 +1,4 @@
+; RUN: opt < %s -newgvn
 ; RUN: opt < %s -gvn
 ; PR7052
 
