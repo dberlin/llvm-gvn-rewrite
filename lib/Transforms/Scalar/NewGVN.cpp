@@ -92,25 +92,15 @@ static cl::opt<uint32_t>
 //                                GVN Pass
 //===----------------------------------------------------------------------===//
 
-// Congruence classes represent the set of expressions/instructions
-// that are all the same *during some scope in the function*.
-// It is very slightly flow-sensitive.
-// That is, because of the way we perform equality propagation, and
-// because of memory value numbering,  it is not correct to assume
-// you can willy-nilly replace any member with any other at any
-// point in the function.
-// For any tuple (Value, BB) in the members set, it is correct to
-// assume the congruence class is represented by Value in all blocks
-// dominated by BB
-
-// Every congruence class has a leader, and the leader is used to
-// symbolize instructions in a canonical way (IE every operand of an
-// instruction that is a member of the same congruence class will
-// always be replaced with leader during symbolization).
-// Each congruence class also has a defining expression,
-// though the expression may be null.
-// FIXME: It's not clear what use the defining expression is if you
-// just use constants/etc as leaders
+// This represents a single equivalence found by equality propagation, for a
+// single congruence class.
+// That is, this is a thing the congruence class is also equivalent to when the
+// member of the congruence class is dominated by either Edge.getEnd() (if EOnly
+// is false) or Edge (if EOnly is true).
+//
+// For a concrete example, an Equivalence of {"constant int 0", "{block 0, block
+// 1}", false}, means that any member of the congruence class is equal to
+// constant int 0 if the member is dominated by block 1.
 
 struct Equivalence {
   Value *Val;
@@ -123,50 +113,71 @@ struct Equivalence {
 // These are equivalences that are valid for a single user.  This happens when
 // we know particular edge equivalences are valid for some users, but can't
 // prove they are valid for all users.
+// Because we don't have control regions, when we have
+// equivalences along edges to blocks with multiple predecessors, we can't add
+// them to the general equivalences list, because they don't dominate a given
+// root, but instead, they really represent something valid in certain control
+// regions of the program, a concept that is not really expressible using the
+// a standard dominator (and not postdominator) tree.
 struct SingleUserEquivalence {
   User *U;
   unsigned OperandNo;
   Value *Replacement;
 };
 
+// Congruence classes represent the set of expressions/instructions
+// that are all the same *during some scope in the function*.
+// That is, because of the way we perform equality propagation, and
+// because of memory value numbering, it is not correct to assume
+// you can willy-nilly replace any member with any other at any
+// point in the function.
+//
+// For any Value in the Member set, it is valid to replace any dominated member
+// with that Value.
+//
+// Every congruence class has a leader, and the leader is used to
+// symbolize instructions in a canonical way (IE every operand of an
+// instruction that is a member of the same congruence class will
+// always be replaced with leader during symbolization).
+// To simplify symbolization, we keep the leader as a constant if class can be
+// proved to be a constant value.
+// Otherwise, the leader is a randomly chosen member of the value set, it does
+// not matter which one is chosen.
+// Each congruence class also has a defining expression,
+// though the expression may be null.  If it exists, it can be used for forward
+// propagation and reassociation of values.
+//
 struct CongruenceClass {
   typedef SmallPtrSet<Value *, 4> MemberSet;
-
   unsigned int ID;
-  Value *leader;
-  const Expression *expression;
+  // Representative leader
+  Value *RepLeader;
+  // Defining Expression
+  const Expression *DefiningExpr;
   // Actual members of this class.  These are the things the same everywhere
-  MemberSet members;
+  MemberSet Members;
   // Coercible members of this class. These are loads where we can pull the
   // value out of a store. This means they need special processing during
   // elimination to do this, but they are otherwise the same as members,
   // in particular, we can eliminate one in favor of a dominating one.
-  MemberSet coercible_members;
+  MemberSet CoercibleMembers;
 
   typedef std::list<Equivalence> EquivalenceSet;
 
-  // Noted equivalences.  These are things that are equivalence to
-  // this class over certain paths.  This could be replaced with
-  // proper predicate support during analysis.
-  EquivalenceSet equivalences;
+  // See the comments on struct Equivalence and SingleUserEquivalence for a
+  // discussion of what these are.
 
-  // This map holds the list of equivalences that only apply to a single
-  // instruction.  Because we don't have control regions, when we have
-  // equivalences along edges to blocks with multiple predecessors, we can't add
-  // them to the general equivalences list, because they don't dominate a given
-  // root, but instead, they really represent something valid in certain control
-  // regions of the program, a concept that is not really expressible using the
-  // a standard dominator (and not postdominator) tree.
-  std::unordered_multimap<Value *, SingleUserEquivalence>
-      singleUserEquivalences;
+  EquivalenceSet Equivs;
+  std::unordered_multimap<Value *, SingleUserEquivalence> SingleUserEquivs;
 
   // True if this class has no members left.  This is mainly used for assertion
-  // purposes.
-  bool dead;
+  // purposes, and for skipping empty classes.
+  bool Dead;
+
   explicit CongruenceClass(unsigned int ID)
-      : ID(ID), leader(0), expression(0), dead(false) {}
+      : ID(ID), RepLeader(0), DefiningExpr(0), Dead(false) {}
   CongruenceClass(unsigned int ID, Value *Leader, const Expression *E)
-      : ID(ID), leader(Leader), expression(E), dead(false) {}
+      : ID(ID), RepLeader(Leader), DefiningExpr(E), Dead(false) {}
 };
 
 class NewGVN : public FunctionPass {
@@ -228,6 +239,7 @@ class NewGVN : public FunctionPass {
       ExpressionClassMap;
   ExpressionClassMap ExpressionToClass;
 
+  // Which values have changed as a result of leader changes
   SmallPtrSet<Value *, 8> ChangedValues;
 
   // Reachability info
@@ -250,8 +262,7 @@ class NewGVN : public FunctionPass {
   DenseMap<const DomTreeNode *, std::pair<unsigned, unsigned>>
       DominatedInstRange;
   // Debugging for how many times each block and instruction got processed
-  DenseMap<const Instruction *, unsigned> ProcessedCount;
-  DenseMap<const BasicBlock *, unsigned> ProcessedBlockCount;
+  DenseMap<const Value *, unsigned> ProcessedCount;
 
   // DFS info
   DenseMap<const BasicBlock *, std::pair<int, int>> DFSDomMap;
@@ -330,7 +341,7 @@ private:
 
   CongruenceClass *createSingletonCongruenceClass(Value *Member) {
     CongruenceClass *CClass = createCongruenceClass(Member, NULL);
-    CClass->members.insert(Member);
+    CClass->Members.insert(Member);
     ValueToClass[Member] = CClass;
     return CClass;
   }
@@ -725,7 +736,7 @@ const Expression *NewGVN::checkSimplificationResults(Expression *E,
   }
 
   CongruenceClass *CC = ValueToClass.lookup(V);
-  if (CC && CC->expression) {
+  if (CC && CC->DefiningExpr) {
 #ifndef NDEBUG
     if (I)
       DEBUG(dbgs() << "Simplified " << *I << " to "
@@ -737,7 +748,7 @@ const Expression *NewGVN::checkSimplificationResults(Expression *E,
            "We should always have had a basic expression here");
     cast<BasicExpression>(E)->deallocateOperands(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
-    return CC->expression;
+    return CC->DefiningExpr;
   }
   return NULL;
 }
@@ -907,7 +918,7 @@ Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, const User *U,
   // TODO: This can be made faster by different set ordering, if
   // necessary, or caching whether we found one before and only updating it when
   // things change.
-  for (const auto &Member : CC->equivalences) {
+  for (const auto &Member : CC->Equivs) {
     // We can't process edge only equivalences without edges
     if (Member.EdgeOnly)
       continue;
@@ -928,7 +939,7 @@ Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, const User *U,
   // TODO: This can be made faster by different set ordering, if
   // necessary, or caching whether we found one before and only updating it when
   // things change.
-  for (const auto &Member : CC->equivalences) {
+  for (const auto &Member : CC->Equivs) {
     if ((Member.Edge.getStart() == B.getStart() &&
          Member.Edge.getEnd() == B.getEnd()) ||
         (!Member.EdgeOnly && DT->dominates(Member.Edge.getEnd(), B.getEnd())))
@@ -953,7 +964,7 @@ std::pair<Value *, bool> NewGVN::lookupOperandLeader(Value *V, const User *U,
                    << *V << " in block " << getBlockName(B) << "\n");
       return std::make_pair(Equivalence, true);
     }
-    return std::make_pair(CC->leader, false);
+    return std::make_pair(CC->RepLeader, false);
   }
   return std::make_pair(V, false);
 }
@@ -1498,6 +1509,8 @@ const Expression *NewGVN::performSymbolicEvaluation(Value *V,
     E = createVariableExpression(V, false);
   } else {
     // TODO: memory intrinsics
+    // TODO: Some day, we should do the forward propagation and reassociation
+    // parts of the algorithm.
     Instruction *I = cast<Instruction>(V);
     switch (I->getOpcode()) {
     case Instruction::ExtractValue:
@@ -1597,7 +1610,7 @@ void NewGVN::markDominatedSingleUserEquivalences(CongruenceClass *CC,
     }
     if (!Dominates)
       continue;
-    CC->singleUserEquivalences.emplace(
+    CC->SingleUserEquivs.emplace(
         From, SingleUserEquivalence{U.getUser(), U.getOperandNo(), To});
     // Mark the users as touched
     if (Instruction *I = dyn_cast<Instruction>(U.getUser()))
@@ -1727,7 +1740,7 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
     // 'RHS' within the scope Root.
     CongruenceClass *CC = ValueToClass[LHS];
     assert(CC && "Should have found a congruence class");
-    CC->equivalences.emplace_back(RHS, Root, !RootDominatesEnd);
+    CC->Equivs.emplace_back(RHS, Root, !RootDominatesEnd);
 
     if (RootDominatesEnd)
       markDominatedSingleUserEquivalences(CC, LHS, RHS,
@@ -1823,16 +1836,16 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
       if (CC) {
         // FIXME: I think this can be deleted now, need to bootstrap with an
         // assert
-        if (CC->members.size() == 1 && 0) {
+        if (CC->Members.size() == 1 && 0) {
           unsigned NumReplacements =
-              replaceAllDominatedUsesWith(CC->leader, NotVal, Root, false);
+              replaceAllDominatedUsesWith(CC->RepLeader, NotVal, Root, false);
           Changed |= NumReplacements > 0;
           NumGVNEqProp += NumReplacements;
         }
         // Ensure that any instruction in scope that gets the "A < B"
         // value number is replaced with false.
 
-        CC->equivalences.emplace_back(NotVal, Root, !RootDominatesEnd);
+        CC->Equivs.emplace_back(NotVal, Root, !RootDominatesEnd);
 
       } else {
         // Put this in pending equivalences so if an expression shows up, we'll
@@ -1881,14 +1894,14 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
   CongruenceClass *VClass = ValueToClass[V];
   assert(VClass && "Should have found a vclass");
   // Dead classes should have been eliminated from the mapping
-  assert(!VClass->dead && "Found a dead class");
+  assert(!VClass->Dead && "Found a dead class");
 
   CongruenceClass *EClass;
   // Expressions we can't symbolize are always in their own unique
   // congruence class
   if (E == NULL) {
     // We may have already made a unique class
-    if (VClass->members.size() != 1 || VClass->leader != V) {
+    if (VClass->Members.size() != 1 || VClass->RepLeader != V) {
       CongruenceClass *NewClass = createCongruenceClass(V, NULL);
       // We should always be adding the member in the below code
       EClass = NewClass;
@@ -1910,13 +1923,13 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
 
       // Constants and variables should always be made the leader
       if (const ConstantExpression *CE = dyn_cast<ConstantExpression>(E))
-        NewClass->leader = CE->getConstantValue();
+        NewClass->RepLeader = CE->getConstantValue();
       else if (const VariableExpression *VE = dyn_cast<VariableExpression>(E))
-        NewClass->leader = VE->getVariableValue();
+        NewClass->RepLeader = VE->getVariableValue();
       else if (const StoreExpression *SE = dyn_cast<StoreExpression>(E))
-        NewClass->leader = SE->getStoreInst()->getValueOperand();
+        NewClass->RepLeader = SE->getStoreInst()->getValueOperand();
       else
-        NewClass->leader = V;
+        NewClass->RepLeader = V;
 
       EClass = NewClass;
       DEBUG(dbgs() << "Created new congruence class for " << *V
@@ -1927,7 +1940,7 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
       EClass = lookupResult.first->second;
       assert(EClass && "Somehow don't have an eclass");
 
-      assert(!EClass->dead && "We accidentally looked up a dead class");
+      assert(!EClass->Dead && "We accidentally looked up a dead class");
     }
   }
   bool WasInChanged = ChangedValues.erase(V);
@@ -1941,13 +1954,13 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
 
       if (E && isa<CoercibleLoadExpression>(E)) {
         const CoercibleLoadExpression *L = cast<CoercibleLoadExpression>(E);
-        VClass->coercible_members.erase(V);
-        EClass->coercible_members.insert(V);
+        VClass->CoercibleMembers.erase(V);
+        EClass->CoercibleMembers.insert(V);
         CoercionInfo.insert(
             std::make_pair(V, std::make_pair(L->getOffset(), L->getSrc())));
       } else {
-        VClass->members.erase(V);
-        EClass->members.insert(V);
+        VClass->Members.erase(V);
+        EClass->Members.insert(V);
       }
 
       // See if we have any pending equivalences for this class.
@@ -1956,33 +1969,34 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
       if (E && isa<CmpInst>(V)) {
         auto Pending = PendingEquivalences.equal_range(E);
         for (auto PI = Pending.first, PE = Pending.second; PI != PE; ++PI)
-          EClass->equivalences.emplace_back(PI->second);
+          EClass->Equivs.emplace_back(PI->second);
         PendingEquivalences.erase(Pending.first, Pending.second);
       }
 
       ValueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
-      if ((VClass->members.empty() && VClass->coercible_members.empty()) &&
+      if ((VClass->Members.empty() && VClass->CoercibleMembers.empty()) &&
           VClass != InitialClass) {
-        if (VClass->expression) {
-          VClass->dead = true;
+        if (VClass->DefiningExpr) {
+          VClass->Dead = true;
 
           DEBUG(dbgs() << "Erasing expression " << *E << " from table\n");
           // bool wasE = *E == *VClass->expression;
-          ExpressionToClass.erase(VClass->expression);
+          ExpressionToClass.erase(VClass->DefiningExpr);
           // if (wasE)
           //   lookupMap->insert({E, EClass});
         }
         // delete VClass;
-      } else if (VClass->leader == V) {
-        // TODO: Check what happens if expression represented the leader
-        VClass->leader = *(VClass->members.begin());
-        for (auto M : VClass->members) {
+      } else if (VClass->RepLeader == V) {
+        /// XXX: Check this. When the leader changes, the value numbering of
+        /// everything may change, so we need to reprocess.
+        VClass->RepLeader = *(VClass->Members.begin());
+        for (auto M : VClass->Members) {
           if (Instruction *I = dyn_cast<Instruction>(M))
             TouchedInstructions.set(InstrDFS[I]);
           ChangedValues.insert(M);
         }
-        for (auto EM : VClass->coercible_members) {
+        for (auto EM : VClass->CoercibleMembers) {
           if (Instruction *I = dyn_cast<Instruction>(EM))
             TouchedInstructions.set(InstrDFS[I]);
           ChangedValues.insert(EM);
@@ -2241,7 +2255,7 @@ void NewGVN::initializeCongruenceClasses(Function &F) {
   InitialClass = createCongruenceClass(NULL, NULL);
   for (auto L : InitialValues)
     ValueToClass[L] = InitialClass;
-  InitialClass->members.swap(InitialValues);
+  InitialClass->Members.swap(InitialValues);
 
   // Initialize arguments to be in their own unique congruence classes
   // In an IPA-GVN, this would not be done
@@ -2254,7 +2268,7 @@ void NewGVN::cleanupTables() {
   ValueToClass.clear();
   for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
     DEBUG(dbgs() << "Congruence class " << CongruenceClasses[i]->ID << " has "
-                 << CongruenceClasses[i]->members.size() << " members\n");
+                 << CongruenceClasses[i]->Members.size() << " members\n");
   }
 
   ArgRecycler.clear(ExpressionAllocator);
@@ -2265,7 +2279,6 @@ void NewGVN::cleanupTables() {
   ReachableBlocks.clear();
   ReachableEdges.clear();
   ProcessedCount.clear();
-  ProcessedBlockCount.clear();
   DFSDomMap.clear();
   InstrDFS.clear();
   InstructionsToErase.clear();
@@ -2300,7 +2313,7 @@ void NewGVN::topoVisitCongruenceClass(
     SmallPtrSetImpl<CongruenceClass *> &Visited) {
   Visited.insert(CC);
   // Visit the classes of the values of the operands of the leader set
-  for (auto Member : CC->members) {
+  for (auto Member : CC->Members) {
     if (User *U = dyn_cast<User>(Member)) {
       for (auto &I : U->operands()) {
         CongruenceClass *OperandCC = ValueToClass.lookup(I);
@@ -2340,6 +2353,8 @@ bool NewGVN::runOnFunction(Function &F) {
   // Note: We want RPO traversal of the blocks, which is not quite the same as
   // dominator tree order, particularly with regard whether backedges get
   // visited first or second, given a block with multiple successors.
+  // If we visit in the wrong order, we will end up performing N times as many
+  // iterations.
   ReversePostOrderTraversal<Function *> RPOT(&F);
   for (auto &B : RPOT) {
     VisitedBlocks.insert(B);
@@ -2398,13 +2413,13 @@ bool NewGVN::runOnFunction(Function &F) {
           continue;
         }
         //#ifndef NDEBUG
-        if (ProcessedBlockCount.count(CurrBlock) == 0) {
-          ProcessedBlockCount.insert({CurrBlock, 1});
+        if (ProcessedCount.count(CurrBlock) == 0) {
+          ProcessedCount.insert({CurrBlock, 1});
         } else {
-          ProcessedBlockCount[CurrBlock] += 1;
-          assert(ProcessedBlockCount[CurrBlock] < 100 &&
+          ProcessedCount[CurrBlock] += 1;
+          assert(ProcessedCount[CurrBlock] < 100 &&
                  "Seem to have processed the same block a lot\n");
-          if (ProcessedBlockCount[CurrBlock] >= 100)
+          if (ProcessedCount[CurrBlock] >= 100)
             report_fatal_error("Processed block too many times");
         }
         //#endif
@@ -3208,36 +3223,37 @@ bool NewGVN::eliminateInstructions(Function &F) {
     // in the initial class with undef, as they should be unreachable.
     // Right now, initial still contains some things we skip value
     // numbering of (UNREACHABLE's, for example)
-    if (CC == InitialClass || CC->dead)
+    if (CC == InitialClass || CC->Dead)
       continue;
-    assert(CC->leader && "We should have had a leader");
+    assert(CC->RepLeader && "We should have had a leader");
 
     // If this is a leader that is always available, and it's a
     // constant or has no equivalences, just replace everything with
     // it. We then update the congruence class with whatever members
     // are left.
-    if (alwaysAvailable(CC->leader)) {
+    if (alwaysAvailable(CC->RepLeader)) {
       SmallPtrSet<Value *, 4> MembersLeft;
-      for (auto M : CC->members) {
+      for (auto M : CC->Members) {
 
         Value *Member = M;
-        for (auto &Equiv : CC->equivalences)
+        for (auto &Equiv : CC->Equivs)
           replaceAllDominatedUsesWith(M, Equiv.Val, Equiv.Edge, Equiv.EdgeOnly);
 
         // Void things have no uses we can replace
-        if (Member == CC->leader || Member->getType()->isVoidTy()) {
+        if (Member == CC->RepLeader || Member->getType()->isVoidTy()) {
           MembersLeft.insert(Member);
           continue;
         }
 
-        DEBUG(dbgs() << "Found replacement " << *(CC->leader) << " for "
+        DEBUG(dbgs() << "Found replacement " << *(CC->RepLeader) << " for "
                      << *Member << "\n");
         // Due to equality propagation, these may not always be
         // instructions, they may be real values.  We don't really
         // care about trying to replace the non-instructions.
         if (Instruction *I = dyn_cast<Instruction>(Member)) {
-          assert(CC->leader != I && "About to accidentally remove our leader");
-          replaceInstruction(I, CC->leader);
+          assert(CC->RepLeader != I &&
+                 "About to accidentally remove our leader");
+          replaceInstruction(I, CC->RepLeader);
           AnythingReplaced = true;
 
           continue;
@@ -3245,18 +3261,18 @@ bool NewGVN::eliminateInstructions(Function &F) {
           MembersLeft.insert(I);
         }
       }
-      CC->members.swap(MembersLeft);
+      CC->Members.swap(MembersLeft);
 
     } else {
       DEBUG(dbgs() << "Eliminating in congruence class " << CC->ID << "\n");
       // If this is a singleton, with no equivalences, we can skip it
-      if (CC->members.size() != 1 || !CC->equivalences.empty() ||
-          !CC->coercible_members.empty()) {
+      if (CC->Members.size() != 1 || !CC->Equivs.empty() ||
+          !CC->CoercibleMembers.empty()) {
         // If it's a singleton with equivalences, just do equivalence
         // replacement and move on
-        if (CC->members.size() == 1 && 0) {
-          for (auto &Equiv : CC->equivalences)
-            replaceAllDominatedUsesWith(CC->leader, Equiv.Val, Equiv.Edge,
+        if (CC->Members.size() == 1 && 0) {
+          for (auto &Equiv : CC->Equivs)
+            replaceAllDominatedUsesWith(CC->RepLeader, Equiv.Val, Equiv.Edge,
                                         Equiv.EdgeOnly);
           continue;
         }
@@ -3271,14 +3287,14 @@ bool NewGVN::eliminateInstructions(Function &F) {
         // Convert the members and equivalences to DFS ordered sets and
         // then merge them.
         std::vector<ValueDFS> DFSOrderedSet;
-        convertDenseToDFSOrdered(CC->members, DFSOrderedSet, false);
-        convertDenseToDFSOrdered(CC->coercible_members, DFSOrderedSet, true);
+        convertDenseToDFSOrdered(CC->Members, DFSOrderedSet, false);
+        convertDenseToDFSOrdered(CC->CoercibleMembers, DFSOrderedSet, true);
         // During value numbering, we already proceed as if the
         // equivalences have been propagated through, but this is the
         // only place we actually do elimination (so that other passes
         // know the same thing we do)
 
-        convertDenseToDFSOrdered(CC->equivalences, DFSOrderedSet);
+        convertDenseToDFSOrdered(CC->Equivs, DFSOrderedSet);
         // Sort the whole thing
         sort(DFSOrderedSet.begin(), DFSOrderedSet.end());
 
@@ -3291,8 +3307,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
           bool Coercible = C.Coercible;
 
           // See if we have single user equivalences for this member
-          auto EquivalenceRange =
-              CC->singleUserEquivalences.equal_range(Member);
+          auto EquivalenceRange = CC->SingleUserEquivs.equal_range(Member);
           auto EquivalenceIt = EquivalenceRange.first;
           while (EquivalenceIt != EquivalenceRange.second) {
             const SingleUserEquivalence &Equiv = EquivalenceIt->second;
@@ -3317,7 +3332,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
                          << EliminationStack.dfs_back().second << ")\n");
           }
           if (Member && isa<Constant>(Member))
-            assert(isa<Constant>(CC->leader) || EquivalenceOnly);
+            assert(isa<Constant>(CC->RepLeader) || EquivalenceOnly);
 
           DEBUG(dbgs() << "Current DFS numbers are (" << MemberDFSIn << ","
                        << MemberDFSOut << ")\n");
@@ -3384,7 +3399,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
     }
     // Cleanup the congruence class
     SmallPtrSet<Value *, 4> MembersLeft;
-    for (auto MI = CC->members.begin(), ME = CC->members.end(); MI != ME;) {
+    for (auto MI = CC->Members.begin(), ME = CC->Members.end(); MI != ME;) {
       auto CurrIter = MI;
       ++MI;
       Value *Member = *CurrIter;
@@ -3402,8 +3417,8 @@ bool NewGVN::eliminateInstructions(Function &F) {
       }
       MembersLeft.insert(Member);
     }
-    CC->members.swap(MembersLeft);
-    CC->coercible_members.clear();
+    CC->Members.swap(MembersLeft);
+    CC->CoercibleMembers.clear();
   }
 
   return AnythingReplaced;
@@ -3711,7 +3726,7 @@ bool NewGVN::performPRE(Instruction *I, AvailValInBlkVect &ValuesPerBlock,
 
   ValueToExpression[I] = ValueToExpression[V];
   // I no longer exists
-  ValueToClass.lookup(I)->members.erase(I);
+  ValueToClass.lookup(I)->Members.erase(I);
   if (isa<PHINode>(V))
     V->takeName(I);
   if (MD && V->getType()->getScalarType()->isPointerTy())
@@ -3764,7 +3779,7 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
   bool Changed = false;
   AvailValInBlkVect ValuesPerBlock;
 
-  for (auto M : CC->members) {
+  for (auto M : CC->Members) {
     if (isa<PHINode>(M) || M->getType()->isVoidTy())
       continue;
     if (!isa<GetElementPtrInst>(M) && !isa<LoadInst>(M))
@@ -3800,7 +3815,7 @@ bool NewGVN::performPREOnClass(CongruenceClass *CC) {
         I->replaceAllUsesWith(V);
         PREValueForwarding[I] = V;
         valueNumberNewInstruction(V);
-        ValueToClass.lookup(I)->members.erase(I);
+        ValueToClass.lookup(I)->Members.erase(I);
         ValueToExpression[I] = ValueToExpression[V];
         if (isa<PHINode>(V))
           V->takeName(I);
@@ -3830,13 +3845,13 @@ Value *NewGVN::findPRELeader(Value *Op, const BasicBlock *BB,
   if (!CC || CC == InitialClass)
     return 0;
 
-  if (CC->leader && alwaysAvailable(CC->leader))
-    return CC->leader;
+  if (CC->RepLeader && alwaysAvailable(CC->RepLeader))
+    return CC->RepLeader;
   Value *Equiv = findDominatingEquivalent(CC, nullptr, BB);
   if (Equiv)
     return Equiv;
 
-  for (auto M : CC->members) {
+  for (auto M : CC->Members) {
     if (M == MustDominate)
       continue;
     if (Instruction *I = dyn_cast<Instruction>(M))
@@ -3865,14 +3880,15 @@ Value *NewGVN::findPRELeader(const Expression *E, const BasicBlock *BB,
   if (!CC || CC == InitialClass)
     return 0;
 
-  if (CC->leader && (isa<Argument>(CC->leader) || isa<Constant>(CC->leader) ||
-                     isa<GlobalValue>(CC->leader)))
-    return CC->leader;
+  if (CC->RepLeader &&
+      (isa<Argument>(CC->RepLeader) || isa<Constant>(CC->RepLeader) ||
+       isa<GlobalValue>(CC->RepLeader)))
+    return CC->RepLeader;
   Value *Equiv = findDominatingEquivalent(CC, nullptr, BB);
   if (Equiv)
     return Equiv;
 
-  for (auto M : CC->members) {
+  for (auto M : CC->Members) {
     if (M == MustDominate)
       continue;
     if (Instruction *I = dyn_cast<Instruction>(M))
