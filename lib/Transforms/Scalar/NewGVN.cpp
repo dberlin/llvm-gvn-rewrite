@@ -15,6 +15,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/Transforms/Scalar/NewGVN.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -291,6 +292,9 @@ public:
   }
 
   bool runOnFunction(Function &F) override;
+  bool runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
+              TargetLibraryInfo *TLI, AliasAnalysis *AA,
+              MemorySSA *MSSA);
 
 private:
   // This transformation requires dominator postdominator info
@@ -2329,20 +2333,19 @@ void NewGVN::topoVisitCongruenceClass(
 
 /// runOnFunction - This is the main transformation entry point for a
 /// function.
-bool NewGVN::runOnFunction(Function &F) {
+bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
+                   TargetLibraryInfo *TLI, AliasAnalysis *AA,
+                   MemorySSA *MSSA) {
   bool Changed = false;
-  if (skipFunction(F))
-    return false;
-
-  DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
+  this->DT = DT;
+  this->AC = AC;
+  this->TLI = TLI;
+  this->AA = AA;
+  this->MSSA = MSSA;
   DL = &F.getParent()->getDataLayout();
-  AC = &getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
-  TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
-  AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
+  MSSAWalker = MSSA->getWalker();
 
   //  SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(AA, DT));
-  MSSA = &getAnalysis<MemorySSAWrapperPass>().getMSSA();
-  MSSAWalker = MSSA->getWalker();
 
   unsigned ICount = 0;
   // Count number of instructions for sizing of hash tables, and come
@@ -2530,6 +2533,38 @@ bool NewGVN::runOnFunction(Function &F) {
   cleanupTables();
   return Changed;
 }
+
+bool NewGVN::runOnFunction(Function &F) {
+  if (skipFunction(F))
+    return false;
+  return runGVN(F, &getAnalysis<DominatorTreeWrapperPass>().getDomTree(),
+                &getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F),
+                &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI(),
+                &getAnalysis<AAResultsWrapperPass>().getAAResults(),
+                &getAnalysis<MemorySSAWrapperPass>().getMSSA());
+}
+
+PreservedAnalyses NewGVNPass::run(Function &F,
+                                  AnalysisManager<Function> &AM) {
+  NewGVN Impl;
+
+  // Apparently the order in which we get these results matter for
+  // the old GVN (see Chandler's comment in GVN.cpp). I'll keep
+  // the same order here, just in case.
+  auto &AC = AM.getResult<AssumptionAnalysis>(F);
+  auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
+  auto &TLI = AM.getResult<TargetLibraryAnalysis>(F);
+  auto &AA = AM.getResult<AAManager>(F);
+  auto &MSSA = AM.getResult<MemorySSAAnalysis>(F);
+  bool Changed = Impl.runGVN(F, &DT, &AC, &TLI, &AA, &MSSA);
+  if (!Changed)
+    return PreservedAnalyses::all();
+  PreservedAnalyses PA;
+  PA.preserve<DominatorTreeAnalysis>();
+  PA.preserve<GlobalsAA>();
+  return PA;
+}
+
 // Return true if V is a value that will always be available (IE can
 // be placed anywhere) in the function.  We don't do globals here
 // because they are often worse to put in place
