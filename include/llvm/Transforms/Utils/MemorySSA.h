@@ -580,6 +580,10 @@ public:
   /// whether MemoryAccess \p A dominates MemoryAccess \p B.
   bool locallyDominates(const MemoryAccess *A, const MemoryAccess *B) const;
 
+  /// \brief Given two memory accesses in potentially different blocks,
+  /// determine whether MemoryAccess \p A dominates MemoryAccess \p B.
+  bool dominates(const MemoryAccess *A, const MemoryAccess *B) const;
+
   /// \brief Verify that MemorySSA is self consistent (IE definitions dominate
   /// all uses, uses appear in the right places).  This is used by unit tests.
   void verifyMemorySSA() const;
@@ -594,6 +598,8 @@ protected:
 
 private:
   class CachingWalker;
+
+  CachingWalker *getWalkerImpl();
   void buildMemorySSA();
   void verifyUseInDefs(MemoryAccess *, MemoryAccess *) const;
   using AccessMap = DenseMap<const BasicBlock *, std::unique_ptr<AccessList>>;
@@ -612,6 +618,8 @@ private:
   void renamePass(DomTreeNode *, MemoryAccess *IncomingVal,
                   SmallPtrSet<BasicBlock *, 16> &Visited);
   AccessList *getOrCreateAccessList(const BasicBlock *);
+  void renumberBlock(const BasicBlock *) const;
+
   AliasAnalysis *AA;
   DominatorTree *DT;
   Function &F;
@@ -620,6 +628,12 @@ private:
   DenseMap<const Value *, MemoryAccess *> ValueToMemoryAccess;
   AccessMap PerBlockAccesses;
   std::unique_ptr<MemoryAccess> LiveOnEntryDef;
+
+  // Domination mappings
+  // Note that the numbering is local to a block, even though the map is
+  // global.
+  mutable SmallPtrSet<const BasicBlock *, 16> BlockNumberingValid;
+  mutable DenseMap<const MemoryAccess *, unsigned long> BlockNumbering;
 
   // Memory SSA building info
   std::unique_ptr<CachingWalker> Walker;
