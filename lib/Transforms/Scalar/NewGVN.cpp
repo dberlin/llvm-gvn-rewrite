@@ -2236,6 +2236,9 @@ void NewGVN::propagateChangeInEdge(BasicBlock *Dest) {
   }
 }
 
+// The algorithm initially places the values of the routine in the INITIAL congruence
+// class. The leader of INITIAL is the undetermined value `TOP`.
+// When the algorithm has finished, values still in INITIAL are unreachable.
 void NewGVN::initializeCongruenceClasses(Function &F) {
   // FIXME now i can't remember why this is 2
   NextCongruenceNum = 2;
