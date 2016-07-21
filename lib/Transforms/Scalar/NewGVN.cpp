@@ -2464,53 +2464,6 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
 
   Changed |= eliminateInstructions(F);
 
-// The ideal ordering for processing is not quite topological ordering,
-// because there are multiple roots.  It is essentially "group every vertex
-// that depends on a given vertex together after that vertex", which is not
-// the same.  It is in fact, an NP complete problem, and given that the graph
-// may be cyclic anyway, we order the congruence classes by how many things
-// depend on them.  This is a good approximation, and will cut down the number
-// of iterations.
-#if 0
-  SmallDenseMap<CongruenceClass *, unsigned> UsedCount;
-  SmallPtrSet<CongruenceClass *, 16> VisitedClasses;
-
-  for (int i = CongruenceClasses.size() - 1; i >= 0; --i) {
-    CongruenceClass *CC = CongruenceClasses[i];
-    if (CC == InitialClass || CC->dead || VisitedClasses.count(CC))
-      continue;
-    topoVisitCongruenceClass(CC, UsedCount, VisitedClasses);
-  }
-  SmallVector<CongruenceClass *, 16> Worklist;
-  for (auto &CC : CongruenceClasses)
-    Worklist.push_back(CC);
-  // std::sort(Worklist.begin(), Worklist.end(),
-  //           [&UsedCount](CongruenceClass *&A, CongruenceClass *&B) {
-  //             return UsedCount[A] > UsedCount[B];
-  //           });
-
-  bool PREChanged = true;
-  while (PREChanged) {
-    PREChanged = false;
-#if 1
-    // FIXME: Handle added congruence classes
-    if (Worklist.size() != CongruenceClasses.size())
-      Worklist.insert(Worklist.end(),
-                      CongruenceClasses.begin() + (Worklist.size() - 1),
-                      CongruenceClasses.end());
-#endif
-    for (auto CC : Worklist) {
-      if (CC == InitialClass || CC->dead)
-        continue;
-
-      PREChanged |= performPREOnClass(CC);
-    }
-  }
-
-  PREValueForwarding.clear();
-
-  Changed |= PREChanged;
-#endif
   // Delete all instructions marked for deletion.
   for (Instruction *ToErase : InstructionsToErase) {
     if (!ToErase->use_empty())
