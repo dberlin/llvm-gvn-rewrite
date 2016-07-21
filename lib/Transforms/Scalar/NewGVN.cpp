@@ -1247,8 +1247,6 @@ NewGVN::performSymbolicLoadCoercionFromPhi(Type *LoadType, Value *LoadPtr,
     if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Inst)) {
       int Offset = analyzeLoadFromClobberingMemInst(LoadType, LoadPtr, DepMI);
       if (Offset != -1) {
-        Value *PossibleConstant =
-            getMemInstValueForLoad(DepMI, Offset, LoadType, LI, true);
         ValuesPerBlock.push_back(
             AvailableValueInBlock::getMI(Def->getBlock(), DepMI, Offset));
         continue;
