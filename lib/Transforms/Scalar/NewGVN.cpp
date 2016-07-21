@@ -2244,11 +2244,9 @@ void NewGVN::initializeCongruenceClasses(Function &F) {
   NextCongruenceNum = 2;
   // Initialize all other instructions to be in INITIAL class
   CongruenceClass::MemberSet InitialValues;
-  for (auto &B : F) {
-    for (auto &I : B) {
+  for (auto &B : F)
+    for (auto &I : B)
       InitialValues.insert(&I);
-    }
-  }
 
   InitialClass = createCongruenceClass(NULL, NULL);
   for (auto L : InitialValues)
