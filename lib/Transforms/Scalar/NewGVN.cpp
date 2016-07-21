@@ -1672,14 +1672,7 @@ bool NewGVN::isOnlyReachableViaThisEdge(const BasicBlockEdge &E) {
 // only reachable from Src, in practice it is pointless since at the time
 // GVN runs all such loops have preheaders, which means that Dst will have
 // been changed to have only one predecessor, namely Src.
-#if 0
-  BasicBlock *EdgeEnd = const_cast<BasicBlock *>(E.getEnd());
-  if (PredCache.size(EdgeEnd) != 1)
-    return false;
-  const BasicBlock *Pred = PredCache.get(EdgeEnd)[0];
-#else
   const BasicBlock *Pred = E.getEnd()->getSinglePredecessor();
-#endif
   const BasicBlock *Src = E.getStart();
   assert((!Pred || Pred == Src) && "No edge between these basic blocks!");
   (void)Src;
@@ -2722,25 +2715,6 @@ void NewGVN::deleteInstructionsInBlock(BasicBlock *BB) {
     I = BasicBlock::reverse_iterator(Inst.eraseFromParent());
     ++NumGVNInstrDeleted;
   }
-#if 0
-  // Delete the instructions backwards, as it has a reduced likelihood of having
-  // to update as many def-use and use-def chains.
-  Instruction *EndInst = BB->getTerminator(); // Last not to be deleted.
-  while (EndInst->getIterator() != BB->begin()) {
-    // Delete the next to last instruction.
-    BasicBlock::iterator I = EndInst->getIterator();
-    Instruction *Inst = &*--I;
-    if (!Inst->use_empty())
-      Inst->replaceAllUsesWith(UndefValue::get(Inst->getType()));
-    if (isa<LandingPadInst>(Inst)) {
-      EndInst = Inst;
-      continue;
-    }
-    Inst->eraseFromParent();
-    BB->getInstList().erase(Inst);
-    ++NumGVNInstrDeleted;
-  }
-#endif
 }
 
 void NewGVN::markInstructionForDeletion(Instruction *I) {
@@ -3455,55 +3429,7 @@ Value *NewGVN::AvailableValue::MaterializeAdjustedValue(LoadInst *LI,
   assert(Res && "failed to materialize?");
   return Res;
 }
-#if 0
-Value *
-NewGVN::AvailableValueInBlock::MaterializeAdjustedValue(Instruction *I,
-                                                        NewGVN &gvn) const {
-  if (!isa<LoadInst>(I)) {
-    assert((isSimpleValue() || isUndefValue()) &&
-           "Should have been a simple or undef value for a non-load!");
-    if (isSimpleValue())
-      return getSimpleValue();
-    else
-      return UndefValue::get(I->getType());
-  }
 
-  Value *Res;
-  Type *LoadTy = I->getType();
-
-  if (isSimpleValue()) {
-    Res = getSimpleValue();
-    if (Res->getType() != LoadTy) {
-      Res = gvn.getStoreValueForLoad(Res, Offset, LoadTy, BB->getTerminator());
-
-      DEBUG(dbgs() << "GVN COERCED NONLOCAL VAL:\nOffset: " << Offset << "  "
-                   << *getSimpleValue() << '\n' << *Res << '\n' << "\n\n\n");
-    }
-  } else if (isCoercedLoadValue()) {
-    LoadInst *Load = getCoercedLoadValue();
-    if (Load->getType() == LoadTy && Offset == 0) {
-      Res = Load;
-    } else {
-      Res = gvn.getLoadValueForLoad(Load, Offset, LoadTy, BB->getTerminator());
-
-      DEBUG(dbgs() << "GVN COERCED NONLOCAL LOAD:\nOffset: " << Offset << "  "
-                   << *getCoercedLoadValue() << '\n' << *Res << '\n'
-                   << "\n\n\n");
-    }
-  } else if (isMemIntrinValue()) {
-    Res = gvn.getMemInstValueForLoad(getMemIntrinValue(), Offset, LoadTy,
-                                     BB->getTerminator());
-    DEBUG(dbgs() << "GVN COERCED NONLOCAL MEM INTRIN:\nOffset: " << Offset
-                 << "  " << *getMemIntrinValue() << '\n' << *Res << '\n'
-                 << "\n\n\n");
-  } else {
-    assert(isUndefValue() && "Should be UndefVal");
-    DEBUG(dbgs() << "GVN COERCED NONLOCAL Undef:\n";);
-    return UndefValue::get(LoadTy);
-  }
-  return Res;
-}
-#endif
 Value *NewGVN::constructSSAForSet(
     Instruction *I, SmallVectorImpl<AvailableValueInBlock> &ValuesPerBlock) {
   // Check for the fully redundant, dominating load case.  In this case, we can
