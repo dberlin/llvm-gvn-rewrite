@@ -3406,6 +3406,33 @@ static Value *simplifySelectBitTest(Value *TrueVal, Value *FalseVal, Value *X,
   return nullptr;
 }
 
+/// An alternative way to test if a bit is set or not uses sgt/slt instead of
+/// eq/ne.
+static Value *simplifySelectWithFakeICmpEq(Value *CmpLHS, Value *TrueVal,
+                                           Value *FalseVal,
+                                           bool TrueWhenUnset) {
+  unsigned BitWidth = TrueVal->getType()->getScalarSizeInBits();
+  APInt MinSignedValue;
+  Value *X;
+  if (match(CmpLHS, m_Trunc(m_Value(X))) && (X == TrueVal || X == FalseVal)) {
+    // icmp slt (trunc X), 0  <--> icmp ne (and X, C), 0
+    // icmp sgt (trunc X), -1 <--> icmp eq (and X, C), 0
+    unsigned DestSize = CmpLHS->getType()->getScalarSizeInBits();
+    MinSignedValue = APInt::getSignedMinValue(DestSize).zext(BitWidth);
+  } else {
+    // icmp slt X, 0  <--> icmp ne (and X, C), 0
+    // icmp sgt X, -1 <--> icmp eq (and X, C), 0
+    X = CmpLHS;
+    MinSignedValue = APInt::getSignedMinValue(BitWidth);
+  }
+
+  if (Value *V = simplifySelectBitTest(TrueVal, FalseVal, X, &MinSignedValue,
+                                       TrueWhenUnset))
+    return V;
+
+  return nullptr;
+}
+
 /// Try to simplify a select instruction when its condition operand is an
 /// integer comparison.
 static Value *simplifySelectWithICmpCond(Value *CondVal, Value *TrueVal,
@@ -3416,8 +3443,8 @@ static Value *simplifySelectWithICmpCond(Value *CondVal, Value *TrueVal,
   if (!match(CondVal, m_ICmp(Pred, m_Value(CmpLHS), m_Value(CmpRHS))))
     return nullptr;
 
-  unsigned BitWidth = Q.DL.getTypeSizeInBits(TrueVal->getType());
-  APInt MinSignedValue = APInt::getSignBit(BitWidth);
+  // FIXME: This code is nearly duplicated in InstCombine. Using/refactoring
+  // decomposeBitTestICmp() might help.
   if (ICmpInst::isEquality(Pred) && match(CmpRHS, m_Zero())) {
     Value *X;
     const APInt *Y;
@@ -3426,12 +3453,14 @@ static Value *simplifySelectWithICmpCond(Value *CondVal, Value *TrueVal,
                                            Pred == ICmpInst::ICMP_EQ))
         return V;
   } else if (Pred == ICmpInst::ICMP_SLT && match(CmpRHS, m_Zero())) {
-    if (Value *V = simplifySelectBitTest(TrueVal, FalseVal, CmpLHS,
-                                         &MinSignedValue, false))
+    // Comparing signed-less-than 0 checks if the sign bit is set.
+    if (Value *V = simplifySelectWithFakeICmpEq(CmpLHS, TrueVal, FalseVal,
+                                                false))
       return V;
   } else if (Pred == ICmpInst::ICMP_SGT && match(CmpRHS, m_AllOnes())) {
-    if (Value *V = simplifySelectBitTest(TrueVal, FalseVal, CmpLHS,
-                                         &MinSignedValue, true))
+    // Comparing signed-greater-than -1 checks if the sign bit is not set.
+    if (Value *V = simplifySelectWithFakeICmpEq(CmpLHS, TrueVal, FalseVal,
+                                                true))
       return V;
   }
 
