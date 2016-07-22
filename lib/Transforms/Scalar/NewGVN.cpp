@@ -425,6 +425,7 @@ private:
   // Utilities
   void cleanupTables();
   std::pair<unsigned, unsigned> assignDFSNumbers(BasicBlock *, unsigned);
+  void updateProcessedCount(Value *V);
 
   /// Represents a particular available value that we know how to materialize.
   /// Materialization of an AvailableValue never fails.  An AvailableValue is
@@ -2323,6 +2324,18 @@ void NewGVN::topoVisitCongruenceClass(
   }
 }
 
+void NewGVN::updateProcessedCount(Value *V) {
+#if 1 /* NDEBUG */
+  if (ProcessedCount.count(V) == 0) {
+    ProcessedCount.insert({V, 1});
+  } else {
+    ProcessedCount[V] += 1;
+    assert(ProcessedCount[V] < 100 &&
+           "Seem to have processed the same Value a lot\n");
+  }
+#endif
+}
+
 /// runOnFunction - This is the main transformation entry point for a
 /// function.
 bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
@@ -2407,17 +2420,7 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
                        << " because it is unreachable\n");
           continue;
         }
-        //#ifndef NDEBUG
-        if (ProcessedCount.count(CurrBlock) == 0) {
-          ProcessedCount.insert({CurrBlock, 1});
-        } else {
-          ProcessedCount[CurrBlock] += 1;
-          assert(ProcessedCount[CurrBlock] < 100 &&
-                 "Seem to have processed the same block a lot\n");
-          if (ProcessedCount[CurrBlock] >= 100)
-            report_fatal_error("Processed block too many times");
-        }
-        //#endif
+        updateProcessedCount(CurrBlock);
       }
       DEBUG(dbgs() << "Processing instruction " << *I << "\n");
       if (I->use_empty() && !I->getType()->isVoidTy()) {
@@ -2427,19 +2430,10 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
         TouchedInstructions.reset(InstrNum);
         continue;
       }
+      updateProcessedCount(I);
 
-// This is done in case something eliminates the instruction
-// along the way.
-
-#ifndef NDEBUG
-      if (ProcessedCount.count(I) == 0) {
-        ProcessedCount.insert({I, 1});
-      } else {
-        ProcessedCount[I] += 1;
-        assert(ProcessedCount[I] < 100 &&
-               "Seem to have processed the same instruction a lot");
-      }
-#endif
+      // This is done in case something eliminates the instruction
+      // along the way.
       if (!I->isTerminator()) {
         const Expression *Symbolized = performSymbolicEvaluation(I, CurrBlock);
         if (Symbolized && Symbolized->usedEquivalence())
