@@ -72,11 +72,7 @@ using namespace llvm::GVNExpression;
 
 STATISTIC(NumGVNInstrDeleted, "Number of instructions deleted");
 STATISTIC(NumGVNBlocksDeleted, "Number of blocks deleted");
-STATISTIC(NumNewGVNPRE, "Number of instructions PRE'd");
-// STATISTIC(NumNewGVNBlocks, "Number of blocks merged");
-// STATISTIC(NumNewGVNSimpl, "Number of instructions simplified");
 STATISTIC(NumGVNEqProp, "Number of equalities propagated");
-STATISTIC(NumPRELoad, "Number of loads PRE'd");
 STATISTIC(NumGVNOpsSimplified, "Number of Expressions simplified");
 STATISTIC(NumGVNPhisAllSame, "Number of PHIs whos arguments are all the same");
 
