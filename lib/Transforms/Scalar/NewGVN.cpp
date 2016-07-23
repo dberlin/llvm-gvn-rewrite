@@ -493,11 +493,6 @@ private:
       assert(isMemIntrinValue() && "Wrong accessor");
       return cast<MemIntrinsic>(Val.getPointer());
     }
-
-    /// Emit code at the specified insertion point to adjust the value defined
-    /// here to the specified type. This handles various coercion cases.
-    Value *MaterializeAdjustedValue(LoadInst *LI, Instruction *InsertPt,
-                                    NewGVN &gvn) const;
   };
 
   /// Represents an AvailableValue which can be rematerialized at the end of
@@ -530,12 +525,6 @@ private:
     }
     static AvailableValueInBlock getUndef(BasicBlock *BB) {
       return get(BB, AvailableValue::getUndef());
-    }
-
-    /// Emit code at the end of this block to adjust the value defined here to
-    /// the specified type. This handles various coercion cases.
-    Value *MaterializeAdjustedValue(LoadInst *LI, NewGVN &gvn) const {
-      return AV.MaterializeAdjustedValue(LI, BB->getTerminator(), gvn);
     }
   };
 
@@ -3328,50 +3317,6 @@ bool NewGVN::eliminateInstructions(Function &F) {
   }
 
   return AnythingReplaced;
-}
-
-Value *NewGVN::AvailableValue::MaterializeAdjustedValue(LoadInst *LI,
-                                                        Instruction *InsertPt,
-                                                        NewGVN &gvn) const {
-  Value *Res;
-  Type *LoadTy = LI->getType();
-
-  if (isSimpleValue()) {
-    Res = getSimpleValue();
-    if (Res->getType() != LoadTy) {
-      Res = gvn.getStoreValueForLoad(Res, Offset, LoadTy, InsertPt);
-
-      DEBUG(dbgs() << "GVN COERCED NONLOCAL VAL:\nOffset: " << Offset << "  "
-                   << *getSimpleValue() << '\n'
-                   << *Res << '\n'
-                   << "\n\n\n");
-    }
-  } else if (isCoercedLoadValue()) {
-    LoadInst *Load = getCoercedLoadValue();
-    if (Load->getType() == LoadTy && Offset == 0) {
-      Res = Load;
-    } else {
-      Res = gvn.getLoadValueForLoad(Load, Offset, LoadTy, InsertPt);
-
-      DEBUG(dbgs() << "GVN COERCED NONLOCAL LOAD:\nOffset: " << Offset << "  "
-                   << *getCoercedLoadValue() << '\n'
-                   << *Res << '\n'
-                   << "\n\n\n");
-    }
-  } else if (isMemIntrinValue()) {
-    Res = gvn.getMemInstValueForLoad(getMemIntrinValue(), Offset, LoadTy,
-                                     InsertPt);
-    DEBUG(dbgs() << "GVN COERCED NONLOCAL MEM INTRIN:\nOffset: " << Offset
-                 << "  " << *getMemIntrinValue() << '\n'
-                 << *Res << '\n'
-                 << "\n\n\n");
-  } else {
-    assert(isUndefValue() && "Should be UndefVal");
-    DEBUG(dbgs() << "GVN COERCED NONLOCAL Undef:\n";);
-    return UndefValue::get(LoadTy);
-  }
-  assert(Res && "failed to materialize?");
-  return Res;
 }
 
 // Find a leader for OP in BB.
