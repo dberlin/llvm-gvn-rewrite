@@ -551,19 +551,7 @@ private:
                                     uint32_t);
   Value *findPRELeader(Value *, const BasicBlock *, const Value *);
   Value *findPRELeader(const Expression *, const BasicBlock *, const Value *);
-  bool phiTranslateArguments(const BasicExpression *, BasicExpression *,
-                             const BasicBlock *, const Value *);
   MemoryAccess *phiTranslateMemoryAccess(MemoryAccess *, const BasicBlock *);
-  const Expression *phiTranslateExpression(const Expression *E, BasicBlock *,
-                                           BasicBlock *, const Value *);
-  BasicBlock *splitCriticalEdges(BasicBlock *, BasicBlock *);
-  void analyzeAvailability(Instruction *, AvailValInBlkVect &,
-                           UnavailBlkVect &);
-  Value *constructSSAForSet(Instruction *,
-                            SmallVectorImpl<AvailableValueInBlock> &);
-  void topoVisitCongruenceClass(CongruenceClass *,
-                                SmallDenseMap<CongruenceClass *, unsigned> &,
-                                SmallPtrSetImpl<CongruenceClass *> &);
 };
 
 char NewGVN::ID = 0;
@@ -2294,25 +2282,6 @@ std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
   return std::make_pair(Start, End);
 }
 
-void NewGVN::topoVisitCongruenceClass(
-    CongruenceClass *CC, SmallDenseMap<CongruenceClass *, unsigned> &UsedCount,
-    SmallPtrSetImpl<CongruenceClass *> &Visited) {
-  Visited.insert(CC);
-  // Visit the classes of the values of the operands of the leader set
-  for (auto Member : CC->Members) {
-    if (User *U = dyn_cast<User>(Member)) {
-      for (auto &I : U->operands()) {
-        CongruenceClass *OperandCC = ValueToClass.lookup(I);
-        if (OperandCC) {
-          UsedCount[OperandCC] += 1;
-          if (!Visited.count(OperandCC))
-            topoVisitCongruenceClass(OperandCC, UsedCount, Visited);
-        }
-      }
-    }
-  }
-}
-
 void NewGVN::updateProcessedCount(Value *V) {
 #if 1 /* NDEBUG */
   if (ProcessedCount.count(V) == 0) {
@@ -3410,48 +3379,6 @@ Value *NewGVN::AvailableValue::MaterializeAdjustedValue(LoadInst *LI,
   return Res;
 }
 
-Value *NewGVN::constructSSAForSet(
-    Instruction *I, SmallVectorImpl<AvailableValueInBlock> &ValuesPerBlock) {
-  // Check for the fully redundant, dominating load case.  In this case, we can
-  // just use the dominating value directly.
-  if (ValuesPerBlock.size() == 1 &&
-      DT->properlyDominates(ValuesPerBlock[0].BB, I->getParent())) {
-    assert(!ValuesPerBlock[0].AV.isUndefValue() &&
-           "Dead BB dominate this block");
-    return ValuesPerBlock[0].MaterializeAdjustedValue(cast<LoadInst>(I), *this);
-  }
-  // Otherwise, we have to construct SSA form.
-  SmallVector<PHINode *, 8> NewPHIs;
-  SSAUpdater SSAUpdate(&NewPHIs);
-  SSAUpdate.Initialize(I->getType(), I->getName());
-
-  for (unsigned i = 0, e = ValuesPerBlock.size(); i != e; ++i) {
-    const AvailableValueInBlock &AV = ValuesPerBlock[i];
-    BasicBlock *BB = AV.BB;
-
-    if (SSAUpdate.HasValueForBlock(BB))
-      continue;
-
-    SSAUpdate.AddAvailableValue(
-        BB, AV.MaterializeAdjustedValue(cast<LoadInst>(I), *this));
-  }
-
-  // Perform PHI construction.
-  Value *V = SSAUpdate.GetValueInMiddleOfBlock(I->getParent());
-
-  return V;
-}
-
-/// Split the critical edge connecting the given two blocks, and return
-/// the block inserted to the critical edge.
-BasicBlock *NewGVN::splitCriticalEdges(BasicBlock *Pred, BasicBlock *Succ) {
-  BasicBlock *BB =
-      SplitCriticalEdge(Pred, Succ, CriticalEdgeSplittingOptions(DT));
-  if (MD)
-    MD->invalidateCachedPredecessors();
-  return BB;
-}
-
 // Find a leader for OP in BB.
 Value *NewGVN::findPRELeader(Value *Op, const BasicBlock *BB,
                              const Value *MustDominate) {
@@ -3538,95 +3465,4 @@ static Value *phiTranslateValue(Value *Incoming, const BasicBlock *Pred) {
   }
   // Not defined by a phi in this block
   return Incoming;
-}
-
-bool NewGVN::phiTranslateArguments(const BasicExpression *From,
-                                   BasicExpression *To, const BasicBlock *Pred,
-                                   const Value *MustDominate) {
-  for (unsigned i = 0, e = From->getNumOperands(); i != e; ++i) {
-    Value *Arg = From->getOperand(i);
-    Value *Forwarded = PREValueForwarding.lookup(Arg);
-    if (Forwarded)
-      Arg = Forwarded;
-    // Fold in immediate adds
-    bool processedAdd = false;
-    if (Instruction *I = dyn_cast<Instruction>(Arg)) {
-      if (I->getOpcode() == Instruction::Add &&
-          isa<PHINode>(I->getOperand(0)) &&
-          isa<ConstantInt>(I->getOperand(1))) {
-
-        Constant *RHS = cast<ConstantInt>(I->getOperand(1));
-        bool isNSW = cast<BinaryOperator>(I)->hasNoSignedWrap();
-        bool isNUW = cast<BinaryOperator>(I)->hasNoUnsignedWrap();
-        Value *LHS = phiTranslateValue(I->getOperand(0), Pred);
-        // If the PHI translated LHS is an add of a constant, fold the
-        // immediates.
-        if (BinaryOperator *BOp = dyn_cast<BinaryOperator>(LHS))
-          if (BOp->getOpcode() == Instruction::Add)
-            if (ConstantInt *CI = dyn_cast<ConstantInt>(BOp->getOperand(1))) {
-              LHS = BOp->getOperand(0);
-              RHS = ConstantExpr::getAdd(RHS, CI);
-              isNSW = isNUW = false;
-            }
-        // FIXME: Handle NSW
-        const Expression *BinExpr = createBinaryExpression(
-            I->getOpcode(), I->getType(), LHS, RHS, Pred);
-        Value *Leader = findPRELeader(BinExpr, Pred, MustDominate);
-        if (Leader) {
-          Arg = Leader;
-          processedAdd = true;
-        }
-      }
-    }
-    // If arg is still a phi node, and wasn't processed by the add processing
-    // above, translate it now
-    if (!processedAdd && isa<PHINode>(Arg))
-      Arg = phiTranslateValue(Arg, Pred);
-
-    Value *Leader = findPRELeader(Arg, Pred, MustDominate);
-    if (Leader == nullptr)
-      return false;
-    To->setOperand(i, Leader);
-  }
-  return true;
-}
-const Expression *NewGVN::phiTranslateExpression(const Expression *E,
-                                                 BasicBlock *Curr,
-                                                 BasicBlock *Pred,
-                                                 const Value *MustDominate) {
-  const Expression *ResultExpr = nullptr;
-  if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
-
-    MemoryAccess *MA = phiTranslateMemoryAccess(LE->getDefiningAccess(), Pred);
-    if (!MA)
-      return nullptr;
-    LoadExpression *NLE = createLoadExpression(LE->getType(), LE->getOperand(0),
-                                               LE->getLoadInst(), MA, Pred);
-    if (!phiTranslateArguments(LE, NLE, Pred, MustDominate))
-      return nullptr;
-    LoadInst *LI = LE->getLoadInst();
-    MemoryLocation Loc;
-    if (LI) {
-      Loc = MemoryLocation::get(LI);
-      Loc = Loc.getWithNewPtr(NLE->getOperand(0));
-    } else {
-      Loc.Ptr = NLE->getOperand(0);
-    }
-    MA = MSSAWalker->getClobberingMemoryAccess(MA, Loc);
-    NLE->setDefiningAccess(MA);
-    ResultExpr = NLE;
-  } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
-    BasicExpression *NBE =
-        new (ExpressionAllocator) BasicExpression(BE->getNumOperands());
-    NBE->setType(BE->getType());
-    NBE->setOpcode(BE->getOpcode());
-    NBE->allocateOperands(ArgRecycler, ExpressionAllocator);
-    for (unsigned i = 0, e = BE->getNumOperands(); i != e; ++i)
-      NBE->ops_push_back(nullptr);
-    if (!phiTranslateArguments(BE, NBE, Pred, MustDominate))
-      return nullptr;
-    ResultExpr = NBE;
-  }
-
-  return ResultExpr;
 }
