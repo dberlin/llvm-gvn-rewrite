@@ -2342,8 +2342,6 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
   DL = &F.getParent()->getDataLayout();
   MSSAWalker = MSSA->getWalker();
 
-  //  SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(AA, DT));
-
   unsigned ICount = 0;
   // Count number of instructions for sizing of hash tables, and come
   // up with a global dfs numbering for instructions
