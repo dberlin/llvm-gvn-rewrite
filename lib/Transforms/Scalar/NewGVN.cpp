@@ -545,10 +545,6 @@ private:
       UnavailBlkVect;
   typedef SmallDenseMap<const BasicBlock *, AvailableValueInBlock>
       AvailValInBlkMap;
-  typedef DenseMap<const BasicBlock *, char> FullyAvailableMap;
-
-  bool isValueFullyAvailableInBlock(BasicBlock *, FullyAvailableMap &,
-                                    uint32_t);
   Value *findPRELeader(Value *, const BasicBlock *, const Value *);
   Value *findPRELeader(const Expression *, const BasicBlock *, const Value *);
   MemoryAccess *phiTranslateMemoryAccess(MemoryAccess *, const BasicBlock *);
