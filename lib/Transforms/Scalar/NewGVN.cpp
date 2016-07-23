@@ -561,9 +561,6 @@ private:
                            UnavailBlkVect &);
   Value *constructSSAForSet(Instruction *,
                             SmallVectorImpl<AvailableValueInBlock> &);
-  void valueNumberNewInstruction(Value *);
-  void valueNumberNewInstructionToValue(Value *, Value *);
-  Value *regenerateExpression(const Expression *, BasicBlock *);
   void topoVisitCongruenceClass(CongruenceClass *,
                                 SmallDenseMap<CongruenceClass *, unsigned> &,
                                 SmallPtrSetImpl<CongruenceClass *> &);
@@ -3453,80 +3450,6 @@ BasicBlock *NewGVN::splitCriticalEdges(BasicBlock *Pred, BasicBlock *Succ) {
   if (MD)
     MD->invalidateCachedPredecessors();
   return BB;
-}
-
-void NewGVN::valueNumberNewInstructionToValue(Value *New, Value *Old) {
-  if (!ValueToClass.count(New))
-    ValueToClass[New] = InitialClass;
-  const Expression *NewExpr = createVariableExpression(Old, false);
-  performCongruenceFinding(New, NewExpr);
-}
-
-void NewGVN::valueNumberNewInstruction(Value *V) {
-  if (!ValueToClass.count(V))
-    ValueToClass[V] = InitialClass;
-  const Expression *NewExpr =
-      performSymbolicEvaluation(V, cast<Instruction>(V)->getParent());
-  performCongruenceFinding(V, NewExpr);
-}
-
-Value *NewGVN::regenerateExpression(const Expression *E, BasicBlock *BB) {
-#if FIXME
-  Value *V = findPRELeader(E, BB, nullptr);
-  if (V)
-    return V;
-  if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
-    LoadInst *LI = new LoadInst(LE->getOperand(0), "loadpre", false,
-                                LE->getAlignment(), BB->getTerminator());
-    const_cast<LoadExpression *>(LE)->setLoadInst(LI);
-    MSSA->addNewMemoryUse(LI, MemorySSA::InsertionPlace::End);
-
-    return LI;
-  } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
-    unsigned Opcode = BE->getOpcode();
-    if (Instruction::isBinaryOp(Opcode)) {
-      BinaryOperator *BO = BinaryOperator::Create(
-          Instruction::BinaryOps(Opcode), BE->getOperand(0), BE->getOperand(1),
-          "binaryoppre", BB->getTerminator());
-      // FIXME: Track NSW/NUW
-      return BO;
-    } else if (Opcode == Instruction::MemoryOps::GetElementPtr) {
-#if FIXME
-      // It wants the pointee type, which is complex, and not equivalent to
-      // getType on the original GEP
-      // FIXME: Store getSrcType on the GEP
-      Type *PointeeType =
-          cast<SequentialType>(BE->getOperand(0)->getType()->getScalarType())
-              ->getElementType();
-#endif
-      Value *GEP = nullptr;
-      if (Value *V = SimplifyGEPInst(
-              BE->getType(), makeArrayRef(BE->ops_begin(), BE->ops_end()), *DL,
-              TLI, DT, AC))
-        GEP = V;
-      else
-        GEP = GetElementPtrInst::Create(
-            BE->getType(), BE->getOperand(0),
-            makeArrayRef(BE->ops_begin(), BE->ops_end()).slice(1), "geppre",
-            BB->getTerminator());
-      // FIXME: Track inbounds
-      return GEP;
-    } else if (((Opcode & 0xff00) >> 8) == Instruction::ICmp) {
-      CmpInst::Predicate Pred = (CmpInst::Predicate)(Opcode & 0xff);
-      ICmpInst *Cmp = new ICmpInst(BB->getTerminator(), Pred, BE->getOperand(0),
-                                   BE->getOperand(1), "icmppre");
-      return Cmp;
-    } else if (((Opcode & 0xff00) >> 8) == Instruction::FCmp) {
-      CmpInst::Predicate Pred = (CmpInst::Predicate)(Opcode & 0xff);
-      FCmpInst *Cmp = new FCmpInst(BB->getTerminator(), Pred, BE->getOperand(0),
-                                   BE->getOperand(1), "fcmppre");
-      return Cmp;
-    } else
-      llvm_unreachable("What!");
-  }
-  llvm_unreachable("What!");
-#endif
-  return nullptr;
 }
 
 // Find a leader for OP in BB.
