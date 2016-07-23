@@ -563,8 +563,6 @@ private:
                             SmallVectorImpl<AvailableValueInBlock> &);
   void valueNumberNewInstruction(Value *);
   void valueNumberNewInstructionToValue(Value *, Value *);
-  const Expression *trySimplifyPREExpression(const Expression *,
-                                             const BasicBlock *);
   Value *regenerateExpression(const Expression *, BasicBlock *);
   void topoVisitCongruenceClass(CongruenceClass *,
                                 SmallDenseMap<CongruenceClass *, unsigned> &,
@@ -3709,44 +3707,5 @@ const Expression *NewGVN::phiTranslateExpression(const Expression *E,
     ResultExpr = NBE;
   }
 
-  return ResultExpr;
-}
-
-const Expression *NewGVN::trySimplifyPREExpression(const Expression *E,
-                                                   const BasicBlock *B) {
-  const Expression *ResultExpr = E;
-  // This must come first, because LoadExpression's are BasicExpressions
-  if (const LoadExpression *LE = dyn_cast<LoadExpression>(E)) {
-    MemoryDef *MD = dyn_cast<MemoryDef>(LE->getDefiningAccess());
-    if (MD && !MSSA->isLiveOnEntryDef(MD)) {
-      const Expression *Temp = performSymbolicLoadCoercion(
-          LE->getType(), LE->getOperand(0), LE->getLoadInst(),
-          MD->getMemoryInst(), MD, B);
-      if (Temp)
-        ResultExpr = Temp;
-    }
-  } else if (const BasicExpression *BE = dyn_cast<BasicExpression>(E)) {
-    unsigned Opcode = BE->getOpcode();
-    if (Instruction::isBinaryOp(Opcode)) {
-      Value *V = SimplifyBinOp(Opcode, BE->getOperand(0), BE->getOperand(1),
-                               *DL, TLI, DT, AC);
-      if (V) {
-        if (Constant *C = dyn_cast<Constant>(V))
-          ResultExpr = createConstantExpression(C, false);
-        else if (alwaysAvailable(V))
-          ResultExpr = createVariableExpression(V, false);
-      }
-    } else if (Opcode == Instruction::GetElementPtr) {
-      Value *V = SimplifyGEPInst(BE->getType(),
-                                 makeArrayRef(BE->ops_begin(), BE->ops_end()),
-                                 *DL, TLI, DT, AC);
-      if (V) {
-        if (Constant *C = dyn_cast<Constant>(V))
-          ResultExpr = createConstantExpression(C, false);
-        else if (alwaysAvailable(V))
-          ResultExpr = createVariableExpression(V, false);
-      }
-    }
-  }
   return ResultExpr;
 }
