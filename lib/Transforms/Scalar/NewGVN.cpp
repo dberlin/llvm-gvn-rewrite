@@ -76,15 +76,6 @@ STATISTIC(NumGVNEqProp, "Number of equalities propagated");
 STATISTIC(NumGVNOpsSimplified, "Number of Expressions simplified");
 STATISTIC(NumGVNPhisAllSame, "Number of PHIs whos arguments are all the same");
 
-static cl::opt<bool> EnablePRE("enable-pre2", cl::init(true), cl::Hidden);
-static cl::opt<bool> EnableLoadPRE("enable-load-pre2", cl::init(true));
-
-// Maximum allowed recursion depth.
-static cl::opt<uint32_t>
-    MaxRecurseDepth("max-recurse-depth2", cl::Hidden, cl::init(1000),
-                    cl::ZeroOrMore,
-                    cl::desc("Max recurse depth (default = 1000)"));
-
 //===----------------------------------------------------------------------===//
 //                                GVN Pass
 //===----------------------------------------------------------------------===//
