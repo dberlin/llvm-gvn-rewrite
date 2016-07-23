@@ -3456,13 +3456,3 @@ MemoryAccess *NewGVN::phiTranslateMemoryAccess(MemoryAccess *MA,
   return MA;
 }
 
-static Value *phiTranslateValue(Value *Incoming, const BasicBlock *Pred) {
-  // Back translate if defined by a phi in this block
-  PHINode *P = dyn_cast<PHINode>(Incoming);
-  int Index = P->getBasicBlockIndex(Pred);
-  if (Index != -1) {
-    return P->getIncomingValue(Index);
-  }
-  // Not defined by a phi in this block
-  return Incoming;
-}
