@@ -527,7 +527,6 @@ private:
       AvailValInBlkMap;
   Value *findPRELeader(Value *, const BasicBlock *, const Value *);
   Value *findPRELeader(const Expression *, const BasicBlock *, const Value *);
-  MemoryAccess *phiTranslateMemoryAccess(MemoryAccess *, const BasicBlock *);
 };
 
 char NewGVN::ID = 0;
@@ -3371,19 +3370,5 @@ Value *NewGVN::findPRELeader(const Expression *E, const BasicBlock *BB,
         return I;
   }
   return 0;
-}
-
-MemoryAccess *NewGVN::phiTranslateMemoryAccess(MemoryAccess *MA,
-                                               const BasicBlock *Pred) {
-  if (MemoryPhi *MP = dyn_cast<MemoryPhi>(MA)) {
-    for (const auto &A : MP->operands()) {
-      if (MP->getIncomingBlock(A) == Pred) {
-        return cast<MemoryAccess>(A);
-      }
-    }
-    // We should have found something
-    return nullptr;
-  }
-  return MA;
 }
 
