@@ -2304,10 +2304,9 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
   DL = &F.getParent()->getDataLayout();
   MSSAWalker = MSSA->getWalker();
 
-  unsigned ICount = 0;
   // Count number of instructions for sizing of hash tables, and come
-  // up with a global dfs numbering for instructions
-
+  // up with a global dfs numbering for instructions.
+  unsigned ICount = 0;
   SmallPtrSet<BasicBlock *, 16> VisitedBlocks;
 
   // Note: We want RPO traversal of the blocks, which is not quite the same as
