@@ -401,7 +401,6 @@ private:
   void deleteInstructionsInBlock(BasicBlock *);
   bool canCoerceMustAliasedValueToLoad(Value *, Type *);
   Value *coerceAvailableValueToLoadType(Value *, Type *, Instruction *);
-  Value *getStoreValueForLoad(Value *, unsigned, Type *, Instruction *);
   // New instruction creation
   void handleNewInstruction(Instruction *){};
   void markUsersTouched(Value *);
@@ -2809,56 +2808,6 @@ Value *NewGVN::coerceAvailableValueToLoadType(Value *StoredVal, Type *LoadedTy,
   I = new BitCastInst(StoredVal, LoadedTy, "bitcast", InsertPt);
   handleNewInstruction(I);
   return I;
-}
-
-/// GetStoreValueForLoad - This function is called when we have a
-/// memdep query of a load that ends up being a clobbering store.  This means
-/// that the store provides bits used by the load but we the pointers don't
-/// mustalias.  Check this case to see if there is anything more we can do
-/// before we give up.
-Value *NewGVN::getStoreValueForLoad(Value *SrcVal, unsigned Offset,
-                                    Type *LoadTy, Instruction *InsertPt) {
-
-  LLVMContext &Ctx = SrcVal->getType()->getContext();
-
-  uint64_t StoreSize = (DL->getTypeSizeInBits(SrcVal->getType()) + 7) / 8;
-  uint64_t LoadSize = (DL->getTypeSizeInBits(LoadTy) + 7) / 8;
-
-  IRBuilder<> Builder(InsertPt);
-
-  // Compute which bits of the stored value are being used by the load.  Convert
-  // to an integer type to start with.
-  if (SrcVal->getType()->getScalarType()->isPointerTy()) {
-    SrcVal =
-        Builder.CreatePtrToInt(SrcVal, DL->getIntPtrType(SrcVal->getType()));
-    if (Instruction *I = dyn_cast<Instruction>(SrcVal))
-      handleNewInstruction(I);
-  }
-
-  if (!SrcVal->getType()->isIntegerTy()) {
-    SrcVal =
-        Builder.CreateBitCast(SrcVal, IntegerType::get(Ctx, StoreSize * 8));
-    if (Instruction *I = dyn_cast<Instruction>(SrcVal))
-      handleNewInstruction(I);
-  }
-  // Shift the bits to the least significant depending on endianness.
-  unsigned ShiftAmt;
-  if (DL->isLittleEndian())
-    ShiftAmt = Offset * 8;
-  else
-    ShiftAmt = (StoreSize - LoadSize - Offset) * 8;
-
-  if (ShiftAmt) {
-    SrcVal = Builder.CreateLShr(SrcVal, ShiftAmt);
-    if (Instruction *I = dyn_cast<Instruction>(SrcVal))
-      handleNewInstruction(I);
-  }
-  if (LoadSize != StoreSize) {
-    SrcVal = Builder.CreateTrunc(SrcVal, IntegerType::get(Ctx, LoadSize * 8));
-    if (Instruction *I = dyn_cast<Instruction>(SrcVal))
-      handleNewInstruction(I);
-  }
-  return coerceAvailableValueToLoadType(SrcVal, LoadTy, InsertPt);
 }
 
 bool NewGVN::eliminateInstructions(Function &F) {
