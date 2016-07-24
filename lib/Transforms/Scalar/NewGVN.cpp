@@ -259,18 +259,6 @@ class NewGVN : public FunctionPass {
 
   // Deletion info
   SmallPtrSet<Instruction *, 8> InstructionsToErase;
-  // This is a mapping from Load to (offset into source, coercion source)
-  DenseMap<const Value *, std::pair<unsigned, Value *>> CoercionInfo;
-  // This is a mapping for loads that got widened, to the new load. This ensures
-  // we coerce from the new widened load, instead of the old one. Otherwise, we
-  // may try to widen the same old load multiple times.
-  DenseMap<const Value *, Value *> CoercionForwarding;
-
-  // This is used by PRE to forward values when they get replaced
-  // Because we don't update the expressions, ValueToExpression will point to
-  // expressions which have the old arguments in them
-  DenseMap<const Value *, Value *> PREValueForwarding;
-  PredIteratorCache PredCache;
 
 public:
   static char ID; // Pass identification, replacement for typeid
@@ -1762,8 +1750,6 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
         const CoercibleLoadExpression *L = cast<CoercibleLoadExpression>(E);
         VClass->CoercibleMembers.erase(V);
         EClass->CoercibleMembers.insert(V);
-        CoercionInfo.insert(
-            std::make_pair(V, std::make_pair(L->getOffset(), L->getSrc())));
       } else {
         VClass->Members.erase(V);
         EClass->Members.insert(V);
@@ -2094,11 +2080,8 @@ void NewGVN::cleanupTables() {
   BlockInstRange.clear();
   TouchedInstructions.clear();
   InvolvedInEquivalence.clear();
-  CoercionInfo.clear();
-  CoercionForwarding.clear();
   DominatedInstRange.clear();
   PendingEquivalences.clear();
-  PredCache.clear();
 }
 
 std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
