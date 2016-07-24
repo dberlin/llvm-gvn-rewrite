@@ -519,12 +519,8 @@ private:
     }
   };
 
-  // PRE
+  // Used by load coercion.
   typedef SmallVector<AvailableValueInBlock, 64> AvailValInBlkVect;
-  typedef SmallVector<std::pair<BasicBlock *, const Expression *>, 64>
-      UnavailBlkVect;
-  typedef SmallDenseMap<const BasicBlock *, AvailableValueInBlock>
-      AvailValInBlkMap;
 };
 
 char NewGVN::ID = 0;
