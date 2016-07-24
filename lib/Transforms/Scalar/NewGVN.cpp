@@ -342,9 +342,6 @@ private:
   const Expression *checkSimplificationResults(Expression *, Instruction *,
                                                Value *);
   const Expression *performSymbolicEvaluation(Value *, const BasicBlock *);
-  const Expression *performSymbolicLoadCoercionFromPhi(Type *, Value *,
-                                                       LoadInst *, MemoryPhi *,
-                                                       const BasicBlock *);
   const Expression *performSymbolicLoadCoercion(Type *, Value *, LoadInst *,
                                                 Instruction *, MemoryAccess *,
                                                 const BasicBlock *);
@@ -1133,71 +1130,6 @@ const Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
   StoreInst *SI = cast<StoreInst>(I);
   const Expression *E = createStoreExpression(SI, MSSA->getMemoryAccess(SI), B);
   return E;
-}
-
-const Expression *
-NewGVN::performSymbolicLoadCoercionFromPhi(Type *LoadType, Value *LoadPtr,
-                                           LoadInst *LI, MemoryPhi *DefiningPhi,
-                                           const BasicBlock *B) {
-  if (!LoadPtr)
-    return nullptr;
-  AvailValInBlkVect ValuesPerBlock;
-  for (auto &Op : DefiningPhi->operands()) {
-    BasicBlock *IncomingBlock = DefiningPhi->getIncomingBlock(Op);
-    // If the block is not reachable, it's undef
-    if (!ReachableBlocks.count(IncomingBlock)) {
-      ValuesPerBlock.push_back(AvailableValueInBlock::getUndef(IncomingBlock));
-      continue;
-    }
-    // FIXME: We don't support phi over phi
-    if (isa<MemoryPhi>(Op))
-      return nullptr;
-    const MemoryDef *Def = cast<MemoryDef>(Op);
-    Instruction *Inst = Def->getMemoryInst();
-    if (!Inst)
-      return nullptr;
-    // If the dependence is to a store that writes to a superset of the bits
-    // read by the load, we can extract the bits we need for the load from the
-    // stored value.
-    if (StoreInst *DepSI = dyn_cast<StoreInst>(Inst)) {
-      int Offset = analyzeLoadFromClobberingStore(LoadType, LoadPtr, DepSI);
-      if (Offset != -1) {
-        ValuesPerBlock.push_back(AvailableValueInBlock::get(
-            Def->getBlock(), DepSI->getValueOperand(), Offset));
-        continue;
-      }
-    }
-    // Check to see if we have something like this:
-    //    load i32* P
-    //    load i8* (P+1)
-    // if we have this, replace the later with an extraction from the former.
-    if (LoadInst *DepLI = dyn_cast<LoadInst>(Inst)) {
-      // If this is a clobber and L is the first instruction in its block, then
-      // we have the first instruction in the entry block.
-      if (DepLI != LI) {
-        int Offset = analyzeLoadFromClobberingLoad(LoadType, LoadPtr, DepLI);
-
-        if (Offset != -1) {
-          ValuesPerBlock.push_back(
-              AvailableValueInBlock::getLoad(Def->getBlock(), DepLI, Offset));
-          continue;
-        }
-      }
-    }
-    // If the clobbering value is a memset/memcpy/memmove, see if we can
-    // forward a value on from it.
-    if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(Inst)) {
-      int Offset = analyzeLoadFromClobberingMemInst(LoadType, LoadPtr, DepMI);
-      if (Offset != -1) {
-        ValuesPerBlock.push_back(
-            AvailableValueInBlock::getMI(Def->getBlock(), DepMI, Offset));
-        continue;
-      }
-    }
-    return nullptr;
-  }
-  assert(ValuesPerBlock.size() == DefiningPhi->getNumIncomingValues());
-  return nullptr;
 }
 
 const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
@@ -2878,7 +2810,6 @@ bool NewGVN::eliminateInstructions(Function &F) {
           Value *Member = C.Val;
           Use *MemberUse = C.U;
           bool EquivalenceOnly = C.Equivalence;
-          bool Coercible = C.Coercible;
 
           // See if we have single user equivalences for this member
           auto EquivalenceRange = CC->SingleUserEquivs.equal_range(Member);
