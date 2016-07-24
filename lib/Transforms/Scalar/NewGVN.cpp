@@ -446,18 +446,12 @@ private:
     }
 
     bool isSimpleValue() const { return Val.getInt() == SimpleVal; }
-    bool isCoercedLoadValue() const { return Val.getInt() == LoadVal; }
     bool isMemIntrinValue() const { return Val.getInt() == MemIntrin; }
     bool isUndefValue() const { return Val.getInt() == UndefVal; }
 
     Value *getSimpleValue() const {
       assert(isSimpleValue() && "Wrong accessor");
       return Val.getPointer();
-    }
-
-    LoadInst *getCoercedLoadValue() const {
-      assert(isCoercedLoadValue() && "Wrong accessor");
-      return cast<LoadInst>(Val.getPointer());
     }
 
     MemIntrinsic *getMemIntrinValue() const {
