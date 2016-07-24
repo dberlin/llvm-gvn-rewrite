@@ -1200,59 +1200,6 @@ NewGVN::performSymbolicLoadCoercionFromPhi(Type *LoadType, Value *LoadPtr,
   return nullptr;
 }
 
-const Expression *NewGVN::performSymbolicLoadCoercion(
-    Type *LoadType, Value *LoadPtr, LoadInst *LI, Instruction *DepInst,
-    MemoryAccess *DefiningAccess, const BasicBlock *B) {
-  assert((!LI || LI->isSimple()) && "Not a simple load");
-
-  if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInst)) {
-    Value *LoadAddressLeader = lookupOperandLeader(LoadPtr, LI, B).first;
-    Value *StoreAddressLeader =
-        lookupOperandLeader(DepSI->getPointerOperand(), DepSI, B).first;
-    Value *StoreVal = DepSI->getValueOperand();
-    if (StoreVal->getType() == LoadType &&
-        LoadAddressLeader == StoreAddressLeader) {
-      return createVariableOrConstant(DepSI->getValueOperand(), B);
-    } else {
-      int Offset = analyzeLoadFromClobberingStore(LoadType, LoadPtr, DepSI);
-      if (Offset >= 0)
-        return createCoercibleLoadExpression(
-            LoadType, LoadPtr, LI, DefiningAccess, (unsigned)Offset, DepSI, B);
-    }
-  } else if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInst)) {
-    int Offset = analyzeLoadFromClobberingLoad(LoadType, LoadPtr, DepLI);
-    if (Offset >= 0)
-      return createCoercibleLoadExpression(
-          LoadType, LoadPtr, LI, DefiningAccess, (unsigned)Offset, DepLI, B);
-  } else if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(DepInst)) {
-    int Offset = analyzeLoadFromClobberingMemInst(LoadType, LoadPtr, DepMI);
-    if (Offset >= 0)
-      return createCoercibleLoadExpression(
-          LoadType, LoadPtr, LI, DefiningAccess, (unsigned)Offset, DepMI, B);
-  }
-  // If this load really doesn't depend on anything, then we must be loading
-  // an
-  // undef value.  This can happen when loading for a fresh allocation with
-  // no
-  // intervening stores, for example.
-  else if (isa<AllocaInst>(DepInst) || isMallocLikeFn(DepInst, TLI))
-    return createConstantExpression(UndefValue::get(LoadType), false);
-
-  // If this load occurs either right after a lifetime begin,
-  // then the loaded value is undefined.
-  else if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(DepInst)) {
-    if (II->getIntrinsicID() == Intrinsic::lifetime_start)
-      return createConstantExpression(UndefValue::get(LoadType), false);
-  }
-  // If this load follows a calloc (which zero initializes memory),
-  // then the loaded value is zero
-  else if (isCallocLikeFn(DepInst, TLI)) {
-    return createConstantExpression(Constant::getNullValue(LoadType), false);
-  }
-
-  return nullptr;
-}
-
 const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
                                                         const BasicBlock *B) {
   LoadInst *LI = cast<LoadInst>(I);
@@ -1277,16 +1224,6 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
       // undef
       if (!ReachableBlocks.count(DefiningInst->getParent()))
         return createConstantExpression(UndefValue::get(LI->getType()), false);
-      const Expression *CoercionResult =
-          performSymbolicLoadCoercion(LI->getType(), LI->getPointerOperand(),
-                                      LI, DefiningInst, DefiningAccess, B);
-      if (CoercionResult)
-        return CoercionResult;
-    } else if (MemoryPhi *MP = dyn_cast<MemoryPhi>(DefiningAccess)) {
-      const Expression *CoercionResult = performSymbolicLoadCoercionFromPhi(
-          LI->getType(), LI->getPointerOperand(), LI, MP, B);
-      if (CoercionResult)
-        return CoercionResult;
     }
   } else {
     BasicBlock *LoadBlock = LI->getParent();
