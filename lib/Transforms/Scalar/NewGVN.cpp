@@ -405,7 +405,6 @@ private:
   Value *getLoadValueForLoad(LoadInst *, unsigned, Type *, Instruction *);
   Value *getMemInstValueForLoad(MemIntrinsic *, unsigned, Type *, Instruction *,
                                 bool NoNewInst = false);
-  Value *coerceLoad(Value *);
   // New instruction creation
   void handleNewInstruction(Instruction *){};
   void markUsersTouched(Value *);
@@ -3018,40 +3017,6 @@ Value *NewGVN::getMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
   return ConstantFoldLoadFromConstPtr(Src, LoadTy, *DL);
 }
 
-Value *NewGVN::coerceLoad(Value *V) {
-  assert(isa<LoadInst>(V) && "Trying to coerce something other than a load");
-  LoadInst *LI = cast<LoadInst>(V);
-  // This is an offset, source pair
-  const std::pair<unsigned, Value *> &Info = CoercionInfo.lookup(LI);
-  Value *Result;
-  Value *RealValue = Info.second;
-  // Walk all the coercion fowarding chains, in case this load has already been
-  // widened into another load
-  while (true) {
-    auto ForwardingResult = CoercionForwarding.find(RealValue);
-    if (ForwardingResult != CoercionForwarding.end())
-      RealValue = ForwardingResult->second;
-    else
-      break;
-  }
-
-  assert(DT->dominates(cast<Instruction>(RealValue), LI) &&
-         "Trying to replace a load with one that doesn't dominate it");
-  if (StoreInst *DepSI = dyn_cast<StoreInst>(RealValue))
-    Result = getStoreValueForLoad(DepSI->getValueOperand(), Info.first,
-                                  LI->getType(), LI);
-  else if (LoadInst *DepLI = dyn_cast<LoadInst>(RealValue))
-    Result = getLoadValueForLoad(DepLI, Info.first, LI->getType(), LI);
-  else if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(RealValue))
-    Result = getMemInstValueForLoad(DepMI, Info.first, LI->getType(), LI);
-  else
-    llvm_unreachable("Unknown coercion type");
-
-  assert(Result && "Should have been able to coerce");
-  DEBUG(dbgs() << "Coerced load " << *LI << " output is " << *Result << "\n");
-  return Result;
-}
-
 bool NewGVN::eliminateInstructions(Function &F) {
   // This is a non-standard eliminator. The normal way to eliminate is
   // to walk the dominator tree in order, keeping track of available
@@ -3240,8 +3205,6 @@ bool NewGVN::eliminateInstructions(Function &F) {
             // Push if we need to
             ShouldPush |= Member && EliminationStack.empty();
             if (ShouldPush) {
-              if (Coercible)
-                Member = coerceLoad(Member);
               EliminationStack.push_back(Member, MemberDFSIn, MemberDFSOut);
             }
           }
