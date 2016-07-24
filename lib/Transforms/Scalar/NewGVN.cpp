@@ -403,8 +403,6 @@ private:
   Value *coerceAvailableValueToLoadType(Value *, Type *, Instruction *);
   Value *getStoreValueForLoad(Value *, unsigned, Type *, Instruction *);
   Value *getLoadValueForLoad(LoadInst *, unsigned, Type *, Instruction *);
-  Value *getMemInstValueForLoad(MemIntrinsic *, unsigned, Type *, Instruction *,
-                                bool NoNewInst = false);
   // New instruction creation
   void handleNewInstruction(Instruction *){};
   void markUsersTouched(Value *);
@@ -2939,82 +2937,6 @@ Value *NewGVN::getLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
   }
 
   return getStoreValueForLoad(SrcVal, Offset, LoadTy, InsertPt);
-}
-
-/// GetMemInstValueForLoad - This function is called when we have a
-/// memdep query of a load that ends up being a clobbering mem intrinsic.
-Value *NewGVN::getMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
-                                      Type *LoadTy, Instruction *InsertPt,
-                                      bool NoNewInst) {
-
-  LLVMContext &Ctx = LoadTy->getContext();
-  uint64_t LoadSize = DL->getTypeSizeInBits(LoadTy) / 8;
-
-  IRBuilder<> Builder(InsertPt);
-
-  // We know that this method is only called when the mem transfer fully
-  // provides the bits for the load.
-  if (MemSetInst *MSI = dyn_cast<MemSetInst>(SrcInst)) {
-    // memset(P, 'x', 1234) -> splat('x'), even if x is a variable, and
-    // independently of what the offset is.
-    Value *Val = MSI->getValue();
-    if (LoadSize != 1) {
-      if (NoNewInst)
-        return nullptr;
-      Val = Builder.CreateZExt(Val, IntegerType::get(Ctx, LoadSize * 8));
-      if (Instruction *I = dyn_cast<Instruction>(Val))
-        handleNewInstruction(I);
-    }
-
-    Value *OneElt = Val;
-
-    // Splat the value out to the right number of bits.
-    for (unsigned NumBytesSet = 1; NumBytesSet != LoadSize;) {
-      if (NoNewInst)
-        return nullptr;
-
-      // If we can double the number of bytes set, do it.
-      if (NumBytesSet * 2 <= LoadSize) {
-        Value *ShVal = Builder.CreateShl(Val, NumBytesSet * 8);
-        if (Instruction *I = dyn_cast<Instruction>(ShVal))
-          handleNewInstruction(I);
-        Val = Builder.CreateOr(Val, ShVal);
-        if (Instruction *I = dyn_cast<Instruction>(Val))
-          handleNewInstruction(I);
-        NumBytesSet <<= 1;
-        continue;
-      }
-
-      // Otherwise insert one byte at a time.
-      Value *ShVal = Builder.CreateShl(Val, 1 * 8);
-      if (Instruction *I = dyn_cast<Instruction>(ShVal))
-        handleNewInstruction(I);
-
-      Val = Builder.CreateOr(OneElt, ShVal);
-      if (Instruction *I = dyn_cast<Instruction>(Val))
-        handleNewInstruction(I);
-
-      ++NumBytesSet;
-    }
-
-    return coerceAvailableValueToLoadType(Val, LoadTy, InsertPt);
-  }
-
-  // Otherwise, this is a memcpy/memmove from a constant global.
-  MemTransferInst *MTI = cast<MemTransferInst>(SrcInst);
-  Constant *Src = cast<Constant>(MTI->getSource());
-  unsigned AS = Src->getType()->getPointerAddressSpace();
-
-  // Otherwise, see if we can constant fold a load from the constant with the
-  // offset applied as appropriate.
-  Src = ConstantExpr::getBitCast(
-      Src, llvm::Type::getInt8PtrTy(Src->getContext(), AS));
-  Constant *OffsetCst =
-      ConstantInt::get(Type::getInt64Ty(Src->getContext()), (unsigned)Offset);
-  Src = ConstantExpr::getGetElementPtr(Type::getInt8Ty(Src->getContext()), Src,
-                                       OffsetCst);
-  Src = ConstantExpr::getBitCast(Src, PointerType::get(LoadTy, AS));
-  return ConstantFoldLoadFromConstPtr(Src, LoadTy, *DL);
 }
 
 bool NewGVN::eliminateInstructions(Function &F) {
