@@ -384,11 +384,11 @@ private:
   void replaceInstruction(Instruction *, Value *);
   void markInstructionForDeletion(Instruction *);
   void deleteInstructionsInBlock(BasicBlock *);
-  bool canCoerceMustAliasedValueToLoad(Value *, Type *);
-  Value *coerceAvailableValueToLoadType(Value *, Type *, Instruction *);
+
   // New instruction creation
   void handleNewInstruction(Instruction *){};
   void markUsersTouched(Value *);
+
   // Utilities
   void cleanupTables();
   std::pair<unsigned, unsigned> assignDFSNumbers(BasicBlock *, unsigned);
@@ -2531,135 +2531,6 @@ private:
   SmallVector<Value *, 8> ValueStack;
   SmallVector<std::pair<int, int>, 8> DFSStack;
 };
-}
-
-/// CanCoerceMustAliasedValueToLoad - Return true if
-/// CoerceAvailableValueToLoadType will succeed.
-bool NewGVN::canCoerceMustAliasedValueToLoad(Value *StoredVal, Type *LoadTy) {
-
-  // If the loaded or stored value is an first class array or struct, don't
-  // try
-  // to transform them.  We need to be able to bitcast to integer.
-  if (LoadTy->isStructTy() || LoadTy->isArrayTy() ||
-      StoredVal->getType()->isStructTy() || StoredVal->getType()->isArrayTy())
-    return false;
-
-  // The store has to be at least as big as the load.
-  if (DL->getTypeSizeInBits(StoredVal->getType()) <
-      DL->getTypeSizeInBits(LoadTy))
-    return false;
-
-  return true;
-}
-
-/// CoerceAvailableValueToLoadType - If we saw a store of a value to memory,
-/// and
-/// then a load from a must-aliased pointer of a different type, try to coerce
-/// the stored value.  LoadedTy is the type of the load we want to replace and
-/// InsertPt is the place to insert new instructions.
-///
-/// If we can't do it, return null.
-Value *NewGVN::coerceAvailableValueToLoadType(Value *StoredVal, Type *LoadedTy,
-                                              Instruction *InsertPt) {
-
-  if (!canCoerceMustAliasedValueToLoad(StoredVal, LoadedTy))
-    return 0;
-
-  // If this is already the right type, just return it.
-  Type *StoredValTy = StoredVal->getType();
-
-  uint64_t StoreSize = DL->getTypeSizeInBits(StoredValTy);
-  uint64_t LoadSize = DL->getTypeSizeInBits(LoadedTy);
-
-  // If the store and reload are the same size, we can always reuse it.
-  if (StoreSize == LoadSize) {
-    // Pointer to Pointer -> use bitcast.
-    if (StoredValTy->isPointerTy() && LoadedTy->isPointerTy()) {
-      Instruction *I = new BitCastInst(StoredVal, LoadedTy, "", InsertPt);
-      handleNewInstruction(I);
-      return I;
-    }
-
-    // Convert source pointers to integers, which can be bitcast.
-    if (StoredValTy->isPointerTy()) {
-      StoredValTy = DL->getIntPtrType(StoredValTy->getContext());
-      Instruction *I = new PtrToIntInst(StoredVal, StoredValTy, "", InsertPt);
-      StoredVal = I;
-      handleNewInstruction(I);
-    }
-
-    Type *TypeToCastTo = LoadedTy;
-    if (TypeToCastTo->isPointerTy())
-      TypeToCastTo = DL->getIntPtrType(StoredValTy->getContext());
-
-    if (StoredValTy != TypeToCastTo) {
-      Instruction *I = new BitCastInst(StoredVal, TypeToCastTo, "", InsertPt);
-      StoredVal = I;
-      handleNewInstruction(I);
-    }
-
-    // Cast to pointer if the load needs a pointer type.
-    if (LoadedTy->isPointerTy()) {
-      Instruction *I = new IntToPtrInst(StoredVal, LoadedTy, "", InsertPt);
-      StoredVal = I;
-      handleNewInstruction(I);
-    }
-    return StoredVal;
-  }
-
-  // If the loaded value is smaller than the available value, then we can
-  // extract out a piece from it.  If the available value is too small, then
-  // we
-  // can't do anything.
-  assert(StoreSize >= LoadSize && "CanCoerceMustAliasedValueToLoad fail");
-
-  // Convert source pointers to integers, which can be manipulated.
-  if (StoredValTy->isPointerTy()) {
-    StoredValTy = DL->getIntPtrType(StoredValTy->getContext());
-    Instruction *I = new PtrToIntInst(StoredVal, StoredValTy, "", InsertPt);
-    StoredVal = I;
-    handleNewInstruction(I);
-  }
-
-  // Convert vectors and fp to integer, which can be manipulated.
-  if (!StoredValTy->isIntegerTy()) {
-    StoredValTy = IntegerType::get(StoredValTy->getContext(), StoreSize);
-    Instruction *I = new BitCastInst(StoredVal, StoredValTy, "", InsertPt);
-    StoredVal = I;
-    handleNewInstruction(I);
-  }
-
-  // If this is a big-endian system, we need to shift the value down to the
-  // low
-  // bits so that a truncate will work.
-  if (DL->isBigEndian()) {
-    Constant *Val =
-        ConstantInt::get(StoredVal->getType(), StoreSize - LoadSize);
-    StoredVal = BinaryOperator::CreateLShr(StoredVal, Val, "tmp", InsertPt);
-    if (Instruction *I = dyn_cast<Instruction>(StoredVal))
-      handleNewInstruction(I);
-  }
-
-  // Truncate the integer to the right size now.
-  Type *NewIntTy = IntegerType::get(StoredValTy->getContext(), LoadSize);
-  Instruction *I = new TruncInst(StoredVal, NewIntTy, "trunc", InsertPt);
-  StoredVal = I;
-  handleNewInstruction(I);
-
-  if (LoadedTy == NewIntTy)
-    return StoredVal;
-
-  // If the result is a pointer, inttoptr.
-  if (LoadedTy->isPointerTy()) {
-    I = new IntToPtrInst(StoredVal, LoadedTy, "inttoptr", InsertPt);
-    handleNewInstruction(I);
-    return I;
-  }
-
-  // Otherwise, bitcast.
-  I = new BitCastInst(StoredVal, LoadedTy, "bitcast", InsertPt);
-  handleNewInstruction(I);
-  return I;
 }
 
 bool NewGVN::eliminateInstructions(Function &F) {
