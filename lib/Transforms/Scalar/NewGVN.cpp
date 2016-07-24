@@ -444,20 +444,6 @@ private:
       Res.Offset = 0;
       return Res;
     }
-
-    bool isSimpleValue() const { return Val.getInt() == SimpleVal; }
-    bool isMemIntrinValue() const { return Val.getInt() == MemIntrin; }
-    bool isUndefValue() const { return Val.getInt() == UndefVal; }
-
-    Value *getSimpleValue() const {
-      assert(isSimpleValue() && "Wrong accessor");
-      return Val.getPointer();
-    }
-
-    MemIntrinsic *getMemIntrinValue() const {
-      assert(isMemIntrinValue() && "Wrong accessor");
-      return cast<MemIntrinsic>(Val.getPointer());
-    }
   };
 
   /// Represents an AvailableValue which can be rematerialized at the end of
