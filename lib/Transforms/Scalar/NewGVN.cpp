@@ -525,8 +525,6 @@ private:
       UnavailBlkVect;
   typedef SmallDenseMap<const BasicBlock *, AvailableValueInBlock>
       AvailValInBlkMap;
-  Value *findPRELeader(Value *, const BasicBlock *, const Value *);
-  Value *findPRELeader(const Expression *, const BasicBlock *, const Value *);
 };
 
 char NewGVN::ID = 0;
@@ -3307,68 +3305,5 @@ bool NewGVN::eliminateInstructions(Function &F) {
   }
 
   return AnythingReplaced;
-}
-
-// Find a leader for OP in BB.
-Value *NewGVN::findPRELeader(Value *Op, const BasicBlock *BB,
-                             const Value *MustDominate) {
-  if (alwaysAvailable(Op))
-    return Op;
-
-  CongruenceClass *CC = ValueToClass[Op];
-  if (!CC || CC == InitialClass)
-    return 0;
-
-  if (CC->RepLeader && alwaysAvailable(CC->RepLeader))
-    return CC->RepLeader;
-  Value *Equiv = findDominatingEquivalent(CC, nullptr, BB);
-  if (Equiv)
-    return Equiv;
-
-  for (auto M : CC->Members) {
-    if (M == MustDominate)
-      continue;
-    if (Instruction *I = dyn_cast<Instruction>(M))
-      if (DT->dominates(I->getParent(), BB))
-        return I;
-  }
-  return 0;
-}
-
-// Find a leader for OP in BB.
-Value *NewGVN::findPRELeader(const Expression *E, const BasicBlock *BB,
-                             const Value *MustDominate) {
-  if (const ConstantExpression *CE = dyn_cast<ConstantExpression>(E))
-    return CE->getConstantValue();
-  else if (const VariableExpression *VE = dyn_cast<VariableExpression>(E))
-    return findPRELeader(VE->getVariableValue(), BB, MustDominate);
-
-  DEBUG(dbgs() << "Hash value was " << E->getHashValue() << "\n");
-
-  const auto Result = ExpressionToClass.find(E);
-  if (Result == ExpressionToClass.end())
-    return 0;
-
-  CongruenceClass *CC = Result->second;
-
-  if (!CC || CC == InitialClass)
-    return 0;
-
-  if (CC->RepLeader &&
-      (isa<Argument>(CC->RepLeader) || isa<Constant>(CC->RepLeader) ||
-       isa<GlobalValue>(CC->RepLeader)))
-    return CC->RepLeader;
-  Value *Equiv = findDominatingEquivalent(CC, nullptr, BB);
-  if (Equiv)
-    return Equiv;
-
-  for (auto M : CC->Members) {
-    if (M == MustDominate)
-      continue;
-    if (Instruction *I = dyn_cast<Instruction>(M))
-      if (DT->dominates(I->getParent(), BB))
-        return I;
-  }
-  return 0;
 }
 
