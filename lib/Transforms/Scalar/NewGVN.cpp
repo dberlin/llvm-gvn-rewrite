@@ -402,7 +402,6 @@ private:
   bool canCoerceMustAliasedValueToLoad(Value *, Type *);
   Value *coerceAvailableValueToLoadType(Value *, Type *, Instruction *);
   Value *getStoreValueForLoad(Value *, unsigned, Type *, Instruction *);
-  Value *getLoadValueForLoad(LoadInst *, unsigned, Type *, Instruction *);
   // New instruction creation
   void handleNewInstruction(Instruction *){};
   void markUsersTouched(Value *);
@@ -2860,83 +2859,6 @@ Value *NewGVN::getStoreValueForLoad(Value *SrcVal, unsigned Offset,
       handleNewInstruction(I);
   }
   return coerceAvailableValueToLoadType(SrcVal, LoadTy, InsertPt);
-}
-
-/// GetLoadValueForLoad - This function is called when we have a
-/// memdep query of a load that ends up being a clobbering load.  This means
-/// that the load *may* provide bits used by the load but we can't be sure
-/// because the pointers don't mustalias.  Check this case to see if there is
-/// anything more we can do before we give up.
-Value *NewGVN::getLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
-                                   Type *LoadTy, Instruction *InsertPt) {
-  // If Offset+LoadTy exceeds the size of SrcVal, then we must be wanting to
-  // widen SrcVal out to a larger load.
-  unsigned SrcValSize = DL->getTypeStoreSize(SrcVal->getType());
-  unsigned LoadSize = DL->getTypeStoreSize(LoadTy);
-  if (Offset + LoadSize > SrcValSize) {
-    assert(SrcVal->isSimple() && "Cannot widen volatile/atomic load!");
-    assert(SrcVal->getType()->isIntegerTy() && "Can't widen non-integer load");
-    // If we have a load/load clobber an DepLI can be widened to cover this
-    // load, then we should widen it to the next power of 2 size big enough!
-    unsigned NewLoadSize = Offset + LoadSize;
-    if (!isPowerOf2_32(NewLoadSize))
-      NewLoadSize = NextPowerOf2(NewLoadSize);
-
-    Value *PtrVal = SrcVal->getPointerOperand();
-
-    // Insert the new load after the old load.  This ensures that subsequent
-    // memdep queries will find the new load.  We can't easily remove the old
-    // load completely because it is already in the value numbering table.
-    IRBuilder<> Builder(SrcVal->getParent(), ++(SrcVal->getIterator()));
-    Type *DestPTy = IntegerType::get(LoadTy->getContext(), NewLoadSize * 8);
-    DestPTy =
-        PointerType::get(DestPTy, PtrVal->getType()->getPointerAddressSpace());
-    Builder.SetCurrentDebugLocation(SrcVal->getDebugLoc());
-    PtrVal = Builder.CreateBitCast(PtrVal, DestPTy);
-    if (Instruction *I = dyn_cast<Instruction>(PtrVal))
-      handleNewInstruction(I);
-    LoadInst *NewLoad = Builder.CreateLoad(PtrVal);
-    NewLoad->takeName(SrcVal);
-    NewLoad->setAlignment(SrcVal->getAlignment());
-    handleNewInstruction(NewLoad);
-    DEBUG(dbgs() << "GVN WIDENED LOAD: " << *SrcVal << "\n");
-    DEBUG(dbgs() << "TO: " << *NewLoad << "\n");
-    // This ensures we forward other coercions onto the new load, instead of the
-    // old one
-    CoercionForwarding[SrcVal] = NewLoad;
-
-    // Replace uses of the original load with the wider load.  On a big endian
-    // system, we need to shift down to get the relevant bits.
-    Value *RV = NewLoad;
-    if (DL->isBigEndian()) {
-      RV = Builder.CreateLShr(
-          RV, NewLoadSize * 8 - SrcVal->getType()->getPrimitiveSizeInBits());
-      if (Instruction *I = dyn_cast<Instruction>(RV))
-        handleNewInstruction(I);
-    }
-
-    RV = Builder.CreateTrunc(RV, SrcVal->getType());
-    if (Instruction *I = dyn_cast<Instruction>(RV))
-      handleNewInstruction(I);
-
-    // markUsersTouched(SrcVal);
-    // assert(false && "Need to debug this");
-    // So, we just widened a load that we will have already gone past in
-    // elimination, so in order to get rid of the uses, we have to do it here
-
-    SrcVal->replaceAllUsesWith(RV);
-
-    // We would like to use gvn.markInstructionForDeletion here, but we can't
-    // because the load is already memoized into the leader map table that GVN
-    // tracks.  It is potentially possible to remove the load from the table,
-    // but then there all of the operations based on it would need to be
-    // rehashed.  Just leave the dead load around.
-    // FIXME: This is no longer a problem
-    markInstructionForDeletion(SrcVal);
-    SrcVal = NewLoad;
-  }
-
-  return getStoreValueForLoad(SrcVal, Offset, LoadTy, InsertPt);
 }
 
 bool NewGVN::eliminateInstructions(Function &F) {
