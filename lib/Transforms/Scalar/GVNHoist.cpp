@@ -23,6 +23,7 @@
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/GVN.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/MemorySSA.h"
 
 using namespace llvm;
@@ -171,6 +172,15 @@ public:
 typedef DenseMap<const BasicBlock *, bool> BBSideEffectsSet;
 typedef SmallVector<Instruction *, 4> SmallVecInsn;
 typedef SmallVectorImpl<Instruction *> SmallVecImplInsn;
+
+static void combineKnownMetadata(Instruction *ReplInst, Instruction *I) {
+  static const unsigned KnownIDs[] = {
+      LLVMContext::MD_tbaa,           LLVMContext::MD_alias_scope,
+      LLVMContext::MD_noalias,        LLVMContext::MD_range,
+      LLVMContext::MD_fpmath,         LLVMContext::MD_invariant_load,
+      LLVMContext::MD_invariant_group};
+  combineMetadata(ReplInst, I, KnownIDs);
+}
 
 // This pass hoists common computations across branches sharing common
 // dominator. The primary goal is to reduce the code size, and in some
@@ -584,21 +594,19 @@ public:
     if (auto *St = dyn_cast<StoreInst>(Repl)) {
       Gep = dyn_cast<GetElementPtrInst>(St->getPointerOperand());
       Val = dyn_cast<Instruction>(St->getValueOperand());
+      // Check that the stored value is available.
+      if (Val) {
+        if (isa<GetElementPtrInst>(Val)) {
+          // Check whether we can compute the GEP at HoistPt.
+          if (!allOperandsAvailable(Val, HoistPt))
+            return false;
+        } else if (!DT->dominates(Val->getParent(), HoistPt))
+          return false;
+      }
     }
 
-    if (!Gep)
-      return false;
-
-    // PHIs may only be inserted at the start of a block.
-    if (Val && isa<PHINode>(Val))
-      return false;
-
     // Check whether we can compute the Gep at HoistPt.
-    if (!allOperandsAvailable(Gep, HoistPt))
-      return false;
-
-    // Also check that the stored value is available.
-    if (Val && !allOperandsAvailable(Val, HoistPt))
+    if (!Gep || !allOperandsAvailable(Gep, HoistPt))
       return false;
 
     // Copy the gep before moving the ld/st.
@@ -606,31 +614,30 @@ public:
     ClonedGep->insertBefore(HoistPt->getTerminator());
     // Conservatively discard any optimization hints, they may differ on the
     // other paths.
-    ClonedGep->dropUnknownNonDebugMetadata();
-    for (const Instruction *OtherInst : InstructionsToHoist) {
-      const GetElementPtrInst *OtherGep;
+    for (Instruction *OtherInst : InstructionsToHoist) {
+      GetElementPtrInst *OtherGep;
       if (auto *OtherLd = dyn_cast<LoadInst>(OtherInst))
         OtherGep = cast<GetElementPtrInst>(OtherLd->getPointerOperand());
       else
         OtherGep = cast<GetElementPtrInst>(
             cast<StoreInst>(OtherInst)->getPointerOperand());
       ClonedGep->intersectOptionalDataWith(OtherGep);
+      combineKnownMetadata(ClonedGep, OtherGep);
     }
     Repl->replaceUsesOfWith(Gep, ClonedGep);
 
-    // Also copy Val.
-    if (Val) {
+    // Also copy Val when it is a GEP.
+    if (Val && isa<GetElementPtrInst>(Val)) {
       Instruction *ClonedVal = Val->clone();
       ClonedVal->insertBefore(HoistPt->getTerminator());
       // Conservatively discard any optimization hints, they may differ on the
       // other paths.
-      ClonedVal->dropUnknownNonDebugMetadata();
-      for (const Instruction *OtherInst : InstructionsToHoist) {
-        const auto *OtherVal =
+      for (Instruction *OtherInst : InstructionsToHoist) {
+        auto *OtherVal =
             cast<Instruction>(cast<StoreInst>(OtherInst)->getValueOperand());
         ClonedVal->intersectOptionalDataWith(OtherVal);
+        combineKnownMetadata(ClonedVal, OtherVal);
       }
-      ClonedVal->clearSubclassOptionalData();
       Repl->replaceUsesOfWith(Val, ClonedVal);
     }
 
@@ -671,7 +678,6 @@ public:
         Repl->moveBefore(HoistPt->getTerminator());
         // TBAA may differ on one of the other paths, we need to get rid of
         // anything which might conflict.
-        Repl->dropUnknownNonDebugMetadata();
       }
 
       if (isa<LoadInst>(Repl))
@@ -687,13 +693,25 @@ public:
       for (Instruction *I : InstructionsToHoist)
         if (I != Repl) {
           ++NR;
-          if (isa<LoadInst>(Repl))
+          if (auto *ReplacementLoad = dyn_cast<LoadInst>(Repl)) {
+            ReplacementLoad->setAlignment(
+                std::min(ReplacementLoad->getAlignment(),
+                         cast<LoadInst>(I)->getAlignment()));
             ++NumLoadsRemoved;
-          else if (isa<StoreInst>(Repl))
+          } else if (auto *ReplacementStore = dyn_cast<StoreInst>(Repl)) {
+            ReplacementStore->setAlignment(
+                std::min(ReplacementStore->getAlignment(),
+                         cast<StoreInst>(I)->getAlignment()));
             ++NumStoresRemoved;
-          else if (isa<CallInst>(Repl))
+          } else if (auto *ReplacementAlloca = dyn_cast<AllocaInst>(Repl)) {
+            ReplacementAlloca->setAlignment(
+                std::max(ReplacementAlloca->getAlignment(),
+                         cast<AllocaInst>(I)->getAlignment()));
+          } else if (isa<CallInst>(Repl)) {
             ++NumCallsRemoved;
+          }
           Repl->intersectOptionalDataWith(I);
+          combineKnownMetadata(Repl, I);
           I->replaceAllUsesWith(Repl);
           I->eraseFromParent();
         }

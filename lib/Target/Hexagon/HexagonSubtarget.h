@@ -34,6 +34,7 @@ class HexagonSubtarget : public HexagonGenSubtargetInfo {
   virtual void anchor();
 
   bool UseMemOps, UseHVXOps, UseHVXDblOps;
+  bool UseLongCalls;
   bool ModeIEEERndNear;
 
 public:
@@ -101,6 +102,7 @@ public:
   bool useHVXOps() const { return UseHVXOps; }
   bool useHVXDblOps() const { return UseHVXOps && UseHVXDblOps; }
   bool useHVXSglOps() const { return UseHVXOps && !UseHVXDblOps; }
+  bool useLongCalls() const { return UseLongCalls; }
 
   bool useBSBScheduling() const { return UseBSBScheduling; }
   bool enableMachineScheduler() const override;
@@ -131,6 +133,9 @@ public:
   /// \brief Perform target specific adjustments to the latency of a schedule
   /// dependency.
   void adjustSchedDependency(SUnit *def, SUnit *use, SDep& dep) const override;
+
+  unsigned getL1CacheLineSize() const;
+  unsigned getL1PrefetchDistance() const;
 
 private:
   // Helper function responsible for increasing the latency only.
