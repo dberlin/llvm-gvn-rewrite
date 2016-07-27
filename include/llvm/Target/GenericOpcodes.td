@@ -22,9 +22,28 @@ def G_FRAME_INDEX : Instruction {
   let hasSideEffects = 0;
 }
 
+def G_INTTOPTR : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src);
+  let hasSideEffects = 0;
+}
+
+def G_PTRTOINT : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src);
+  let hasSideEffects = 0;
+}
+
+def G_BITCAST : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src);
+  let hasSideEffects = 0;
+}
+
 //------------------------------------------------------------------------------
 // Binary ops.
 //------------------------------------------------------------------------------
+
 // Generic addition.
 def G_ADD : Instruction {
   let OutOperandList = (outs unknown:$dst);
@@ -58,6 +77,26 @@ def G_OR : Instruction {
 }
 
 //------------------------------------------------------------------------------
+// Memory ops
+//------------------------------------------------------------------------------
+
+// Generic load. Expects a MachineMemOperand in addition to explicit operands.
+def G_LOAD : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$addr);
+  let hasSideEffects = 0;
+  let mayLoad = 1;
+}
+
+// Generic store. Expects a MachineMemOperand in addition to explicit operands.
+def G_STORE : Instruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins unknown:$src, unknown:$addr);
+  let hasSideEffects = 0;
+  let mayStore = 1;
+}
+
+//------------------------------------------------------------------------------
 // Variadic ops
 //------------------------------------------------------------------------------
 
@@ -65,7 +104,7 @@ def G_OR : Instruction {
 // indexes. This will almost certainly be mapped to sub-register COPYs after
 // register banks have been selected.
 def G_EXTRACT : Instruction {
-  let OutOperandList = (outs variable_ops);
+  let OutOperandList = (outs);
   let InOperandList = (ins variable_ops);
   let hasSideEffects = 0;
 }
