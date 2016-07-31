@@ -720,6 +720,12 @@ SDValue SITargetLowering::LowerFormalArguments(
     CCInfo.AllocateReg(InputPtrReg);
   }
 
+  if (Info->hasDispatchID()) {
+    unsigned DispatchIDReg = Info->addDispatchID(*TRI);
+    MF.addLiveIn(DispatchIDReg, &AMDGPU::SReg_64RegClass);
+    CCInfo.AllocateReg(DispatchIDReg);
+  }
+
   if (Info->hasFlatScratchInit()) {
     unsigned FlatScratchInitReg = Info->addFlatScratchInit(*TRI);
     MF.addLiveIn(FlatScratchInitReg, &AMDGPU::SReg_64RegClass);
@@ -764,7 +770,7 @@ SDValue SITargetLowering::LowerFormalArguments(
       }
 
       InVals.push_back(Arg);
-      Info->ABIArgOffset = Offset + MemVT.getStoreSize();
+      Info->setABIArgOffset(Offset + MemVT.getStoreSize());
       continue;
     }
     assert(VA.isRegLoc() && "Parameter must be in a register!");
@@ -1091,27 +1097,10 @@ MachineBasicBlock *SITargetLowering::splitKillBlock(MachineInstr &MI,
   MachineBasicBlock *SplitBB
     = MF->CreateMachineBasicBlock(BB->getBasicBlock());
 
-  // Fix the block phi references to point to the new block for the defs in the
-  // second piece of the block.
-  for (MachineBasicBlock *Succ : BB->successors()) {
-    for (MachineInstr &MI : *Succ) {
-      if (!MI.isPHI())
-        break;
-
-      for (unsigned I = 2, E = MI.getNumOperands(); I != E; I += 2) {
-        MachineOperand &FromBB = MI.getOperand(I);
-        if (BB == FromBB.getMBB()) {
-          FromBB.setMBB(SplitBB);
-          break;
-        }
-      }
-    }
-  }
-
   MF->insert(++MachineFunction::iterator(BB), SplitBB);
   SplitBB->splice(SplitBB->begin(), BB, SplitPoint, BB->end());
 
-  SplitBB->transferSuccessors(BB);
+  SplitBB->transferSuccessorsAndUpdatePHIs(BB);
   BB->addSuccessor(SplitBB);
 
   MI.setDesc(TII->get(AMDGPU::SI_KILL_TERMINATOR));
@@ -1161,7 +1150,7 @@ static void emitLoadM0FromVGPRLoop(const SIInstrInfo *TII,
   // Compare the just read M0 value to all possible Idx values.
   BuildMI(LoopBB, I, DL, TII->get(AMDGPU::V_CMP_EQ_U32_e64), CondReg)
     .addReg(CurrentIdxReg)
-    .addOperand(IdxReg);
+    .addReg(IdxReg.getReg(), 0, IdxReg.getSubReg());
 
   // Move index from VCC into M0
   if (Offset == 0) {
@@ -1236,7 +1225,7 @@ static MachineBasicBlock *loadM0FromVGPR(const SIInstrInfo *TII,
   LoopBB->addSuccessor(RemainderBB);
 
   // Move the rest of the block into a new block.
-  RemainderBB->transferSuccessors(&MBB);
+  RemainderBB->transferSuccessorsAndUpdatePHIs(&MBB);
   RemainderBB->splice(RemainderBB->begin(), &MBB, I, MBB.end());
 
   MBB.addSuccessor(LoopBB);
@@ -1444,9 +1433,9 @@ MachineBasicBlock *SITargetLowering::EmitInstrWithCustomInserter(
     MachineFunction *MF = BB->getParent();
     SIMachineFunctionInfo *MFI = MF->getInfo<SIMachineFunctionInfo>();
     DebugLoc DL = MI.getDebugLoc();
-    BuildMI(*BB, MI, DL, TII->get(AMDGPU::S_MOVK_I32))
-        .addOperand(MI.getOperand(0))
-        .addImm(MFI->LDSSize);
+    BuildMI(*BB, MI, DL, TII->get(AMDGPU::S_MOV_B32))
+      .addOperand(MI.getOperand(0))
+      .addImm(MFI->getLDSSize());
     MI.eraseFromParent();
     return BB;
   }
@@ -1992,6 +1981,10 @@ SDValue SITargetLowering::LowerINTRINSIC_WO_CHAIN(SDValue Op,
       = TRI->getPreloadedValue(MF, SIRegisterInfo::KERNARG_SEGMENT_PTR);
     return CreateLiveInRegister(DAG, &AMDGPU::SReg_64RegClass, Reg, VT);
   }
+  case Intrinsic::amdgcn_dispatch_id: {
+    unsigned Reg = TRI->getPreloadedValue(MF, SIRegisterInfo::DISPATCH_ID);
+    return CreateLiveInRegister(DAG, &AMDGPU::SReg_64RegClass, Reg, VT);
+  }
   case Intrinsic::amdgcn_rcp:
     return DAG.getNode(AMDGPUISD::RCP, DL, VT, Op.getOperand(1));
   case Intrinsic::amdgcn_rsq:
@@ -2002,6 +1995,11 @@ SDValue SITargetLowering::LowerINTRINSIC_WO_CHAIN(SDValue Op,
       return emitRemovedIntrinsicError(DAG, DL, VT);
 
     return DAG.getNode(AMDGPUISD::RSQ_LEGACY, DL, VT, Op.getOperand(1));
+  }
+  case Intrinsic::amdgcn_rcp_legacy: {
+    if (Subtarget->getGeneration() >= SISubtarget::VOLCANIC_ISLANDS)
+      return emitRemovedIntrinsicError(DAG, DL, VT);
+    return DAG.getNode(AMDGPUISD::RCP_LEGACY, DL, VT, Op.getOperand(1));
   }
   case Intrinsic::amdgcn_rsq_clamp: {
     if (Subtarget->getGeneration() < SISubtarget::VOLCANIC_ISLANDS)
@@ -2071,11 +2069,6 @@ SDValue SITargetLowering::LowerINTRINSIC_WO_CHAIN(SDValue Op,
 
     return lowerImplicitZextParam(DAG, Op, MVT::i16,
                                   SI::KernelInputOffsets::LOCAL_SIZE_Z);
-  case Intrinsic::amdgcn_read_workdim:
-  case AMDGPUIntrinsic::AMDGPU_read_workdim: // Legacy name.
-    // Really only 2 bits.
-    return lowerImplicitZextParam(DAG, Op, MVT::i8,
-                                  getImplicitParameterOffset(MFI, GRID_DIM));
   case Intrinsic::amdgcn_workgroup_id_x:
   case Intrinsic::r600_read_tgid_x:
     return CreateLiveInRegister(DAG, &AMDGPU::SReg_32RegClass,
@@ -2220,6 +2213,9 @@ SDValue SITargetLowering::LowerINTRINSIC_WO_CHAIN(SDValue Op,
     return DAG.getNode(AMDGPUISD::DIV_SCALE, DL, Op->getVTList(), Src0,
                        Denominator, Numerator);
   }
+  case Intrinsic::amdgcn_fmul_legacy:
+    return DAG.getNode(AMDGPUISD::FMUL_LEGACY, DL, VT,
+                       Op.getOperand(1), Op.getOperand(2));
   case Intrinsic::amdgcn_sffbh:
   case AMDGPUIntrinsic::AMDGPU_flbit_i32: // Legacy name.
     return DAG.getNode(AMDGPUISD::FFBH_I32, DL, VT, Op.getOperand(1));
@@ -3368,6 +3364,7 @@ SDValue SITargetLowering::PerformDAGCombine(SDNode *N,
   case AMDGPUISD::FRACT:
   case AMDGPUISD::RCP:
   case AMDGPUISD::RSQ:
+  case AMDGPUISD::RCP_LEGACY:
   case AMDGPUISD::RSQ_LEGACY:
   case AMDGPUISD::RSQ_CLAMP:
   case AMDGPUISD::LDEXP: {

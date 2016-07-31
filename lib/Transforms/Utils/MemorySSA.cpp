@@ -236,9 +236,6 @@ checkClobberSanity(MemoryAccess *Start, MemoryAccess *ClobberAt,
     return;
   }
 
-  assert((isa<MemoryPhi>(Start) || Start != ClobberAt) &&
-         "Start can't clobber itself!");
-
   bool FoundClobber = false;
   DenseSet<MemoryAccessPair> VisitedPhis;
   SmallVector<MemoryAccessPair, 8> Worklist;
@@ -368,7 +365,6 @@ class ClobberWalker {
   /// keep track of this information for us, and allow us O(1) lookups of this
   /// info.
   MemoryAccess *getWalkTarget(const MemoryPhi *From) {
-    assert(!MSSA.isLiveOnEntryDef(From) && "liveOnEntry has no target.");
     assert(From->getNumOperands() && "Phi with no operands?");
 
     BasicBlock *BB = From->getBlock();
@@ -819,22 +815,23 @@ public:
     // Fast path for the overly-common case (no crazy phi optimization
     // necessary)
     UpwardsWalkResult WalkResult = walkToPhiOrClobber(FirstDesc);
+    MemoryAccess *Result;
     if (WalkResult.IsKnownClobber) {
       cacheDefPath(FirstDesc, WalkResult.Result);
-      return WalkResult.Result;
+      Result = WalkResult.Result;
+    } else {
+      OptznResult OptRes = tryOptimizePhi(cast<MemoryPhi>(FirstDesc.Last),
+                                          Current, Q.StartingLoc);
+      verifyOptResult(OptRes);
+      cacheOptResult(OptRes);
+      resetPhiOptznState();
+      Result = OptRes.PrimaryClobber.Clobber;
     }
 
-    OptznResult OptRes =
-        tryOptimizePhi(cast<MemoryPhi>(FirstDesc.Last), Current, Q.StartingLoc);
-    verifyOptResult(OptRes);
-    cacheOptResult(OptRes);
-    resetPhiOptznState();
-
 #ifdef EXPENSIVE_CHECKS
-    checkClobberSanity(Current, OptRes.PrimaryClobber.Clobber, Q.StartingLoc,
-                       MSSA, Q, AA);
+    checkClobberSanity(Current, Result, Q.StartingLoc, MSSA, Q, AA);
 #endif
-    return OptRes.PrimaryClobber.Clobber;
+    return Result;
   }
 };
 
@@ -900,7 +897,8 @@ public:
   CachingWalker(MemorySSA *, AliasAnalysis *, DominatorTree *);
   ~CachingWalker() override;
 
-  MemoryAccess *getClobberingMemoryAccess(const Instruction *) override;
+  using MemorySSAWalker::getClobberingMemoryAccess;
+  MemoryAccess *getClobberingMemoryAccess(MemoryAccess *) override;
   MemoryAccess *getClobberingMemoryAccess(MemoryAccess *,
                                           MemoryLocation &) override;
   void invalidateInfo(MemoryAccess *) override;
@@ -1850,11 +1848,13 @@ MemoryAccess *MemorySSA::CachingWalker::getClobberingMemoryAccess(
 }
 
 MemoryAccess *
-MemorySSA::CachingWalker::getClobberingMemoryAccess(const Instruction *I) {
-  // There should be no way to lookup an instruction and get a phi as the
-  // access, since we only map BB's to PHI's. So, this must be a use or def.
-  auto *StartingAccess = cast<MemoryUseOrDef>(MSSA->getMemoryAccess(I));
+MemorySSA::CachingWalker::getClobberingMemoryAccess(MemoryAccess *MA) {
+  auto *StartingAccess = dyn_cast<MemoryUseOrDef>(MA);
+  // If this is a MemoryPhi, we can't do anything.
+  if (!StartingAccess)
+    return MA;
 
+  const Instruction *I = StartingAccess->getMemoryInst();
   UpwardsMemoryQuery Q(I, StartingAccess);
   // We can't sanely do anything with a fences, they conservatively
   // clobber all memory, and have no locations to get pointers from to
@@ -1888,8 +1888,7 @@ void MemorySSA::CachingWalker::verifyRemoved(MemoryAccess *MA) {
 }
 
 MemoryAccess *
-DoNothingMemorySSAWalker::getClobberingMemoryAccess(const Instruction *I) {
-  MemoryAccess *MA = MSSA->getMemoryAccess(I);
+DoNothingMemorySSAWalker::getClobberingMemoryAccess(MemoryAccess *MA) {
   if (auto *Use = dyn_cast<MemoryUseOrDef>(MA))
     return Use->getDefiningAccess();
   return MA;

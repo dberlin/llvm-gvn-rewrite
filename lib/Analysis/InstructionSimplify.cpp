@@ -69,7 +69,8 @@ static Value *SimplifyCmpInst(unsigned, Value *, Value *, const Query &,
                               unsigned);
 static Value *SimplifyOrInst(Value *, Value *, const Query &, unsigned);
 static Value *SimplifyXorInst(Value *, Value *, const Query &, unsigned);
-static Value *SimplifyTruncInst(Value *, Type *, const Query &, unsigned);
+static Value *SimplifyCastInst(unsigned, Value *, Type *,
+                               const Query &, unsigned);
 
 /// For a boolean type, or a vector of boolean type, return false, or
 /// a vector with every element false, as appropriate for the type.
@@ -747,7 +748,8 @@ static Value *SimplifySubInst(Value *Op0, Value *Op1, bool isNSW, bool isNUW,
       // See if "V === X - Y" simplifies.
       if (Value *V = SimplifyBinOp(Instruction::Sub, X, Y, Q, MaxRecurse-1))
         // It does!  Now see if "trunc V" simplifies.
-        if (Value *W = SimplifyTruncInst(V, Op0->getType(), Q, MaxRecurse-1))
+        if (Value *W = SimplifyCastInst(Instruction::Trunc, V, Op0->getType(),
+                                        Q, MaxRecurse - 1))
           // It does, return the simplified "trunc V".
           return W;
 
@@ -3406,6 +3408,36 @@ static Value *simplifySelectBitTest(Value *TrueVal, Value *FalseVal, Value *X,
   return nullptr;
 }
 
+/// An alternative way to test if a bit is set or not uses sgt/slt instead of
+/// eq/ne.
+static Value *simplifySelectWithFakeICmpEq(Value *CmpLHS, Value *TrueVal,
+                                           Value *FalseVal,
+                                           bool TrueWhenUnset) {
+  unsigned BitWidth = TrueVal->getType()->getScalarSizeInBits();
+  if (!BitWidth)
+    return nullptr;
+  
+  APInt MinSignedValue;
+  Value *X;
+  if (match(CmpLHS, m_Trunc(m_Value(X))) && (X == TrueVal || X == FalseVal)) {
+    // icmp slt (trunc X), 0  <--> icmp ne (and X, C), 0
+    // icmp sgt (trunc X), -1 <--> icmp eq (and X, C), 0
+    unsigned DestSize = CmpLHS->getType()->getScalarSizeInBits();
+    MinSignedValue = APInt::getSignedMinValue(DestSize).zext(BitWidth);
+  } else {
+    // icmp slt X, 0  <--> icmp ne (and X, C), 0
+    // icmp sgt X, -1 <--> icmp eq (and X, C), 0
+    X = CmpLHS;
+    MinSignedValue = APInt::getSignedMinValue(BitWidth);
+  }
+
+  if (Value *V = simplifySelectBitTest(TrueVal, FalseVal, X, &MinSignedValue,
+                                       TrueWhenUnset))
+    return V;
+
+  return nullptr;
+}
+
 /// Try to simplify a select instruction when its condition operand is an
 /// integer comparison.
 static Value *simplifySelectWithICmpCond(Value *CondVal, Value *TrueVal,
@@ -3416,8 +3448,8 @@ static Value *simplifySelectWithICmpCond(Value *CondVal, Value *TrueVal,
   if (!match(CondVal, m_ICmp(Pred, m_Value(CmpLHS), m_Value(CmpRHS))))
     return nullptr;
 
-  unsigned BitWidth = Q.DL.getTypeSizeInBits(TrueVal->getType());
-  APInt MinSignedValue = APInt::getSignBit(BitWidth);
+  // FIXME: This code is nearly duplicated in InstCombine. Using/refactoring
+  // decomposeBitTestICmp() might help.
   if (ICmpInst::isEquality(Pred) && match(CmpRHS, m_Zero())) {
     Value *X;
     const APInt *Y;
@@ -3426,12 +3458,14 @@ static Value *simplifySelectWithICmpCond(Value *CondVal, Value *TrueVal,
                                            Pred == ICmpInst::ICMP_EQ))
         return V;
   } else if (Pred == ICmpInst::ICMP_SLT && match(CmpRHS, m_Zero())) {
-    if (Value *V = simplifySelectBitTest(TrueVal, FalseVal, CmpLHS,
-                                         &MinSignedValue, false))
+    // Comparing signed-less-than 0 checks if the sign bit is set.
+    if (Value *V = simplifySelectWithFakeICmpEq(CmpLHS, TrueVal, FalseVal,
+                                                false))
       return V;
   } else if (Pred == ICmpInst::ICMP_SGT && match(CmpRHS, m_AllOnes())) {
-    if (Value *V = simplifySelectBitTest(TrueVal, FalseVal, CmpLHS,
-                                         &MinSignedValue, true))
+    // Comparing signed-greater-than -1 checks if the sign bit is not set.
+    if (Value *V = simplifySelectWithFakeICmpEq(CmpLHS, TrueVal, FalseVal,
+                                                true))
       return V;
   }
 
@@ -3757,19 +3791,47 @@ static Value *SimplifyPHINode(PHINode *PN, const Query &Q) {
   return CommonValue;
 }
 
-static Value *SimplifyTruncInst(Value *Op, Type *Ty, const Query &Q, unsigned) {
-  if (Constant *C = dyn_cast<Constant>(Op))
-    return ConstantFoldCastOperand(Instruction::Trunc, C, Ty, Q.DL);
+static Value *SimplifyCastInst(unsigned CastOpc, Value *Op,
+                               Type *Ty, const Query &Q, unsigned MaxRecurse) {
+  if (auto *C = dyn_cast<Constant>(Op))
+    return ConstantFoldCastOperand(CastOpc, C, Ty, Q.DL);
+
+  if (auto *CI = dyn_cast<CastInst>(Op)) {
+    auto *Src = CI->getOperand(0);
+    Type *SrcTy = Src->getType();
+    Type *MidTy = CI->getType();
+    Type *DstTy = Ty;
+    if (Src->getType() == Ty) {
+      auto FirstOp = static_cast<Instruction::CastOps>(CI->getOpcode());
+      auto SecondOp = static_cast<Instruction::CastOps>(CastOpc);
+      Type *SrcIntPtrTy =
+          SrcTy->isPtrOrPtrVectorTy() ? Q.DL.getIntPtrType(SrcTy) : nullptr;
+      Type *MidIntPtrTy =
+          MidTy->isPtrOrPtrVectorTy() ? Q.DL.getIntPtrType(MidTy) : nullptr;
+      Type *DstIntPtrTy =
+          DstTy->isPtrOrPtrVectorTy() ? Q.DL.getIntPtrType(DstTy) : nullptr;
+      if (CastInst::isEliminableCastPair(FirstOp, SecondOp, SrcTy, MidTy, DstTy,
+                                         SrcIntPtrTy, MidIntPtrTy,
+                                         DstIntPtrTy) == Instruction::BitCast)
+        return Src;
+    }
+  }
+
+  // bitcast x -> x
+  if (CastOpc == Instruction::BitCast)
+    if (Op->getType() == Ty)
+      return Op;
 
   return nullptr;
 }
 
-Value *llvm::SimplifyTruncInst(Value *Op, Type *Ty, const DataLayout &DL,
-                               const TargetLibraryInfo *TLI,
-                               const DominatorTree *DT, AssumptionCache *AC,
-                               const Instruction *CxtI) {
-  return ::SimplifyTruncInst(Op, Ty, Query(DL, TLI, DT, AC, CxtI),
-                             RecursionLimit);
+Value *llvm::SimplifyCastInst(unsigned CastOpc, Value *Op, Type *Ty,
+                              const DataLayout &DL,
+                              const TargetLibraryInfo *TLI,
+                              const DominatorTree *DT, AssumptionCache *AC,
+                              const Instruction *CxtI) {
+  return ::SimplifyCastInst(CastOpc, Op, Ty, Query(DL, TLI, DT, AC, CxtI),
+                            RecursionLimit);
 }
 
 //=== Helper functions for higher up the class hierarchy.
@@ -4238,9 +4300,11 @@ Value *llvm::SimplifyInstruction(Instruction *I, const DataLayout &DL,
                           TLI, DT, AC, I);
     break;
   }
-  case Instruction::Trunc:
-    Result =
-        SimplifyTruncInst(I->getOperand(0), I->getType(), DL, TLI, DT, AC, I);
+#define HANDLE_CAST_INST(num, opc, clas) case Instruction::opc:
+#include "llvm/IR/Instruction.def"
+#undef HANDLE_CAST_INST
+    Result = SimplifyCastInst(I->getOpcode(), I->getOperand(0), I->getType(),
+                              DL, TLI, DT, AC, I);
     break;
   }
 

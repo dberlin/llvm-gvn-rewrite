@@ -28,10 +28,6 @@ class AMDGPUTargetLowering : public TargetLowering {
 protected:
   const AMDGPUSubtarget *Subtarget;
 
-  SDValue LowerConstantInitializer(const Constant* Init, const GlobalValue *GV,
-                                   const SDValue &InitPtr,
-                                   SDValue Chain,
-                                   SelectionDAG &DAG) const;
   SDValue LowerEXTRACT_SUBVECTOR(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerCONCAT_VECTORS(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerINTRINSIC_WO_CHAIN(SDValue Op, SelectionDAG &DAG) const;
@@ -79,7 +75,6 @@ protected:
   SDValue performSelectCombine(SDNode *N, DAGCombinerInfo &DCI) const;
 
   static EVT getEquivalentMemType(LLVMContext &Context, EVT VT);
-  static EVT getEquivalentBitType(LLVMContext &Context, EVT VT);
 
   virtual SDValue LowerGlobalAddress(AMDGPUMachineFunction *MFI, SDValue Op,
                                      SelectionDAG &DAG) const;
@@ -254,7 +249,9 @@ enum NodeType : unsigned {
   //            For f64, max error 2^29 ULP, handles denormals.
   RCP,
   RSQ,
+  RCP_LEGACY,
   RSQ_LEGACY,
+  FMUL_LEGACY,
   RSQ_CLAMP,
   LDEXP,
   FP_CLASS,

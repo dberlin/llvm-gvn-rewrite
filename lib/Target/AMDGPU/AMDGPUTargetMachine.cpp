@@ -315,7 +315,9 @@ public:
   bool addInstSelector() override;
 #ifdef LLVM_BUILD_GLOBAL_ISEL
   bool addIRTranslator() override;
+  bool addLegalizeMachineIR() override;
   bool addRegBankSelect() override;
+  bool addGlobalInstructionSelect() override;
 #endif
   void addFastRegAlloc(FunctionPass *RegAllocPass) override;
   void addOptimizedRegAlloc(FunctionPass *RegAllocPass) override;
@@ -520,7 +522,15 @@ bool GCNPassConfig::addIRTranslator() {
   return false;
 }
 
+bool GCNPassConfig::addLegalizeMachineIR() {
+  return false;
+}
+
 bool GCNPassConfig::addRegBankSelect() {
+  return false;
+}
+
+bool GCNPassConfig::addGlobalInstructionSelect() {
   return false;
 }
 #endif

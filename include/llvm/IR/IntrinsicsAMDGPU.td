@@ -41,8 +41,6 @@ defm int_r600_read_tgid : AMDGPUReadPreloadRegisterIntrinsic_xyz_named
 defm int_r600_read_local_size : AMDGPUReadPreloadRegisterIntrinsic_xyz;
 defm int_r600_read_tidig : AMDGPUReadPreloadRegisterIntrinsic_xyz;
 
-def int_r600_read_workdim : AMDGPUReadPreloadRegisterIntrinsic;
-
 def int_r600_group_barrier : GCCBuiltin<"__builtin_r600_group_barrier">,
   Intrinsic<[], [], [IntrConvergent]>;
 
@@ -70,9 +68,41 @@ def int_r600_recipsqrt_clamped : Intrinsic<
 
 let TargetPrefix = "amdgcn" in {
 
+//===----------------------------------------------------------------------===//
+// ABI Special Intrinsics
+//===----------------------------------------------------------------------===//
+
 defm int_amdgcn_workitem_id : AMDGPUReadPreloadRegisterIntrinsic_xyz;
 defm int_amdgcn_workgroup_id : AMDGPUReadPreloadRegisterIntrinsic_xyz_named
                                <"__builtin_amdgcn_workgroup_id">;
+
+def int_amdgcn_dispatch_ptr :
+  GCCBuiltin<"__builtin_amdgcn_dispatch_ptr">,
+  Intrinsic<[LLVMQualPointerType<llvm_i8_ty, 2>], [], [IntrNoMem]>;
+
+def int_amdgcn_queue_ptr :
+  GCCBuiltin<"__builtin_amdgcn_queue_ptr">,
+  Intrinsic<[LLVMQualPointerType<llvm_i8_ty, 2>], [], [IntrNoMem]>;
+
+def int_amdgcn_kernarg_segment_ptr :
+  GCCBuiltin<"__builtin_amdgcn_kernarg_segment_ptr">,
+  Intrinsic<[LLVMQualPointerType<llvm_i8_ty, 2>], [], [IntrNoMem]>;
+
+def int_amdgcn_implicitarg_ptr :
+  GCCBuiltin<"__builtin_amdgcn_implicitarg_ptr">,
+  Intrinsic<[LLVMQualPointerType<llvm_i8_ty, 2>], [], [IntrNoMem]>;
+
+def int_amdgcn_groupstaticsize :
+  GCCBuiltin<"__builtin_amdgcn_groupstaticsize">,
+  Intrinsic<[llvm_i32_ty], [], [IntrNoMem]>;
+
+def int_amdgcn_dispatch_id :
+  GCCBuiltin<"__builtin_amdgcn_dispatch_id">,
+  Intrinsic<[llvm_i64_ty], [], [IntrNoMem]>;
+
+//===----------------------------------------------------------------------===//
+// Instruction Intrinsics
+//===----------------------------------------------------------------------===//
 
 def int_amdgcn_s_barrier : GCCBuiltin<"__builtin_amdgcn_s_barrier">,
   Intrinsic<[], [], [IntrConvergent]>;
@@ -115,8 +145,16 @@ def int_amdgcn_log_clamp : Intrinsic<
   [llvm_anyfloat_ty], [LLVMMatchType<0>], [IntrNoMem]
 >;
 
+def int_amdgcn_fmul_legacy : GCCBuiltin<"__builtin_amdgcn_fmul_legacy">,
+  Intrinsic<[llvm_float_ty], [llvm_float_ty, llvm_float_ty], [IntrNoMem]
+>;
+
 def int_amdgcn_rcp : Intrinsic<
   [llvm_anyfloat_ty], [LLVMMatchType<0>], [IntrNoMem]
+>;
+
+def int_amdgcn_rcp_legacy : GCCBuiltin<"__builtin_amdgcn_rcp_legacy">,
+  Intrinsic<[llvm_float_ty], [llvm_float_ty], [IntrNoMem]
 >;
 
 def int_amdgcn_rsq :  Intrinsic<
@@ -303,9 +341,6 @@ def int_amdgcn_buffer_atomic_cmpswap : Intrinsic<
    llvm_i1_ty],       // slc(imm)
   []>;
 
-def int_amdgcn_read_workdim : AMDGPUReadPreloadRegisterIntrinsic;
-
-
 def int_amdgcn_buffer_wbinvl1_sc :
   GCCBuiltin<"__builtin_amdgcn_buffer_wbinvl1_sc">,
   Intrinsic<[], [], []>;
@@ -330,26 +365,6 @@ def int_amdgcn_s_sleep :
 def int_amdgcn_s_getreg :
   GCCBuiltin<"__builtin_amdgcn_s_getreg">,
   Intrinsic<[llvm_i32_ty], [llvm_i32_ty], [IntrReadMem]>;
-
-def int_amdgcn_groupstaticsize :
-  GCCBuiltin<"__builtin_amdgcn_groupstaticsize">,
-  Intrinsic<[llvm_i32_ty], [], [IntrNoMem]>;
-
-def int_amdgcn_dispatch_ptr :
-  GCCBuiltin<"__builtin_amdgcn_dispatch_ptr">,
-  Intrinsic<[LLVMQualPointerType<llvm_i8_ty, 2>], [], [IntrNoMem]>;
-
-def int_amdgcn_queue_ptr :
-  GCCBuiltin<"__builtin_amdgcn_queue_ptr">,
-  Intrinsic<[LLVMQualPointerType<llvm_i8_ty, 2>], [], [IntrNoMem]>;
-
-def int_amdgcn_kernarg_segment_ptr :
-  GCCBuiltin<"__builtin_amdgcn_kernarg_segment_ptr">,
-  Intrinsic<[LLVMQualPointerType<llvm_i8_ty, 2>], [], [IntrNoMem]>;
-
-def int_amdgcn_implicitarg_ptr :
-  GCCBuiltin<"__builtin_amdgcn_implicitarg_ptr">,
-  Intrinsic<[LLVMQualPointerType<llvm_i8_ty, 2>], [], [IntrNoMem]>;
 
 // __builtin_amdgcn_interp_p1 <i>, <attr_chan>, <attr>, <m0>
 def int_amdgcn_interp_p1 :

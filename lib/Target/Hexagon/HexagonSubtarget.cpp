@@ -69,6 +69,10 @@ static cl::opt<bool> EnableSubregLiveness("hexagon-subreg-liveness",
   cl::Hidden, cl::ZeroOrMore, cl::init(false),
   cl::desc("Enable subregister liveness tracking for Hexagon"));
 
+static cl::opt<bool> OverrideLongCalls("hexagon-long-calls",
+  cl::Hidden, cl::ZeroOrMore, cl::init(false),
+  cl::desc("If present, forces/disables the use of long calls"));
+
 void HexagonSubtarget::initializeEnvironment() {
   UseMemOps = false;
   ModeIEEERndNear = false;
@@ -94,12 +98,15 @@ HexagonSubtarget::initializeSubtargetDependencies(StringRef CPU, StringRef FS) {
 
   UseHVXOps = false;
   UseHVXDblOps = false;
+  UseLongCalls = false;
   ParseSubtargetFeatures(CPUString, FS);
 
   if (EnableHexagonHVX.getPosition())
     UseHVXOps = EnableHexagonHVX;
   if (EnableHexagonHVXDouble.getPosition())
     UseHVXDblOps = EnableHexagonHVXDouble;
+  if (OverrideLongCalls.getPosition())
+    UseLongCalls = OverrideLongCalls;
 
   return *this;
 }
@@ -365,5 +372,13 @@ void HexagonSubtarget::adjustSchedDependency(SUnit *Src, SUnit *Dst,
   }
 
   updateLatency(SrcInst, DstInst, Dep);
+}
+
+unsigned HexagonSubtarget::getL1CacheLineSize() const {
+  return 32;
+}
+
+unsigned HexagonSubtarget::getL1PrefetchDistance() const {
+  return 32;
 }
 
