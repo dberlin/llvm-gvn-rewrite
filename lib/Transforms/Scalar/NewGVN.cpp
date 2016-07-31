@@ -1639,7 +1639,6 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
                    << "\n");
 
       if (E && isa<CoercibleLoadExpression>(E)) {
-        const CoercibleLoadExpression *L = cast<CoercibleLoadExpression>(E);
         VClass->CoercibleMembers.erase(V);
         EClass->CoercibleMembers.insert(V);
       } else {
