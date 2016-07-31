@@ -355,7 +355,6 @@ private:
   template <class T>
   Value *findDominatingEquivalent(CongruenceClass *, const User *,
                                   const T &) const;
-  void performCongruenceFinding(Value *, const Expression *);
   // Predicate and reachability handling
   void updateReachableEdge(BasicBlock *, BasicBlock *);
   void processOutgoingEdges(TerminatorInst *, BasicBlock *);
@@ -384,10 +383,6 @@ private:
   void replaceInstruction(Instruction *, Value *);
   void markInstructionForDeletion(Instruction *);
   void deleteInstructionsInBlock(BasicBlock *);
-
-  // New instruction creation
-  void handleNewInstruction(Instruction *){};
-  void markUsersTouched(Value *);
 
   // Utilities
   void cleanupTables();
@@ -1561,135 +1556,6 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
   return Changed;
 }
 
-void NewGVN::markUsersTouched(Value *V) {
-  // Now mark the users as touched
-  for (auto &U : V->uses()) {
-    Instruction *User = dyn_cast<Instruction>(U.getUser());
-    assert(User && "Use of value not within an instruction?");
-    TouchedInstructions.set(InstrDFS[User]);
-  }
-}
-
-/// performCongruenceFinding - Perform congruence finding on a given
-/// value numbering expression
-void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
-
-  ValueToExpression[V] = E;
-  // This is guaranteed to return something, since it will at least find
-  // INITIAL
-  CongruenceClass *VClass = ValueToClass[V];
-  assert(VClass && "Should have found a vclass");
-  // Dead classes should have been eliminated from the mapping
-  assert(!VClass->Dead && "Found a dead class");
-
-  CongruenceClass *EClass;
-  // Expressions we can't symbolize are always in their own unique
-  // congruence class
-  if (E == NULL) {
-    // We may have already made a unique class
-    if (VClass->Members.size() != 1 || VClass->RepLeader != V) {
-      CongruenceClass *NewClass = createCongruenceClass(V, NULL);
-      // We should always be adding the member in the below code
-      EClass = NewClass;
-      DEBUG(dbgs() << "Created new congruence class for " << *V
-                   << " due to NULL expression\n");
-    } else {
-      EClass = VClass;
-    }
-  } else if (const VariableExpression *VE = dyn_cast<VariableExpression>(E)) {
-    EClass = ValueToClass[VE->getVariableValue()];
-  } else {
-    auto lookupResult = ExpressionToClass.insert({E, nullptr});
-
-    // If it's not in the value table, create a new congruence class
-    if (lookupResult.second) {
-      CongruenceClass *NewClass = createCongruenceClass(NULL, E);
-      auto place = lookupResult.first;
-      place->second = NewClass;
-
-      // Constants and variables should always be made the leader
-      if (const ConstantExpression *CE = dyn_cast<ConstantExpression>(E))
-        NewClass->RepLeader = CE->getConstantValue();
-      else if (const VariableExpression *VE = dyn_cast<VariableExpression>(E))
-        NewClass->RepLeader = VE->getVariableValue();
-      else if (const StoreExpression *SE = dyn_cast<StoreExpression>(E))
-        NewClass->RepLeader = SE->getStoreInst()->getValueOperand();
-      else
-        NewClass->RepLeader = V;
-
-      EClass = NewClass;
-      DEBUG(dbgs() << "Created new congruence class for " << *V
-                   << " using expression " << *E << " at " << NewClass->ID
-                   << "\n");
-      DEBUG(dbgs() << "Hash value was " << E->getHashValue() << "\n");
-    } else {
-      EClass = lookupResult.first->second;
-      assert(EClass && "Somehow don't have an eclass");
-
-      assert(!EClass->Dead && "We accidentally looked up a dead class");
-    }
-  }
-  bool WasInChanged = ChangedValues.erase(V);
-  if (VClass != EClass || WasInChanged) {
-    DEBUG(dbgs() << "Found class " << EClass->ID << " for expression " << E
-                 << "\n");
-
-    if (VClass != EClass) {
-      DEBUG(dbgs() << "New congruence class for " << V << " is " << EClass->ID
-                   << "\n");
-
-      if (E && isa<CoercibleLoadExpression>(E)) {
-        VClass->CoercibleMembers.erase(V);
-        EClass->CoercibleMembers.insert(V);
-      } else {
-        VClass->Members.erase(V);
-        EClass->Members.insert(V);
-      }
-
-      // See if we have any pending equivalences for this class.
-      // We should only end up with pending equivalences for comparison
-      // instructions.
-      if (E && isa<CmpInst>(V)) {
-        auto Pending = PendingEquivalences.equal_range(E);
-        for (auto PI = Pending.first, PE = Pending.second; PI != PE; ++PI)
-          EClass->Equivs.emplace_back(PI->second);
-        PendingEquivalences.erase(Pending.first, Pending.second);
-      }
-
-      ValueToClass[V] = EClass;
-      // See if we destroyed the class or need to swap leaders
-      if ((VClass->Members.empty() && VClass->CoercibleMembers.empty()) &&
-          VClass != InitialClass) {
-        if (VClass->DefiningExpr) {
-          VClass->Dead = true;
-
-          DEBUG(dbgs() << "Erasing expression " << *E << " from table\n");
-          // bool wasE = *E == *VClass->expression;
-          ExpressionToClass.erase(VClass->DefiningExpr);
-          // if (wasE)
-          //   lookupMap->insert({E, EClass});
-        }
-        // delete VClass;
-      } else if (VClass->RepLeader == V) {
-        /// XXX: Check this. When the leader changes, the value numbering of
-        /// everything may change, so we need to reprocess.
-        VClass->RepLeader = *(VClass->Members.begin());
-        for (auto M : VClass->Members) {
-          if (Instruction *I = dyn_cast<Instruction>(M))
-            TouchedInstructions.set(InstrDFS[I]);
-          ChangedValues.insert(M);
-        }
-        for (auto EM : VClass->CoercibleMembers) {
-          if (Instruction *I = dyn_cast<Instruction>(EM))
-            TouchedInstructions.set(InstrDFS[I]);
-          ChangedValues.insert(EM);
-        }
-      }
-    }
-    markUsersTouched(V);
-  }
-}
-
 // updateReachableEdge - Process the fact that Edge (from, to) is
 // reachable, including marking any newly reachable blocks and
 // instructions for processing
@@ -2100,7 +1966,6 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
         const Expression *Symbolized = performSymbolicEvaluation(I, CurrBlock);
         if (Symbolized && Symbolized->usedEquivalence())
           InvolvedInEquivalence.set(InstrDFS[I]);
-        performCongruenceFinding(I, Symbolized);
       } else {
         processOutgoingEdges(dyn_cast<TerminatorInst>(I), CurrBlock);
       }
