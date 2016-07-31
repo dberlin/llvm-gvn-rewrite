@@ -1980,7 +1980,6 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
   for (Instruction *ToErase : InstructionsToErase) {
     if (!ToErase->use_empty())
       ToErase->replaceAllUsesWith(UndefValue::get(ToErase->getType()));
-
     ToErase->eraseFromParent();
   }
 
