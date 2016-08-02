@@ -117,10 +117,19 @@ public:
   //  When this property is clear, liveness is no longer reliable.
   // AllVRegsAllocated: All virtual registers have been allocated; i.e. all
   //  register operands are physical registers.
+  // Legalized: In GlobalISel: the MachineLegalizer ran and all pre-isel generic
+  //  instructions have been legalized; i.e., all instructions are now one of:
+  //   - generic and always legal (e.g., COPY)
+  //   - target-specific
+  //   - legal pre-isel generic instructions.
+  // RegBankSelected: In GlobalISel: the RegBankSelect pass ran and all generic
+  //  virtual registers have been assigned to a register bank.
   enum class Property : unsigned {
     IsSSA,
     TracksLiveness,
     AllVRegsAllocated,
+    Legalized,
+    RegBankSelected,
     LastProperty,
   };
 
