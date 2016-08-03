@@ -367,6 +367,9 @@ protected:
   /// See PR14725.
   void fixLCSSAPHIs();
 
+  /// Predicate conditional stores on their respective conditions.
+  void predicateStores();
+ 
   /// Shrinks vector element sizes based on information in "MinBWs".
   void truncateToMinimalBitwidths();
 
@@ -3847,17 +3850,8 @@ void InnerLoopVectorizer::vectorizeLoop() {
   // Make sure DomTree is updated.
   updateAnalysis();
 
-  // Predicate any stores.
-  for (auto KV : PredicatedStores) {
-    BasicBlock::iterator I(KV.first);
-    auto *BB = SplitBlock(I->getParent(), &*std::next(I), DT, LI);
-    auto *T = SplitBlockAndInsertIfThen(KV.second, &*I, /*Unreachable=*/false,
-                                        /*BranchWeights=*/nullptr, DT, LI);
-    I->moveBefore(T);
-    I->getParent()->setName("pred.store.if");
-    BB->setName("pred.store.continue");
-  }
-  DEBUG(DT->verifyDomTree());
+  predicateStores();
+
   // Remove redundant induction instructions.
   cse(LoopVectorBody);
 }
@@ -4022,6 +4016,19 @@ void InnerLoopVectorizer::fixLCSSAPHIs() {
       LCSSAPhi->addIncoming(UndefValue::get(LCSSAPhi->getType()),
                             LoopMiddleBlock);
   }
+}
+ 
+void InnerLoopVectorizer::predicateStores() {
+  for (auto KV : PredicatedStores) {
+    BasicBlock::iterator I(KV.first);
+    auto *BB = SplitBlock(I->getParent(), &*std::next(I), DT, LI);
+    auto *T = SplitBlockAndInsertIfThen(KV.second, &*I, /*Unreachable=*/false,
+                                        /*BranchWeights=*/nullptr, DT, LI);
+    I->moveBefore(T);
+    I->getParent()->setName("pred.store.if");
+    BB->setName("pred.store.continue");
+  }
+  DEBUG(DT->verifyDomTree());
 }
 
 InnerLoopVectorizer::VectorParts
@@ -4946,10 +4953,11 @@ void LoopVectorizationLegality::collectLoopScalars() {
 
 void LoopVectorizationLegality::collectLoopUniforms() {
   // We now know that the loop is vectorizable!
-  // Collect variables that will remain uniform after vectorization.
+  // Collect instructions inside the loop that will remain uniform after
+  // vectorization.
 
-  // If V is not an instruction inside the current loop, it is a Value
-  // outside of the scope which we are interesting in.
+  // Global values, params and instructions outside of current loop are out of
+  // scope.
   auto isOutOfScope = [&](Value *V) -> bool {
     Instruction *I = dyn_cast<Instruction>(V);
     return (!I || !TheLoop->contains(I));
@@ -5100,7 +5108,6 @@ bool LoopVectorizationLegality::blockCanBePredicated(
       }
     }
 
-    // We don't predicate stores at the moment.
     if (I.mayWriteToMemory()) {
       auto *SI = dyn_cast<StoreInst>(&I);
       // We only support predication of stores in basic blocks with one

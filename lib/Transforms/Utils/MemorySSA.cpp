@@ -95,6 +95,82 @@ public:
 }
 
 namespace {
+/// Our current alias analysis API differentiates heavily between calls and
+/// non-calls, and functions called on one usually assert on the other.
+/// This class encapsulates the distinction to simplify other code that wants
+/// "Memory affecting instructions and related data" to use as a key.
+/// For example, this class is used as a densemap key in the use optimizer.
+class MemoryLocOrCall {
+public:
+  MemoryLocOrCall() : IsCall(false) {}
+  MemoryLocOrCall(MemoryUseOrDef *MUD)
+      : MemoryLocOrCall(MUD->getMemoryInst()) {}
+
+  MemoryLocOrCall(Instruction *Inst) {
+    if (ImmutableCallSite(Inst)) {
+      IsCall = true;
+      CS = ImmutableCallSite(Inst);
+    } else {
+      IsCall = false;
+      // There is no such thing as a memorylocation for a fence inst, and it is
+      // unique in that regard.
+      if (!isa<FenceInst>(Inst))
+        Loc = MemoryLocation::get(Inst);
+    }
+  }
+
+  explicit MemoryLocOrCall(const MemoryLocation &Loc)
+      : IsCall(false), Loc(Loc) {}
+
+  bool IsCall;
+  ImmutableCallSite getCS() const {
+    assert(IsCall);
+    return CS;
+  }
+  MemoryLocation getLoc() const {
+    assert(!IsCall);
+    return Loc;
+  }
+
+  bool operator==(const MemoryLocOrCall &Other) const {
+    if (IsCall != Other.IsCall)
+      return false;
+
+    if (IsCall)
+      return CS.getCalledValue() == Other.CS.getCalledValue();
+    return Loc == Other.Loc;
+  }
+
+private:
+  // FIXME: MSVC 2013 does not properly implement C++11 union rules, once we
+  // require newer versions, this should be made an anonymous union again.
+  ImmutableCallSite CS;
+  MemoryLocation Loc;
+};
+}
+
+namespace llvm {
+template <> struct DenseMapInfo<MemoryLocOrCall> {
+  static inline MemoryLocOrCall getEmptyKey() {
+    return MemoryLocOrCall(DenseMapInfo<MemoryLocation>::getEmptyKey());
+  }
+  static inline MemoryLocOrCall getTombstoneKey() {
+    return MemoryLocOrCall(DenseMapInfo<MemoryLocation>::getTombstoneKey());
+  }
+  static unsigned getHashValue(const MemoryLocOrCall &MLOC) {
+    if (MLOC.IsCall)
+      return hash_combine(MLOC.IsCall,
+                          DenseMapInfo<const Value *>::getHashValue(
+                              MLOC.getCS().getCalledValue()));
+    return hash_combine(
+        MLOC.IsCall, DenseMapInfo<MemoryLocation>::getHashValue(MLOC.getLoc()));
+  }
+  static bool isEqual(const MemoryLocOrCall &LHS, const MemoryLocOrCall &RHS) {
+    return LHS == RHS;
+  }
+};
+}
+namespace {
 struct UpwardsMemoryQuery {
   // True if our original query started off as a call
   bool IsCall;
@@ -116,18 +192,61 @@ struct UpwardsMemoryQuery {
   }
 };
 
+static bool lifetimeEndsAt(MemoryDef *MD, const MemoryLocation &Loc,
+                           AliasAnalysis &AA) {
+  Instruction *Inst = MD->getMemoryInst();
+  if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(Inst)) {
+    switch (II->getIntrinsicID()) {
+      case Intrinsic::lifetime_start:
+      case Intrinsic::lifetime_end:
+        return AA.isMustAlias(MemoryLocation(II->getArgOperand(1)), Loc);
+    default:
+      return false;
+    }
+  }
+  return false;
+}
+
 static bool instructionClobbersQuery(MemoryDef *MD,
                                      const MemoryLocation &UseLoc,
                                      const Instruction *UseInst,
                                      AliasAnalysis &AA) {
   Instruction *DefInst = MD->getMemoryInst();
   assert(DefInst && "Defining instruction not actually an instruction");
-  ImmutableCallSite UseCS(UseInst);
-  if (!UseCS)
-    return AA.getModRefInfo(DefInst, UseLoc) & MRI_Mod;
 
-  ModRefInfo I = AA.getModRefInfo(DefInst, UseCS);
-  return I != MRI_NoModRef;
+  if (const IntrinsicInst *II = dyn_cast<IntrinsicInst>(DefInst)) {
+    // These intrinsics will show up as affecting memory, but they are just
+    // markers.
+    switch (II->getIntrinsicID()) {
+    case Intrinsic::lifetime_start:
+    case Intrinsic::lifetime_end:
+    case Intrinsic::invariant_start:
+    case Intrinsic::invariant_end:
+    case Intrinsic::assume:
+      return false;
+    default:
+      break;
+    }
+  }
+
+  ImmutableCallSite UseCS(UseInst);
+  if (UseCS) {
+    ModRefInfo I = AA.getModRefInfo(DefInst, UseCS);
+    return I != MRI_NoModRef;
+  }
+  return AA.getModRefInfo(DefInst, UseLoc) & MRI_Mod;
+}
+
+static bool instructionClobbersQuery(MemoryDef *MD, MemoryUse *MU,
+                                     const MemoryLocOrCall &UseMLOC,
+                                     AliasAnalysis &AA) {
+  // FIXME: This is a temporary hack to allow a single instructionClobbersQuery
+  // to exist while MemoryLocOrCall is pushed through places.
+  if (UseMLOC.IsCall)
+    return instructionClobbersQuery(MD, MemoryLocation(), MU->getMemoryInst(),
+                                    AA);
+  return instructionClobbersQuery(MD, UseMLOC.getLoc(), MU->getMemoryInst(),
+                                  AA);
 }
 
 /// Cache for our caching MemorySSA walker.
@@ -475,7 +594,7 @@ class ClobberWalker {
   ///
   /// If this returns None, NewPaused is a vector of searches that terminated
   /// at StopWhere. Otherwise, NewPaused is left in an unspecified state.
-  Optional<ListIndex>
+  Optional<TerminatedPath>
   getBlockingAccess(MemoryAccess *StopWhere,
                     SmallVectorImpl<ListIndex> &PausedSearches,
                     SmallVectorImpl<ListIndex> &NewPaused,
@@ -514,11 +633,12 @@ class ClobberWalker {
         assert(Res.Result != StopWhere || Res.FromCache);
         // If this wasn't a cache hit, we hit a clobber when walking. That's a
         // failure.
+        TerminatedPath Term{Res.Result, PathIndex};
         if (!Res.FromCache || !MSSA.dominates(Res.Result, StopWhere))
-          return PathIndex;
+          return Term;
 
         // Otherwise, it's a valid thing to potentially optimize to.
-        Terminated.push_back({Res.Result, PathIndex});
+        Terminated.push_back(Term);
         continue;
       }
 
@@ -650,22 +770,21 @@ class ClobberWalker {
       // liveOnEntry, and we'll happily wait for that to disappear (read: never)
       // For the moment, this is fine, since we do basically nothing with
       // blocker info.
-      if (Optional<ListIndex> Blocker = getBlockingAccess(
+      if (Optional<TerminatedPath> Blocker = getBlockingAccess(
               Target, PausedSearches, NewPaused, TerminatedPaths)) {
-        MemoryAccess *BlockingAccess = Paths[*Blocker].Last;
         // Cache our work on the blocking node, since we know that's correct.
-        cacheDefPath(Paths[*Blocker], BlockingAccess);
+        cacheDefPath(Paths[Blocker->LastNode], Blocker->Clobber);
 
         // Find the node we started at. We can't search based on N->Last, since
         // we may have gone around a loop with a different MemoryLocation.
-        auto Iter = find_if(def_path(*Blocker), [&](const DefPath &N) {
+        auto Iter = find_if(def_path(Blocker->LastNode), [&](const DefPath &N) {
           return defPathIndex(N) < PriorPathsSize;
         });
         assert(Iter != def_path_iterator());
 
         DefPath &CurNode = *Iter;
         assert(CurNode.Last == Current);
-        CurNode.Blocker = BlockingAccess;
+        CurNode.Blocker = Blocker->Clobber;
 
         // Two things:
         // A. We can't reliably cache all of NewPaused back. Consider a case
@@ -1072,80 +1191,6 @@ MemorySSA::AccessList *MemorySSA::getOrCreateAccessList(const BasicBlock *BB) {
   return Res.first->second.get();
 }
 
-/// Our current alias analysis API differentiates heavily between calls and
-/// non-calls, and functions called on one usually assert on the other.
-/// This class encapsulates the distinction to simplify other code that wants
-/// "Memory affecting instructions and related data" to use as a key.
-/// For example, this class is used as a densemap key in the use optimizer.
-class MemoryLocOrCall {
-public:
-  MemoryLocOrCall() : IsCall(false) {}
-  MemoryLocOrCall(MemoryUseOrDef *MUD)
-      : MemoryLocOrCall(MUD->getMemoryInst()) {}
-
-  MemoryLocOrCall(Instruction *Inst) {
-    if (ImmutableCallSite(Inst)) {
-      IsCall = true;
-      CS = ImmutableCallSite(Inst);
-    } else {
-      IsCall = false;
-      // There is no such thing as a memorylocation for a fence inst, and it is
-      // unique in that regard.
-      if (!isa<FenceInst>(Inst))
-        Loc = MemoryLocation::get(Inst);
-    }
-  }
-
-  explicit MemoryLocOrCall(MemoryLocation Loc) : IsCall(false), Loc(Loc) {}
-
-  bool IsCall;
-  ImmutableCallSite getCS() const {
-    assert(IsCall);
-    return CS;
-  }
-  MemoryLocation getLoc() const {
-    assert(!IsCall);
-    return Loc;
-  }
-  bool operator==(const MemoryLocOrCall &Other) const {
-    if (IsCall != Other.IsCall)
-      return false;
-
-    if (IsCall)
-      return CS.getCalledValue() == Other.CS.getCalledValue();
-    else
-      return Loc == Other.Loc;
-  }
-
-private:
-  union {
-    ImmutableCallSite CS;
-    MemoryLocation Loc;
-  };
-};
-
-template <> struct DenseMapInfo<MemoryLocOrCall> {
-  static inline MemoryLocOrCall getEmptyKey() {
-    return MemoryLocOrCall(DenseMapInfo<MemoryLocation>::getEmptyKey());
-  }
-  static inline MemoryLocOrCall getTombstoneKey() {
-    return MemoryLocOrCall(DenseMapInfo<MemoryLocation>::getTombstoneKey());
-  }
-  static unsigned getHashValue(const MemoryLocOrCall &MLOC) {
-    if (MLOC.IsCall)
-      return hash_combine(MLOC.IsCall,
-                          DenseMapInfo<const Value *>::getHashValue(
-                              MLOC.getCS().getCalledValue()));
-    else
-      return hash_combine(
-          MLOC.IsCall,
-          DenseMapInfo<MemoryLocation>::getHashValue(MLOC.getLoc()));
-  }
-  static bool isEqual(const MemoryLocOrCall &LHS, const MemoryLocOrCall &RHS) {
-    return LHS == RHS;
-  }
-};
-
 /// This class is a batch walker of all MemoryUse's in the program, and points
 /// their defining access at the thing that actually clobbers them.  Because it
 /// is a batch walker that touches everything, it does not operate like the
@@ -1187,18 +1232,6 @@ private:
   AliasAnalysis *AA;
   DominatorTree *DT;
 };
-
-static bool instructionClobbersQuery(MemoryDef *MD,
-                                     const MemoryLocOrCall &UseMLOC,
-                                     AliasAnalysis &AA) {
-  Instruction *DefInst = MD->getMemoryInst();
-  assert(DefInst && "Defining instruction not actually an instruction");
-  if (!UseMLOC.IsCall)
-    return AA.getModRefInfo(DefInst, UseMLOC.getLoc()) & MRI_Mod;
-
-  ModRefInfo I = AA.getModRefInfo(DefInst, UseMLOC.getCS());
-  return I != MRI_NoModRef;
-}
 
 /// Optimize the uses in a given block This is basically the SSA renaming
 /// algorithm, with one caveat: We are able to use a single stack for all
@@ -1243,7 +1276,7 @@ void MemorySSA::OptimizeUses::optimizeUsesInBlock(
 
     MemoryLocOrCall UseMLOC(MU);
     auto &LocInfo = LocStackInfo[UseMLOC];
-    // If the pop epoch changed, if means we've removed stuff from top of
+    // If the pop epoch changed, it means we've removed stuff from top of
     // stack due to changing blocks. We may have to reset the lower bound or
     // last kill info.
     if (LocInfo.PopEpoch != PopEpoch) {
@@ -1280,9 +1313,10 @@ void MemorySSA::OptimizeUses::optimizeUsesInBlock(
     unsigned long UpperBound = VersionStack.size() - 1;
 
     if (UpperBound - LocInfo.LowerBound > MaxCheckLimit) {
-      DEBUG(dbgs() << "We are being asked to check up to "
-                   << UpperBound - LocInfo.LowerBound
-                   << " loads and stores, so we didn't.\n");
+      DEBUG(dbgs() << "MemorySSA skipping optimization of " << *MU << " ("
+                   << *(MU->getMemoryInst()) << ")"
+                   << " because there are " << UpperBound - LocInfo.LowerBound
+                   << " stores to disambiguate\n");
       // Because we did not walk, LastKill is no longer valid, as this may
       // have been a kill.
       LocInfo.LastKillValid = false;
@@ -1304,8 +1338,15 @@ void MemorySSA::OptimizeUses::optimizeUsesInBlock(
       }
 
       MemoryDef *MD = cast<MemoryDef>(VersionStack[UpperBound]);
-
-      if (instructionClobbersQuery(MD, UseMLOC, *AA)) {
+      // If the lifetime of the pointer ends at this instruction, it's live on
+      // entry.
+      if (!UseMLOC.IsCall && lifetimeEndsAt(MD, UseMLOC.getLoc(), *AA)) {
+        // Reset UpperBound to liveOnEntryDef's place in the stack
+        UpperBound = 0;
+        FoundClobberResult = true;
+        break;
+      }
+      if (instructionClobbersQuery(MD, MU, UseMLOC, *AA)) {
         FoundClobberResult = true;
         break;
       }
