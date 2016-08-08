@@ -1646,6 +1646,17 @@ void llvm::combineMetadata(Instruction *K, const Instruction *J,
       K->setMetadata(LLVMContext::MD_invariant_group, JMD);
 }
 
+void llvm::combineMetadataForCSE(Instruction *K, const Instruction *J) {
+  unsigned KnownIDs[] = {
+      LLVMContext::MD_tbaa,            LLVMContext::MD_alias_scope,
+      LLVMContext::MD_noalias,         LLVMContext::MD_range,
+      LLVMContext::MD_invariant_load,  LLVMContext::MD_nonnull,
+      LLVMContext::MD_invariant_group, LLVMContext::MD_align,
+      LLVMContext::MD_dereferenceable,
+      LLVMContext::MD_dereferenceable_or_null};
+  combineMetadata(K, J, KnownIDs);
+}
+
 unsigned llvm::replaceDominatedUsesWith(Value *From, Value *To,
                                         DominatorTree &DT,
                                         const BasicBlockEdge &Root) {
@@ -1703,6 +1714,7 @@ bool llvm::callsGCLeafFunction(ImmutableCallSite CS) {
   return false;
 }
 
+namespace {
 /// A potential constituent of a bitreverse or bswap expression. See
 /// collectBitParts for a fuller explanation.
 struct BitPart {
@@ -1718,6 +1730,7 @@ struct BitPart {
 
   enum { Unset = -1 };
 };
+} // end anonymous namespace
 
 /// Analyze the specified subexpression and see if it is capable of providing
 /// pieces of a bswap or bitreverse. The subexpression provides a potential

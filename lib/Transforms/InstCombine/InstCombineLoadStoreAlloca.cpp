@@ -475,7 +475,8 @@ static Instruction *combineLoadToOperationType(InstCombiner &IC, LoadInst &LI) {
   // size is a legal integer type.
   if (!Ty->isIntegerTy() && Ty->isSized() &&
       DL.isLegalInteger(DL.getTypeStoreSizeInBits(Ty)) &&
-      DL.getTypeStoreSizeInBits(Ty) == DL.getTypeSizeInBits(Ty)) {
+      DL.getTypeStoreSizeInBits(Ty) == DL.getTypeSizeInBits(Ty) &&
+      !DL.isNonIntegralPointerType(Ty)) {
     if (std::all_of(LI.user_begin(), LI.user_end(), [&LI](User *U) {
           auto *SI = dyn_cast<StoreInst>(U);
           return SI && SI->getPointerOperand() != &LI;
@@ -818,11 +819,10 @@ Instruction *InstCombiner::visitLoadInst(LoadInst &LI) {
   // where there are several consecutive memory accesses to the same location,
   // separated by a few arithmetic operations.
   BasicBlock::iterator BBI(LI);
-  AAMDNodes AATags;
   bool IsLoadCSE = false;
   if (Value *AvailableVal =
       FindAvailableLoadedValue(&LI, LI.getParent(), BBI,
-                               DefMaxInstsToScan, AA, &AATags, &IsLoadCSE)) {
+                               DefMaxInstsToScan, AA, &IsLoadCSE)) {
     if (IsLoadCSE) {
       LoadInst *NLI = cast<LoadInst>(AvailableVal);
       unsigned KnownIDs[] = {
