@@ -1233,7 +1233,7 @@ bool HexagonInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
       MRI.clearKillFlags(DstSubLo);
       return true;
     }
-    case Hexagon::MUX64_rr: {
+    case Hexagon::PS_pselect: {
       const MachineOperand &Op0 = MI.getOperand(0);
       const MachineOperand &Op1 = MI.getOperand(1);
       const MachineOperand &Op2 = MI.getOperand(2);
@@ -1257,7 +1257,8 @@ bool HexagonInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
       MBB.erase(MI);
       return true;
     }
-    case Hexagon::VSelectPseudo_V6: {
+    case Hexagon::PS_vselect:
+    case Hexagon::PS_vselect_128B: {
       const MachineOperand &Op0 = MI.getOperand(0);
       const MachineOperand &Op1 = MI.getOperand(1);
       const MachineOperand &Op2 = MI.getOperand(2);
@@ -1273,7 +1274,8 @@ bool HexagonInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
       MBB.erase(MI);
       return true;
     }
-    case Hexagon::VSelectDblPseudo_V6: {
+    case Hexagon::PS_wselect:
+    case Hexagon::PS_wselect_128B: {
       MachineOperand &Op0 = MI.getOperand(0);
       MachineOperand &Op1 = MI.getOperand(1);
       MachineOperand &Op2 = MI.getOperand(2);
@@ -1301,20 +1303,6 @@ bool HexagonInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
     case Hexagon::TCRETURNr:
       MI.setDesc(get(Hexagon::J2_jumpr));
       return true;
-    case Hexagon::TFRI_f:
-    case Hexagon::TFRI_cPt_f:
-    case Hexagon::TFRI_cNotPt_f: {
-      unsigned Opx = (Opc == Hexagon::TFRI_f) ? 1 : 2;
-      APFloat FVal = MI.getOperand(Opx).getFPImm()->getValueAPF();
-      APInt IVal = FVal.bitcastToAPInt();
-      MI.RemoveOperand(Opx);
-      unsigned NewOpc = (Opc == Hexagon::TFRI_f)     ? Hexagon::A2_tfrsi   :
-                        (Opc == Hexagon::TFRI_cPt_f) ? Hexagon::C2_cmoveit :
-                                                       Hexagon::C2_cmoveif;
-      MI.setDesc(get(NewOpc));
-      MI.addOperand(MachineOperand::CreateImm(IVal.getZExtValue()));
-      return true;
-    }
   }
 
   return false;
@@ -1942,7 +1930,7 @@ bool HexagonInstrInfo::isConstExtended(const MachineInstr &MI) const {
   // object we are going to end up with here for now.
   // In the future we probably should add isSymbol(), etc.
   if (MO.isGlobal() || MO.isSymbol() || MO.isBlockAddress() ||
-      MO.isJTI() || MO.isCPI())
+      MO.isJTI() || MO.isCPI() || MO.isFPImm())
     return true;
 
   // If the extendable operand is not 'Immediate' type, the instruction should
@@ -2984,6 +2972,12 @@ bool HexagonInstrInfo::canExecuteInBundle(const MachineInstr &First,
 }
 
 
+bool HexagonInstrInfo::doesNotReturn(const MachineInstr &CallMI) const {
+  unsigned Opc = CallMI.getOpcode();
+  return Opc == Hexagon::CALLv3nr || Opc == Hexagon::CALLRv3nr;
+}
+
+
 bool HexagonInstrInfo::hasEHLabel(const MachineBasicBlock *B) const {
   for (auto &I : *B)
     if (I.isEHLabel())
@@ -3423,14 +3417,6 @@ int HexagonInstrInfo::getCondOpcode(int Opc, bool invertPredicate) const {
   int CondOpcode = Hexagon::getPredOpcode(Opc, inPredSense);
   if (CondOpcode >= 0) // Valid Conditional opcode/instruction
     return CondOpcode;
-
-  // This switch case will be removed once all the instructions have been
-  // modified to use relation maps.
-  switch(Opc) {
-  case Hexagon::TFRI_f:
-    return !invertPredicate ? Hexagon::TFRI_cPt_f :
-                              Hexagon::TFRI_cNotPt_f;
-  }
 
   llvm_unreachable("Unexpected predicable instruction");
 }

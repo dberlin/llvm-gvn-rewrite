@@ -406,7 +406,7 @@ static bool isEphemeralValueOf(Instruction *I, const Value *E) {
   // The instruction defining an assumption's condition itself is always
   // considered ephemeral to that assumption (even if it has other
   // non-ephemeral users). See r246696's test case for an example.
-  if (std::find(I->op_begin(), I->op_end(), E) != I->op_end())
+  if (is_contained(I->operands(), E))
     return true;
 
   while (!WorkSet.empty()) {
@@ -415,8 +415,7 @@ static bool isEphemeralValueOf(Instruction *I, const Value *E) {
       continue;
 
     // If all uses of this value are ephemeral, then so is this value.
-    if (std::all_of(V->user_begin(), V->user_end(),
-                    [&](const User *U) { return EphValues.count(U); })) {
+    if (all_of(V->users(), [&](const User *U) { return EphValues.count(U); })) {
       if (V == E)
         return true;
 
@@ -1272,7 +1271,9 @@ static void computeKnownBitsFromOperator(Operator *I, APInt &KnownZero,
         unsigned Opcode = LU->getOpcode();
         // Check for operations that have the property that if
         // both their operands have low zero bits, the result
-        // will have low zero bits.
+        // will have low zero bits. Also check for operations 
+        // that are known to produce non-negative or negative
+        // recurrence values. 
         if (Opcode == Instruction::Add ||
             Opcode == Instruction::Sub ||
             Opcode == Instruction::And ||
@@ -1298,6 +1299,40 @@ static void computeKnownBitsFromOperator(Operator *I, APInt &KnownZero,
           KnownZero = APInt::getLowBitsSet(BitWidth,
                                            std::min(KnownZero2.countTrailingOnes(),
                                                     KnownZero3.countTrailingOnes()));
+
+          auto *OverflowOp = dyn_cast<OverflowingBinaryOperator>(LU);
+          if (OverflowOp && OverflowOp->hasNoSignedWrap()) {
+            // If initial value of recurrence is nonnegative, and we are adding 
+            // a nonnegative number with nsw, the result can only be nonnegative
+            // or poison value regardless of the number of times we execute the 
+            // add in phi recurrence. If initial value is negative and we are 
+            // adding a negative number with nsw, the result can only be 
+            // negative or poison value. Similar arguments apply to sub and mul.
+            //
+            // (add non-negative, non-negative) --> non-negative
+            // (add negative, negative) --> negative
+            if (Opcode == Instruction::Add) {
+              if (KnownZero2.isNegative() && KnownZero3.isNegative())
+                KnownZero.setBit(BitWidth - 1);
+              else if (KnownOne2.isNegative() && KnownOne3.isNegative())
+                KnownOne.setBit(BitWidth - 1);
+            }
+            
+            // (sub nsw non-negative, negative) --> non-negative
+            // (sub nsw negative, non-negative) --> negative
+            else if (Opcode == Instruction::Sub && LL == I) {
+              if (KnownZero2.isNegative() && KnownOne3.isNegative())
+                KnownZero.setBit(BitWidth - 1);
+              else if (KnownOne2.isNegative() && KnownZero3.isNegative())
+                KnownOne.setBit(BitWidth - 1);
+            }
+            
+            // (mul nsw non-negative, non-negative) --> non-negative
+            else if (Opcode == Instruction::Mul && KnownZero2.isNegative() && 
+                     KnownZero3.isNegative())
+              KnownZero.setBit(BitWidth - 1);
+          }
+
           break;
         }
       }

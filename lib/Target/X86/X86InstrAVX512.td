@@ -77,15 +77,15 @@ class X86VectorVTInfo<int numelts, ValueType eltvt, RegisterClass rc,
                                   !if (!eq (TypeVariantName, "i"),
                                        !if (!eq (Size, 128), "v2i64",
                                        !if (!eq (Size, 256), "v4i64",
-                                            VTName)), VTName));
+                                       !if (!eq (Size, 512), "v8i64",
+                                            VTName))), VTName));
 
   PatFrag AlignedLdFrag = !cast<PatFrag>("alignedload" #
-                          !if (!eq (TypeVariantName, "i"),
-                                !if (!eq (Size, 128), "v2i64",
-                                !if (!eq (Size, 256), "v4i64",
-                                !if (!eq (Size, 512),
-                                    !if (!eq (EltSize, 64), "v8i64", "v16i32"),
-                                    VTName))), VTName));
+                                         !if (!eq (TypeVariantName, "i"),
+                                               !if (!eq (Size, 128), "v2i64",
+                                               !if (!eq (Size, 256), "v4i64",
+                                               !if (!eq (Size, 512), "v8i64",
+                                                   VTName))), VTName));
 
   PatFrag ScalarLdFrag = !cast<PatFrag>("load" # EltVT);
 
@@ -2229,18 +2229,12 @@ def : Pat<(store (i1 -1), addr:$dst), (MOV8mi addr:$dst, (i8 1))>;
 def : Pat<(store (i1  1), addr:$dst), (MOV8mi addr:$dst, (i8 1))>;
 def : Pat<(store (i1  0), addr:$dst), (MOV8mi addr:$dst, (i8 0))>;
 
-let Predicates = [HasAVX512] in {
-  def : Pat<(i1 (X86Vextract VK16:$src, (iPTR 0))),
-            (COPY_TO_REGCLASS VK16:$src, VK1)>;
-  def : Pat<(i1 (X86Vextract VK8:$src, (iPTR 0))),
-            (COPY_TO_REGCLASS VK8:$src, VK1)>;
-}
-let Predicates = [HasBWI] in {
-  def : Pat<(i1 (X86Vextract VK32:$src, (iPTR 0))),
-            (COPY_TO_REGCLASS VK32:$src, VK1)>;
-  def : Pat<(i1 (X86Vextract VK64:$src, (iPTR 0))),
-            (COPY_TO_REGCLASS VK64:$src, VK1)>;
-}
+def : Pat<(i1 (X86Vextract VK64:$src, (iPTR 0))), (COPY_TO_REGCLASS VK64:$src, VK1)>;
+def : Pat<(i1 (X86Vextract VK32:$src, (iPTR 0))), (COPY_TO_REGCLASS VK32:$src, VK1)>;
+def : Pat<(i1 (X86Vextract VK16:$src, (iPTR 0))), (COPY_TO_REGCLASS VK16:$src, VK1)>;
+def : Pat<(i1 (X86Vextract VK8:$src,  (iPTR 0))), (COPY_TO_REGCLASS VK8:$src,  VK1)>;
+def : Pat<(i1 (X86Vextract VK4:$src,  (iPTR 0))), (COPY_TO_REGCLASS VK4:$src,  VK1)>;
+def : Pat<(i1 (X86Vextract VK2:$src,  (iPTR 0))), (COPY_TO_REGCLASS VK2:$src,  VK1)>;
 
 // Mask unary operation
 // - KNOT
@@ -2792,6 +2786,28 @@ def : Pat<(v16i32 (vselect (xor VK16:$mask, (v16i1 immAllOnesV)),
                            (v16i32 immAllZerosV),
                            (v16i32 VR512:$src))),
                   (VMOVDQA32Zrrkz VK16WM:$mask, VR512:$src)>;
+
+let Predicates = [HasVLX, NoBWI] in {
+  // 128-bit load/store without BWI.
+  def : Pat<(alignedstore (v8i16 VR128:$src), addr:$dst),
+            (VMOVDQA32Z128mr addr:$dst, VR128:$src)>;
+  def : Pat<(alignedstore (v16i8 VR128:$src), addr:$dst),
+            (VMOVDQA32Z128mr addr:$dst, VR128:$src)>;
+  def : Pat<(store (v8i16 VR128:$src), addr:$dst),
+            (VMOVDQU32Z128mr addr:$dst, VR128:$src)>;
+  def : Pat<(store (v16i8 VR128:$src), addr:$dst),
+            (VMOVDQU32Z128mr addr:$dst, VR128:$src)>;
+
+  // 256-bit load/store without BWI.
+  def : Pat<(alignedstore256 (v16i16 VR256:$src), addr:$dst),
+            (VMOVDQA32Z256mr addr:$dst, VR256:$src)>;
+  def : Pat<(alignedstore256 (v32i8 VR256:$src), addr:$dst),
+            (VMOVDQA32Z256mr addr:$dst, VR256:$src)>;
+  def : Pat<(store (v16i16 VR256:$src), addr:$dst),
+            (VMOVDQU32Z256mr addr:$dst, VR256:$src)>;
+  def : Pat<(store (v32i8 VR256:$src), addr:$dst),
+            (VMOVDQU32Z256mr addr:$dst, VR256:$src)>;
+}
 
 let Predicates = [HasVLX] in {
   // Special patterns for storing subvector extracts of lower 128-bits of 256.
@@ -3421,11 +3437,11 @@ let Predicates = [HasAVX512], AddedComplexity = 400 in {
             (VMOVNTDQAZrm addr:$src)>;
   def : Pat<(v8i64 (alignednontemporalload addr:$src)),
             (VMOVNTDQAZrm addr:$src)>;
-  def : Pat<(v16i32 (alignednontemporalload addr:$src)),
+  def : Pat<(v16i32 (bitconvert (v8i64 (alignednontemporalload addr:$src)))),
             (VMOVNTDQAZrm addr:$src)>;
-  def : Pat<(v32i16 (alignednontemporalload addr:$src)),
+  def : Pat<(v32i16 (bitconvert (v8i64 (alignednontemporalload addr:$src)))),
             (VMOVNTDQAZrm addr:$src)>;
-  def : Pat<(v64i8 (alignednontemporalload addr:$src)),
+  def : Pat<(v64i8 (bitconvert (v8i64 (alignednontemporalload addr:$src)))),
             (VMOVNTDQAZrm addr:$src)>;
 }
 
@@ -3443,11 +3459,11 @@ let Predicates = [HasVLX], AddedComplexity = 400 in {
             (VMOVNTDQAZ256rm addr:$src)>;
   def : Pat<(v4i64 (alignednontemporalload addr:$src)),
             (VMOVNTDQAZ256rm addr:$src)>;
-  def : Pat<(v8i32 (alignednontemporalload addr:$src)),
+  def : Pat<(v8i32 (bitconvert (v2i64 (alignednontemporalload addr:$src)))),
             (VMOVNTDQAZ256rm addr:$src)>;
-  def : Pat<(v16i16 (alignednontemporalload addr:$src)),
+  def : Pat<(v16i16 (bitconvert (v2i64 (alignednontemporalload addr:$src)))),
             (VMOVNTDQAZ256rm addr:$src)>;
-  def : Pat<(v32i8 (alignednontemporalload addr:$src)),
+  def : Pat<(v32i8 (bitconvert (v2i64 (alignednontemporalload addr:$src)))),
             (VMOVNTDQAZ256rm addr:$src)>;
 
   def : Pat<(alignednontemporalstore (v4i32 VR128X:$src), addr:$dst),
@@ -3463,11 +3479,11 @@ let Predicates = [HasVLX], AddedComplexity = 400 in {
             (VMOVNTDQAZ128rm addr:$src)>;
   def : Pat<(v2i64 (alignednontemporalload addr:$src)),
             (VMOVNTDQAZ128rm addr:$src)>;
-  def : Pat<(v4i32 (alignednontemporalload addr:$src)),
+  def : Pat<(v4i32 (bitconvert (v2i64 (alignednontemporalload addr:$src)))),
             (VMOVNTDQAZ128rm addr:$src)>;
-  def : Pat<(v8i16 (alignednontemporalload addr:$src)),
+  def : Pat<(v8i16 (bitconvert (v2i64 (alignednontemporalload addr:$src)))),
             (VMOVNTDQAZ128rm addr:$src)>;
-  def : Pat<(v16i8 (alignednontemporalload addr:$src)),
+  def : Pat<(v16i8 (bitconvert (v2i64 (alignednontemporalload addr:$src)))),
             (VMOVNTDQAZ128rm addr:$src)>;
 }
 

@@ -60,13 +60,15 @@ HexagonEvaluator::HexagonEvaluator(const HexagonRegisterInfo &tri,
     // Module::AnyPointerSize.
     if (Width == 0 || Width > 64)
       break;
+    AttributeSet Attrs = F.getAttributes();
+    if (Attrs.hasAttribute(AttrIdx, Attribute::ByVal))
+      continue;
     InPhysReg = getNextPhysReg(InPhysReg, Width);
     if (!InPhysReg)
       break;
     InVirtReg = getVirtRegFor(InPhysReg);
     if (!InVirtReg)
       continue;
-    AttributeSet Attrs = F.getAttributes();
     if (Attrs.hasAttribute(AttrIdx, Attribute::SExt))
       VRX.insert(std::make_pair(InVirtReg, ExtType(ExtType::SExt, Width)));
     else if (Attrs.hasAttribute(AttrIdx, Attribute::ZExt))
@@ -146,8 +148,7 @@ bool HexagonEvaluator::evaluate(const MachineInstr &MI,
       // These instructions may be marked as mayLoad, but they are generating
       // immediate values, so skip them.
       case CONST32:
-      case CONST32_Int_Real:
-      case CONST64_Int_Real:
+      case CONST64:
         break;
       default:
         return evaluateLoad(MI, Inputs, Outputs);
@@ -257,8 +258,7 @@ bool HexagonEvaluator::evaluate(const MachineInstr &MI,
     case A2_tfrsi:
     case A2_tfrpi:
     case CONST32:
-    case CONST32_Int_Real:
-    case CONST64_Int_Real:
+    case CONST64:
       return rr0(eIMM(im(1), W0), Outputs);
     case TFR_PdFalse:
       return rr0(RegisterCell(W0).fill(0, W0, BT::BitValue::Zero), Outputs);

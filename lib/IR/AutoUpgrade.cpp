@@ -951,7 +951,7 @@ void llvm::UpgradeIntrinsicCall(CallInst *CI, Function *NewFn) {
       Type *VT = VectorType::get(EltTy, NumSrcElts);
       Value *Op = Builder.CreatePointerCast(CI->getArgOperand(0),
                                             PointerType::getUnqual(VT));
-      Value *Load = Builder.CreateLoad(VT, Op);
+      Value *Load = Builder.CreateAlignedLoad(Op, 1);
       if (NumSrcElts == 2)
         Rep = Builder.CreateShuffleVector(Load, UndefValue::get(Load->getType()),
                                           { 0, 1, 0, 1 });
@@ -1557,7 +1557,7 @@ MDNode *llvm::upgradeInstructionLoopAttachment(MDNode &N) {
   if (!T)
     return &N;
 
-  if (!llvm::any_of(T->operands(), isOldLoopArgument))
+  if (none_of(T->operands(), isOldLoopArgument))
     return &N;
 
   SmallVector<Metadata *, 8> Ops;

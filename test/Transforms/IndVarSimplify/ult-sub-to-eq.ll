@@ -34,7 +34,7 @@ for.end:                                          ; preds = %for.body, %entry
 
 ; check that we turn the IV test into an eq.
 ; CHECK: %lftr.wideiv = trunc i64 %indvars.iv.next to i32
-; CHECK: %exitcond = icmp ne i32 %lftr.wideiv, %sub
+; CHECK: %exitcond = icmp ne i32 %lftr.wideiv, %su
 ; CHECK: br i1 %exitcond, label %for.body, label %for.end.loopexit
 }
 
