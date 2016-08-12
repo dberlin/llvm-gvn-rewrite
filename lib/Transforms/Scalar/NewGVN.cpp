@@ -2012,7 +2012,7 @@ PreservedAnalyses NewGVNPass::run(Function &F,
   auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
   auto &TLI = AM.getResult<TargetLibraryAnalysis>(F);
   auto &AA = AM.getResult<AAManager>(F);
-  auto &MSSA = AM.getResult<MemorySSAAnalysis>(F);
+  auto &MSSA = AM.getResult<MemorySSAAnalysis>(F).getMSSA();
   bool Changed = Impl.runGVN(F, &DT, &AC, &TLI, &AA, &MSSA);
   if (!Changed)
     return PreservedAnalyses::all();
