@@ -162,6 +162,13 @@ BlockFrequencyInfo::getBlockProfileCount(const BasicBlock *BB) const {
   return BFI->getBlockProfileCount(*getFunction(), BB);
 }
 
+Optional<uint64_t>
+BlockFrequencyInfo::getProfileCountFromFreq(uint64_t Freq) const {
+  if (!BFI)
+    return None;
+  return BFI->getProfileCountFromFreq(*getFunction(), Freq);
+}
+
 void BlockFrequencyInfo::setBlockFreq(const BasicBlock *BB, uint64_t Freq) {
   assert(BFI && "Expected analysis to be available");
   BFI->setBlockFreq(BB, Freq);
@@ -250,7 +257,7 @@ bool BlockFrequencyInfoWrapperPass::runOnFunction(Function &F) {
 
 char BlockFrequencyAnalysis::PassID;
 BlockFrequencyInfo BlockFrequencyAnalysis::run(Function &F,
-                                               AnalysisManager<Function> &AM) {
+                                               FunctionAnalysisManager &AM) {
   BlockFrequencyInfo BFI;
   BFI.calculate(F, AM.getResult<BranchProbabilityAnalysis>(F),
                 AM.getResult<LoopAnalysis>(F));
@@ -258,7 +265,7 @@ BlockFrequencyInfo BlockFrequencyAnalysis::run(Function &F,
 }
 
 PreservedAnalyses
-BlockFrequencyPrinterPass::run(Function &F, AnalysisManager<Function> &AM) {
+BlockFrequencyPrinterPass::run(Function &F, FunctionAnalysisManager &AM) {
   OS << "Printing analysis results of BFI for function "
      << "'" << F.getName() << "':"
      << "\n";

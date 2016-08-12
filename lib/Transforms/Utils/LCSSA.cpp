@@ -315,6 +315,11 @@ struct LCSSAWrapperPass : public FunctionPass {
   ScalarEvolution *SE;
 
   bool runOnFunction(Function &F) override;
+  void verifyAnalysis() const override {
+    assert(
+        all_of(*LI, [&](Loop *L) { return L->isRecursivelyLCSSAForm(*DT); }) &&
+        "LCSSA form is broken!");
+  };
 
   /// This transformation requires natural loop information & requires that
   /// loop preheaders be inserted into the CFG.  It maintains both of these,
@@ -355,7 +360,7 @@ bool LCSSAWrapperPass::runOnFunction(Function &F) {
   return formLCSSAOnAllLoops(LI, *DT, SE);
 }
 
-PreservedAnalyses LCSSAPass::run(Function &F, AnalysisManager<Function> &AM) {
+PreservedAnalyses LCSSAPass::run(Function &F, FunctionAnalysisManager &AM) {
   auto &LI = AM.getResult<LoopAnalysis>(F);
   auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
   auto *SE = AM.getCachedResult<ScalarEvolutionAnalysis>(F);

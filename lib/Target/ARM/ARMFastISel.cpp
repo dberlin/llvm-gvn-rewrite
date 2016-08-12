@@ -546,6 +546,10 @@ unsigned ARMFastISel::ARMMaterializeGV(const GlobalValue *GV, MVT VT) {
   // For now 32-bit only.
   if (VT != MVT::i32 || GV->isThreadLocal()) return 0;
 
+  // ROPI/RWPI not currently supported.
+  if (Subtarget->isROPI() || Subtarget->isRWPI())
+    return 0;
+
   bool IsIndirect = Subtarget->isGVIndirectSymbol(GV);
   const TargetRegisterClass *RC = isThumb2 ? &ARM::rGPRRegClass
                                            : &ARM::GPRRegClass;
@@ -2481,8 +2485,8 @@ bool ARMFastISel::SelectIntrinsicCall(const IntrinsicInst &I) {
   switch (I.getIntrinsicID()) {
   default: return false;
   case Intrinsic::frameaddress: {
-    MachineFrameInfo *MFI = FuncInfo.MF->getFrameInfo();
-    MFI->setFrameAddressIsTaken(true);
+    MachineFrameInfo &MFI = FuncInfo.MF->getFrameInfo();
+    MFI.setFrameAddressIsTaken(true);
 
     unsigned LdrOpc = isThumb2 ? ARM::t2LDRi12 : ARM::LDRi12;
     const TargetRegisterClass *RC = isThumb2 ? &ARM::tGPRRegClass

@@ -195,7 +195,7 @@ namespace {
     }
 
   private:
-    bool ReverseBranchCondition(BBInfo &BBI);
+    bool ReverseBranchCondition(BBInfo &BBI) const;
     bool ValidSimple(BBInfo &TrueBBI, unsigned &Dups,
                      BranchProbability Prediction) const;
     bool ValidTriangle(BBInfo &TrueBBI, BBInfo &FalseBBI,
@@ -203,7 +203,10 @@ namespace {
                        BranchProbability Prediction) const;
     bool ValidDiamond(BBInfo &TrueBBI, BBInfo &FalseBBI,
                       unsigned &Dups1, unsigned &Dups2) const;
-    void ScanInstructions(BBInfo &BBI);
+    void AnalyzeBranches(BBInfo &BBI);
+    void ScanInstructions(BBInfo &BBI,
+                          MachineBasicBlock::iterator &Begin,
+                          MachineBasicBlock::iterator &End) const;
     void AnalyzeBlock(MachineBasicBlock *MBB,
                       std::vector<std::unique_ptr<IfcvtToken>> &Tokens);
     bool FeasibilityAnalysis(BBInfo &BBI, SmallVectorImpl<MachineOperand> &Cond,
@@ -450,7 +453,7 @@ static MachineBasicBlock *findFalseBlock(MachineBasicBlock *BB,
 
 /// ReverseBranchCondition - Reverse the condition of the end of the block
 /// branch. Swap block's 'true' and 'false' successors.
-bool IfConverter::ReverseBranchCondition(BBInfo &BBI) {
+bool IfConverter::ReverseBranchCondition(BBInfo &BBI) const {
   DebugLoc dl;  // FIXME: this is nowhere
   if (!TII->ReverseBranchCondition(BBI.BrCond)) {
     TII->RemoveBranch(*BBI.BB);
@@ -540,6 +543,111 @@ bool IfConverter::ValidTriangle(BBInfo &TrueBBI, BBInfo &FalseBBI,
   return TExit && TExit == FalseBBI.BB;
 }
 
+/// Increment It until it points to a non-debug instruction or to End.
+/// @param It Iterator to increment
+/// @param End Iterator that points to end. Will be compared to It
+/// @returns true if It == End, false otherwise.
+static inline bool skipDebugInstructionsForward(
+    MachineBasicBlock::iterator &It,
+    MachineBasicBlock::iterator &End) {
+  while (It != End && It->isDebugValue())
+    It++;
+  return It == End;
+}
+
+/// Decrement It until it points to a non-debug instruction or to Begin.
+/// @param It Iterator to decrement.
+/// @param Begin Iterator that points to beginning. Will be compared to It
+/// @returns true if It == Begin, false otherwise.
+static inline bool skipDebugInstructionsBackward(
+    MachineBasicBlock::iterator &It,
+    MachineBasicBlock::iterator &Begin) {
+  while (It != Begin && It->isDebugValue())
+    It--;
+  return It == Begin;
+}
+
+/// Count duplicated instructions and move the iterators to show where they
+/// are.
+/// @param TIB True Iterator Begin
+/// @param FIB False Iterator Begin
+/// These two iterators initially point to the first instruction of the two
+/// blocks, and finally point to the first non-shared instruction.
+/// @param TIE True Iterator End
+/// @param FIE False Iterator End
+/// These two iterators initially point to End() for the two blocks() and
+/// finally point to the first shared instruction in the tail.
+/// Upon return [TIB, TIE), and [FIB, FIE) mark the un-duplicated portions of
+/// two blocks.
+static void countDuplicatedInstructions(
+    MachineBasicBlock::iterator &TIB,
+    MachineBasicBlock::iterator &FIB,
+    MachineBasicBlock::iterator &TIE,
+    MachineBasicBlock::iterator &FIE,
+    unsigned &Dups1, unsigned &Dups2,
+    MachineBasicBlock &TBB, MachineBasicBlock &FBB,
+    bool SkipConditionalBranches) {
+
+  while (TIB != TIE && FIB != FIE) {
+    // Skip dbg_value instructions. These do not count.
+    if(skipDebugInstructionsForward(TIB, TIE))
+      break;
+    if(skipDebugInstructionsForward(FIB, FIE))
+      break;
+    if (!TIB->isIdenticalTo(*FIB))
+      break;
+    ++Dups1;
+    ++TIB;
+    ++FIB;
+  }
+
+  // Now, in preparation for counting duplicate instructions at the ends of the
+  // blocks, move the end iterators up past any branch instructions.
+  // If both blocks are returning don't skip the branches, since they will
+  // likely be both identical return instructions. In such cases the return
+  // can be left unpredicated.
+  // Check for already containing all of the block.
+  if (TIB == TIE || FIB == FIE)
+    return;
+  --TIE;
+  --FIE;
+  if (!TBB.succ_empty() || !FBB.succ_empty()) {
+    if (SkipConditionalBranches) {
+      while (TIE != TIB && TIE->isBranch())
+        --TIE;
+      while (FIE != FIB && FIE->isBranch())
+        --FIE;
+    } else {
+      while (TIE != TIB && TIE->isUnconditionalBranch())
+        --TIE;
+      while (FIE != FIB && FIE->isUnconditionalBranch())
+        --FIE;
+    }
+  }
+
+  // If Dups1 includes all of a block, then don't count duplicate
+  // instructions at the end of the blocks.
+  if (TIB == TIE || FIB == FIE)
+    return;
+
+  // Count duplicate instructions at the ends of the blocks.
+  while (TIE != TIB && FIE != FIB) {
+    // Skip dbg_value instructions. These do not count.
+    if (skipDebugInstructionsBackward(TIE, TIB))
+      break;
+    if (skipDebugInstructionsBackward(FIE, FIB))
+      break;
+    if (!TIE->isIdenticalTo(*FIE))
+      break;
+    // If we are trying to make sure the conditional branches are the same, we
+    // still don't want to count them.
+    if (SkipConditionalBranches || !TIE->isBranch())
+      ++Dups2;
+    --TIE;
+    --FIE;
+  }
+}
+
 /// ValidDiamond - Returns true if the 'true' and 'false' blocks (along
 /// with their common predecessor) forms a valid diamond shape for ifcvt.
 bool IfConverter::ValidDiamond(BBInfo &TrueBBI, BBInfo &FalseBBI,
@@ -568,90 +676,24 @@ bool IfConverter::ValidDiamond(BBInfo &TrueBBI, BBInfo &FalseBBI,
       (TrueBBI.ClobbersPred && FalseBBI.ClobbersPred))
     return false;
 
-  // Count duplicate instructions at the beginning of the true and false blocks.
+  // Count duplicate instructions at the beginning and end of the true and
+  // false blocks.
   MachineBasicBlock::iterator TIB = TrueBBI.BB->begin();
   MachineBasicBlock::iterator FIB = FalseBBI.BB->begin();
   MachineBasicBlock::iterator TIE = TrueBBI.BB->end();
   MachineBasicBlock::iterator FIE = FalseBBI.BB->end();
-  while (TIB != TIE && FIB != FIE) {
-    // Skip dbg_value instructions. These do not count.
-    if (TIB->isDebugValue()) {
-      while (TIB != TIE && TIB->isDebugValue())
-        ++TIB;
-      if (TIB == TIE)
-        break;
-    }
-    if (FIB->isDebugValue()) {
-      while (FIB != FIE && FIB->isDebugValue())
-        ++FIB;
-      if (FIB == FIE)
-        break;
-    }
-    if (!TIB->isIdenticalTo(*FIB))
-      break;
-    ++Dups1;
-    ++TIB;
-    ++FIB;
-  }
-
-  // Now, in preparation for counting duplicate instructions at the ends of the
-  // blocks, move the end iterators up past any branch instructions.
-  // If both blocks are returning don't skip the branches, since they will
-  // likely be both identical return instructions. In such cases the return
-  // can be left unpredicated.
-  // Check for already containing all of the block.
-  if (TIB == TIE || FIB == FIE)
-    return true;
-  --TIE;
-  --FIE;
-  if (!TrueBBI.BB->succ_empty() || !FalseBBI.BB->succ_empty()) {
-    while (TIE != TIB && TIE->isBranch())
-      --TIE;
-    while (FIE != FIB && FIE->isBranch())
-      --FIE;
-  }
-
-  // If Dups1 includes all of a block, then don't count duplicate
-  // instructions at the end of the blocks.
-  if (TIB == TIE || FIB == FIE)
-    return true;
-
-  // Count duplicate instructions at the ends of the blocks.
-  while (TIE != TIB && FIE != FIB) {
-    // Skip dbg_value instructions. These do not count.
-    if (TIE->isDebugValue()) {
-      while (TIE != TIB && TIE->isDebugValue())
-        --TIE;
-      if (TIE == TIB)
-        break;
-    }
-    if (FIE->isDebugValue()) {
-      while (FIE != FIB && FIE->isDebugValue())
-        --FIE;
-      if (FIE == FIB)
-        break;
-    }
-    if (!TIE->isIdenticalTo(*FIE))
-      break;
-    ++Dups2;
-    --TIE;
-    --FIE;
-  }
-
+  countDuplicatedInstructions(TIB, FIB, TIE, FIE, Dups1, Dups2,
+                              *TrueBBI.BB, *FalseBBI.BB,
+                              /* SkipConditionalBranches */ true);
   return true;
 }
 
-/// ScanInstructions - Scan all the instructions in the block to determine if
-/// the block is predicable. In most cases, that means all the instructions
-/// in the block are isPredicable(). Also checks if the block contains any
-/// instruction which can clobber a predicate (e.g. condition code register).
-/// If so, the block is not predicable unless it's the last instruction.
-void IfConverter::ScanInstructions(BBInfo &BBI) {
+/// AnalyzeBranches - Look at the branches at the end of a block to determine if
+/// the block is predicable.
+void IfConverter::AnalyzeBranches(BBInfo &BBI) {
   if (BBI.IsDone)
     return;
 
-  bool AlreadyPredicated = !BBI.Predicate.empty();
-  // First analyze the end of BB branches.
   BBI.TrueBB = BBI.FalseBB = nullptr;
   BBI.BrCond.clear();
   BBI.IsBrAnalyzable =
@@ -666,16 +708,29 @@ void IfConverter::ScanInstructions(BBInfo &BBI) {
     if (!BBI.FalseBB) {
       // Malformed bcc? True and false blocks are the same?
       BBI.IsUnpredicable = true;
-      return;
     }
   }
+}
 
-  // Then scan all the instructions.
+/// ScanInstructions - Scan all the instructions in the block to determine if
+/// the block is predicable. In most cases, that means all the instructions
+/// in the block are isPredicable(). Also checks if the block contains any
+/// instruction which can clobber a predicate (e.g. condition code register).
+/// If so, the block is not predicable unless it's the last instruction.
+void IfConverter::ScanInstructions(BBInfo &BBI,
+                                   MachineBasicBlock::iterator &Begin,
+                                   MachineBasicBlock::iterator &End) const {
+  if (BBI.IsDone || BBI.IsUnpredicable)
+    return;
+
+  bool AlreadyPredicated = !BBI.Predicate.empty();
+
   BBI.NonPredSize = 0;
   BBI.ExtraCost = 0;
   BBI.ExtraCost2 = 0;
   BBI.ClobbersPred = false;
-  for (auto &MI : *BBI.BB) {
+  for (; Begin != End; ++Begin) {
+    auto &MI = *Begin;
     if (MI.isDebugValue())
       continue;
 
@@ -825,7 +880,10 @@ void IfConverter::AnalyzeBlock(
       BBI.BB = BB;
       BBI.IsBeingAnalyzed = true;
 
-      ScanInstructions(BBI);
+      AnalyzeBranches(BBI);
+      MachineBasicBlock::iterator Begin = BBI.BB->begin();
+      MachineBasicBlock::iterator End = BBI.BB->end();
+      ScanInstructions(BBI, Begin, End);
 
       // Unanalyzable or ends with fallthrough or unconditional branch, or if is
       // not considered for ifcvt anymore.
@@ -1046,8 +1104,19 @@ void IfConverter::RemoveExtraEdges(BBInfo &BBI) {
 }
 
 /// Behaves like LiveRegUnits::StepForward() but also adds implicit uses to all
-/// values defined in MI which are not live/used by MI.
+/// values defined in MI which are also live/used by MI.
 static void UpdatePredRedefs(MachineInstr &MI, LivePhysRegs &Redefs) {
+  const TargetRegisterInfo *TRI = MI.getParent()->getParent()
+    ->getSubtarget().getRegisterInfo();
+
+  // Before stepping forward past MI, remember which regs were live
+  // before MI. This is needed to set the Undef flag only when reg is
+  // dead.
+  SparseSet<unsigned> LiveBeforeMI;
+  LiveBeforeMI.setUniverse(TRI->getNumRegs());
+  for (auto &Reg : Redefs)
+    LiveBeforeMI.insert(Reg);
+
   SmallVector<std::pair<unsigned, const MachineOperand*>, 4> Clobbers;
   Redefs.stepForward(MI, Clobbers);
 
@@ -1061,7 +1130,8 @@ static void UpdatePredRedefs(MachineInstr &MI, LivePhysRegs &Redefs) {
     if (Op.isRegMask()) {
       // First handle regmasks.  They clobber any entries in the mask which
       // means that we need a def for those registers.
-      MIB.addReg(Reg.first, RegState::Implicit | RegState::Undef);
+      if (LiveBeforeMI.count(Reg.first))
+        MIB.addReg(Reg.first, RegState::Implicit);
 
       // We also need to add an implicit def of this register for the later
       // use to read from.
@@ -1078,7 +1148,8 @@ static void UpdatePredRedefs(MachineInstr &MI, LivePhysRegs &Redefs) {
       if (Redefs.contains(Op.getReg()))
         Op.setIsDead(false);
     }
-    MIB.addReg(Reg.first, RegState::Implicit | RegState::Undef);
+    if (LiveBeforeMI.count(Reg.first))
+      MIB.addReg(Reg.first, RegState::Implicit);
   }
 }
 

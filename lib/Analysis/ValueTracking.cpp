@@ -950,14 +950,63 @@ static void computeKnownBitsFromOperator(Operator *I, APInt &KnownZero,
     KnownZero = APInt::getHighBitsSet(BitWidth, LeadZ);
     break;
   }
-  case Instruction::Select:
+  case Instruction::Select: {
     computeKnownBits(I->getOperand(2), KnownZero, KnownOne, Depth + 1, Q);
     computeKnownBits(I->getOperand(1), KnownZero2, KnownOne2, Depth + 1, Q);
+
+    Value *LHS, *RHS;
+    SelectPatternFlavor SPF = matchSelectPattern(I, LHS, RHS).Flavor;
+    if (SelectPatternResult::isMinOrMax(SPF)) {
+      computeKnownBits(RHS, KnownZero, KnownOne, Depth + 1, Q);
+      computeKnownBits(LHS, KnownZero2, KnownOne2, Depth + 1, Q);
+    } else {
+      computeKnownBits(I->getOperand(2), KnownZero, KnownOne, Depth + 1, Q);
+      computeKnownBits(I->getOperand(1), KnownZero2, KnownOne2, Depth + 1, Q);
+    }
+
+    unsigned MaxHighOnes = 0;
+    unsigned MaxHighZeros = 0;
+    if (SPF == SPF_SMAX) {
+      // If both sides are negative, the result is negative.
+      if (KnownOne[BitWidth - 1] && KnownOne2[BitWidth - 1])
+        // We can derive a lower bound on the result by taking the max of the
+        // leading one bits.
+        MaxHighOnes =
+            std::max(KnownOne.countLeadingOnes(), KnownOne2.countLeadingOnes());
+      // If either side is non-negative, the result is non-negative.
+      else if (KnownZero[BitWidth - 1] || KnownZero2[BitWidth - 1])
+        MaxHighZeros = 1;
+    } else if (SPF == SPF_SMIN) {
+      // If both sides are non-negative, the result is non-negative.
+      if (KnownZero[BitWidth - 1] && KnownZero2[BitWidth - 1])
+        // We can derive an upper bound on the result by taking the max of the
+        // leading zero bits.
+        MaxHighZeros = std::max(KnownZero.countLeadingOnes(),
+                                KnownZero2.countLeadingOnes());
+      // If either side is negative, the result is negative.
+      else if (KnownOne[BitWidth - 1] || KnownOne2[BitWidth - 1])
+        MaxHighOnes = 1;
+    } else if (SPF == SPF_UMAX) {
+      // We can derive a lower bound on the result by taking the max of the
+      // leading one bits.
+      MaxHighOnes =
+          std::max(KnownOne.countLeadingOnes(), KnownOne2.countLeadingOnes());
+    } else if (SPF == SPF_UMIN) {
+      // We can derive an upper bound on the result by taking the max of the
+      // leading zero bits.
+      MaxHighZeros =
+          std::max(KnownZero.countLeadingOnes(), KnownZero2.countLeadingOnes());
+    }
 
     // Only known if known in both the LHS and RHS.
     KnownOne &= KnownOne2;
     KnownZero &= KnownZero2;
+    if (MaxHighOnes > 0)
+      KnownOne |= APInt::getHighBitsSet(BitWidth, MaxHighOnes);
+    if (MaxHighZeros > 0)
+      KnownZero |= APInt::getHighBitsSet(BitWidth, MaxHighZeros);
     break;
+  }
   case Instruction::FPTrunc:
   case Instruction::FPExt:
   case Instruction::FPToUI:
@@ -1020,13 +1069,22 @@ static void computeKnownBitsFromOperator(Operator *I, APInt &KnownZero,
   }
   case Instruction::Shl: {
     // (shl X, C1) & C2 == 0   iff   (X & C2 >>u C1) == 0
-    auto KZF = [BitWidth](const APInt &KnownZero, unsigned ShiftAmt) {
-      return (KnownZero << ShiftAmt) |
+    bool NSW = cast<OverflowingBinaryOperator>(I)->hasNoSignedWrap();
+    auto KZF = [BitWidth, NSW](const APInt &KnownZero, unsigned ShiftAmt) {
+      APInt KZResult = (KnownZero << ShiftAmt) |
              APInt::getLowBitsSet(BitWidth, ShiftAmt); // Low bits known 0.
+      // If this shift has "nsw" keyword, then the result is either a poison 
+      // value or has the same sign bit as the first operand.
+      if (NSW && KnownZero.isNegative())
+        KZResult.setBit(BitWidth - 1);
+      return KZResult;
     };
 
-    auto KOF = [BitWidth](const APInt &KnownOne, unsigned ShiftAmt) {
-      return KnownOne << ShiftAmt;
+    auto KOF = [BitWidth, NSW](const APInt &KnownOne, unsigned ShiftAmt) {
+      APInt KOResult = KnownOne << ShiftAmt;
+      if (NSW && KnownOne.isNegative())
+        KOResult.setBit(BitWidth - 1);
+      return KOResult;
     };
 
     computeKnownBitsFromShiftOperator(I, KnownZero, KnownOne,

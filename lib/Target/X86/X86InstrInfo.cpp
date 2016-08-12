@@ -975,19 +975,6 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::DIVSSrr_Int,     X86::DIVSSrm_Int,   0 },
     { X86::DPPDrri,         X86::DPPDrmi,       TB_ALIGN_16 },
     { X86::DPPSrri,         X86::DPPSrmi,       TB_ALIGN_16 },
-
-    // Do not fold Fs* scalar logical op loads because there are no scalar
-    // load variants for these instructions. When folded, the load is required
-    // to be 128-bits, so the load size would not match.
-
-    { X86::FvANDNPDrr,      X86::FvANDNPDrm,    TB_ALIGN_16 },
-    { X86::FvANDNPSrr,      X86::FvANDNPSrm,    TB_ALIGN_16 },
-    { X86::FvANDPDrr,       X86::FvANDPDrm,     TB_ALIGN_16 },
-    { X86::FvANDPSrr,       X86::FvANDPSrm,     TB_ALIGN_16 },
-    { X86::FvORPDrr,        X86::FvORPDrm,      TB_ALIGN_16 },
-    { X86::FvORPSrr,        X86::FvORPSrm,      TB_ALIGN_16 },
-    { X86::FvXORPDrr,       X86::FvXORPDrm,     TB_ALIGN_16 },
-    { X86::FvXORPSrr,       X86::FvXORPSrm,     TB_ALIGN_16 },
     { X86::HADDPDrr,        X86::HADDPDrm,      TB_ALIGN_16 },
     { X86::HADDPSrr,        X86::HADDPSrm,      TB_ALIGN_16 },
     { X86::HSUBPDrr,        X86::HSUBPDrm,      TB_ALIGN_16 },
@@ -1004,16 +991,24 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::Int_CVTSI2SSrr,  X86::Int_CVTSI2SSrm,      0 },
     { X86::Int_CVTSS2SDrr,  X86::Int_CVTSS2SDrm,      0 },
     { X86::MAXPDrr,         X86::MAXPDrm,       TB_ALIGN_16 },
+    { X86::MAXCPDrr,        X86::MAXCPDrm,      TB_ALIGN_16 },
     { X86::MAXPSrr,         X86::MAXPSrm,       TB_ALIGN_16 },
+    { X86::MAXCPSrr,        X86::MAXCPSrm,      TB_ALIGN_16 },
     { X86::MAXSDrr,         X86::MAXSDrm,       0 },
+    { X86::MAXCSDrr,        X86::MAXCSDrm,      0 },
     { X86::MAXSDrr_Int,     X86::MAXSDrm_Int,   0 },
     { X86::MAXSSrr,         X86::MAXSSrm,       0 },
+    { X86::MAXCSSrr,        X86::MAXCSSrm,      0 },
     { X86::MAXSSrr_Int,     X86::MAXSSrm_Int,   0 },
     { X86::MINPDrr,         X86::MINPDrm,       TB_ALIGN_16 },
+    { X86::MINCPDrr,        X86::MINCPDrm,      TB_ALIGN_16 },
     { X86::MINPSrr,         X86::MINPSrm,       TB_ALIGN_16 },
+    { X86::MINCPSrr,        X86::MINCPSrm,      TB_ALIGN_16 },
     { X86::MINSDrr,         X86::MINSDrm,       0 },
+    { X86::MINCSDrr,        X86::MINCSDrm,      0 },
     { X86::MINSDrr_Int,     X86::MINSDrm_Int,   0 },
     { X86::MINSSrr,         X86::MINSSrm,       0 },
+    { X86::MINCSSrr,        X86::MINCSSrm,      0 },
     { X86::MINSSrr_Int,     X86::MINSSrm_Int,   0 },
     { X86::MOVLHPSrr,       X86::MOVHPSrm,      TB_NO_REVERSE },
     { X86::MPSADBWrri,      X86::MPSADBWrmi,    TB_ALIGN_16 },
@@ -1121,6 +1116,8 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::PXORrr,          X86::PXORrm,        TB_ALIGN_16 },
     { X86::ROUNDSDr,        X86::ROUNDSDm,      0 },
     { X86::ROUNDSSr,        X86::ROUNDSSm,      0 },
+    { X86::ROUNDSDr_Int,    X86::ROUNDSDm_Int,  0 },
+    { X86::ROUNDSSr_Int,    X86::ROUNDSSm_Int,  0 },
     { X86::SBB32rr,         X86::SBB32rm,       0 },
     { X86::SBB64rr,         X86::SBB64rm,       0 },
     { X86::SHUFPDrri,       X86::SHUFPDrmi,     TB_ALIGN_16 },
@@ -1287,17 +1284,6 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VDIVSSrr_Int,      X86::VDIVSSrm_Int,       0 },
     { X86::VDPPDrri,          X86::VDPPDrmi,           0 },
     { X86::VDPPSrri,          X86::VDPPSrmi,           0 },
-    // Do not fold VFs* loads because there are no scalar load variants for
-    // these instructions. When folded, the load is required to be 128-bits, so
-    // the load size would not match.
-    { X86::VFvANDNPDrr,       X86::VFvANDNPDrm,        0 },
-    { X86::VFvANDNPSrr,       X86::VFvANDNPSrm,        0 },
-    { X86::VFvANDPDrr,        X86::VFvANDPDrm,         0 },
-    { X86::VFvANDPSrr,        X86::VFvANDPSrm,         0 },
-    { X86::VFvORPDrr,         X86::VFvORPDrm,          0 },
-    { X86::VFvORPSrr,         X86::VFvORPSrm,          0 },
-    { X86::VFvXORPDrr,        X86::VFvXORPDrm,         0 },
-    { X86::VFvXORPSrr,        X86::VFvXORPSrm,         0 },
     { X86::VHADDPDrr,         X86::VHADDPDrm,          0 },
     { X86::VHADDPSrr,         X86::VHADDPSrm,          0 },
     { X86::VHSUBPDrr,         X86::VHSUBPDrm,          0 },
@@ -1305,16 +1291,24 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::Int_VCMPSDrr,      X86::Int_VCMPSDrm,       0 },
     { X86::Int_VCMPSSrr,      X86::Int_VCMPSSrm,       0 },
     { X86::VMAXPDrr,          X86::VMAXPDrm,           0 },
+    { X86::VMAXCPDrr,         X86::VMAXCPDrm,          0 },
     { X86::VMAXPSrr,          X86::VMAXPSrm,           0 },
+    { X86::VMAXCPSrr,         X86::VMAXCPSrm,          0 },
     { X86::VMAXSDrr,          X86::VMAXSDrm,           0 },
+    { X86::VMAXCSDrr,         X86::VMAXCSDrm,          0 },
     { X86::VMAXSDrr_Int,      X86::VMAXSDrm_Int,       0 },
     { X86::VMAXSSrr,          X86::VMAXSSrm,           0 },
+    { X86::VMAXCSSrr,         X86::VMAXCSSrm,          0 },
     { X86::VMAXSSrr_Int,      X86::VMAXSSrm_Int,       0 },
     { X86::VMINPDrr,          X86::VMINPDrm,           0 },
+    { X86::VMINCPDrr,         X86::VMINCPDrm,          0 },
     { X86::VMINPSrr,          X86::VMINPSrm,           0 },
+    { X86::VMINCPSrr,         X86::VMINCPSrm,          0 },
     { X86::VMINSDrr,          X86::VMINSDrm,           0 },
+    { X86::VMINCSDrr,         X86::VMINCSDrm,          0 },
     { X86::VMINSDrr_Int,      X86::VMINSDrm_Int,       0 },
     { X86::VMINSSrr,          X86::VMINSSrm,           0 },
+    { X86::VMINCSSrr,         X86::VMINCSSrm,          0 },
     { X86::VMINSSrr_Int,      X86::VMINSSrm_Int,       0 },
     { X86::VMOVLHPSrr,        X86::VMOVHPSrm,          TB_NO_REVERSE },
     { X86::VMPSADBWrri,       X86::VMPSADBWrmi,        0 },
@@ -1420,6 +1414,8 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VPXORrr,           X86::VPXORrm,            0 },
     { X86::VROUNDSDr,         X86::VROUNDSDm,          0 },
     { X86::VROUNDSSr,         X86::VROUNDSSm,          0 },
+    { X86::VROUNDSDr_Int,     X86::VROUNDSDm_Int,      0 },
+    { X86::VROUNDSSr_Int,     X86::VROUNDSSm_Int,      0 },
     { X86::VSHUFPDrri,        X86::VSHUFPDrmi,         0 },
     { X86::VSHUFPSrri,        X86::VSHUFPSrmi,         0 },
     { X86::VSUBPDrr,          X86::VSUBPDrm,           0 },
@@ -1459,9 +1455,13 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VHSUBPSYrr,        X86::VHSUBPSYrm,         0 },
     { X86::VINSERTF128rr,     X86::VINSERTF128rm,      0 },
     { X86::VMAXPDYrr,         X86::VMAXPDYrm,          0 },
+    { X86::VMAXCPDYrr,        X86::VMAXCPDYrm,         0 },
     { X86::VMAXPSYrr,         X86::VMAXPSYrm,          0 },
+    { X86::VMAXCPSYrr,        X86::VMAXCPSYrm,         0 },
     { X86::VMINPDYrr,         X86::VMINPDYrm,          0 },
+    { X86::VMINCPDYrr,        X86::VMINCPDYrm,         0 },
     { X86::VMINPSYrr,         X86::VMINPSYrm,          0 },
+    { X86::VMINCPSYrr,        X86::VMINCPSYrm,         0 },
     { X86::VMULPDYrr,         X86::VMULPDYrm,          0 },
     { X86::VMULPSYrr,         X86::VMULPSYrm,          0 },
     { X86::VORPDYrr,          X86::VORPDYrm,           0 },
@@ -1700,10 +1700,42 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VDIVSSZrr_Int,     X86::VDIVSSZrm_Int,       0 },
     { X86::VDIVSDZrr,         X86::VDIVSDZrm,           0 },
     { X86::VDIVSDZrr_Int,     X86::VDIVSDZrm_Int,       0 },
-    { X86::VMINPSZrr,         X86::VMINPSZrm,           0 },
-    { X86::VMINPDZrr,         X86::VMINPDZrm,           0 },
-    { X86::VMAXPSZrr,         X86::VMAXPSZrm,           0 },
+    { X86::VANDPDZrr,         X86::VANDPDZrm,           0 },
+    { X86::VANDPSZrr,         X86::VANDPSZrm,           0 },
+    { X86::VANDNPDZrr,        X86::VANDNPDZrm,          0 },
+    { X86::VANDNPSZrr,        X86::VANDNPSZrm,          0 },
+    { X86::VORPDZrr,          X86::VORPDZrm,            0 },
+    { X86::VORPSZrr,          X86::VORPSZrm,            0 },
+    { X86::VXORPDZrr,         X86::VXORPDZrm,           0 },
+    { X86::VXORPSZrr,         X86::VXORPSZrm,           0 },
+    { X86::VPANDDZrr,         X86::VPANDDZrm,           0 },
+    { X86::VPANDQZrr,         X86::VPANDQZrm,           0 },
+    { X86::VPANDNDZrr,        X86::VPANDNDZrm,          0 },
+    { X86::VPANDNQZrr,        X86::VPANDNQZrm,          0 },
+    { X86::VPORDZrr,          X86::VPORDZrm,            0 },
+    { X86::VPORQZrr,          X86::VPORQZrm,            0 },
+    { X86::VPXORDZrr,         X86::VPXORDZrm,           0 },
+    { X86::VPXORQZrr,         X86::VPXORQZrm,           0 },
     { X86::VMAXPDZrr,         X86::VMAXPDZrm,           0 },
+    { X86::VMAXCPDZrr,        X86::VMAXCPDZrm,          0 },
+    { X86::VMAXPSZrr,         X86::VMAXPSZrm,           0 },
+    { X86::VMAXCPSZrr,        X86::VMAXCPSZrm,          0 },
+    { X86::VMAXSDZrr,         X86::VMAXSDZrm,           0 },
+    { X86::VMAXCSDZrr,        X86::VMAXCSDZrm,          0 },
+    { X86::VMAXSDZrr_Int,     X86::VMAXSDZrm_Int,       0 },
+    { X86::VMAXSSZrr,         X86::VMAXSSZrm,           0 },
+    { X86::VMAXCSSZrr,        X86::VMAXCSSZrm,          0 },
+    { X86::VMAXSSZrr_Int,     X86::VMAXSSZrm_Int,       0 },
+    { X86::VMINPDZrr,         X86::VMINPDZrm,           0 },
+    { X86::VMINCPDZrr,        X86::VMINCPDZrm,          0 },
+    { X86::VMINPSZrr,         X86::VMINPSZrm,           0 },
+    { X86::VMINCPSZrr,        X86::VMINCPSZrm,          0 },
+    { X86::VMINSDZrr,         X86::VMINSDZrm,           0 },
+    { X86::VMINCSDZrr,        X86::VMINCSDZrm,          0 },
+    { X86::VMINSDZrr_Int,     X86::VMINSDZrm_Int,       0 },
+    { X86::VMINSSZrr,         X86::VMINSSZrm,           0 },
+    { X86::VMINCSSZrr,        X86::VMINCSSZrm,          0 },
+    { X86::VMINSSZrr_Int,     X86::VMINSSZrm_Int,       0 },
     { X86::VPADDDZrr,         X86::VPADDDZrm,           0 },
     { X86::VPADDQZrr,         X86::VPADDQZrm,           0 },
     { X86::VPERMPDZri,        X86::VPERMPDZmi,          0 },
@@ -1778,6 +1810,22 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VXORPDZ256rr,      X86::VXORPDZ256rm,        0 },
     { X86::VXORPSZ128rr,      X86::VXORPSZ128rm,        0 },
     { X86::VXORPSZ256rr,      X86::VXORPSZ256rm,        0 },
+    { X86::VMAXPDZ128rr,      X86::VMAXPDZ128rm,        0 },
+    { X86::VMAXPDZ256rr,      X86::VMAXPDZ256rm,        0 },
+    { X86::VMAXCPDZ128rr,     X86::VMAXCPDZ128rm,       0 },
+    { X86::VMAXCPDZ256rr,     X86::VMAXCPDZ256rm,       0 },
+    { X86::VMAXPSZ128rr,      X86::VMAXPSZ128rm,        0 },
+    { X86::VMAXPSZ256rr,      X86::VMAXPSZ256rm,        0 },
+    { X86::VMAXCPSZ128rr,     X86::VMAXCPSZ128rm,       0 },
+    { X86::VMAXCPSZ256rr,     X86::VMAXCPSZ256rm,       0 },
+    { X86::VMINPDZ128rr,      X86::VMINPDZ128rm,        0 },
+    { X86::VMINPDZ256rr,      X86::VMINPDZ256rm,        0 },
+    { X86::VMINCPDZ128rr,     X86::VMINCPDZ128rm,       0 },
+    { X86::VMINCPDZ256rr,     X86::VMINCPDZ256rm,       0 },
+    { X86::VMINPSZ128rr,      X86::VMINPSZ128rm,        0 },
+    { X86::VMINPSZ256rr,      X86::VMINPSZ256rm,        0 },
+    { X86::VMINCPSZ128rr,     X86::VMINCPSZ128rm,       0 },
+    { X86::VMINCPSZ256rr,     X86::VMINCPSZ256rm,       0 },
 
     // AES foldable instructions
     { X86::AESDECLASTrr,      X86::AESDECLASTrm,        TB_ALIGN_16 },
@@ -2617,6 +2665,8 @@ bool X86InstrInfo::isReallyTriviallyReMaterializable(const MachineInstr &MI,
   case X86::FsMOVAPSrm:
   case X86::FsMOVAPDrm:
   // AVX-512
+  case X86::VMOVSSZrm:
+  case X86::VMOVSDZrm:
   case X86::VMOVAPDZ128rm:
   case X86::VMOVAPDZ256rm:
   case X86::VMOVAPDZrm:
@@ -2839,7 +2889,8 @@ inline static bool isTruncatedShiftCountForLEA(unsigned ShAmt) {
 bool X86InstrInfo::classifyLEAReg(MachineInstr &MI, const MachineOperand &Src,
                                   unsigned Opc, bool AllowSP, unsigned &NewSrc,
                                   bool &isKill, bool &isUndef,
-                                  MachineOperand &ImplicitOp) const {
+                                  MachineOperand &ImplicitOp,
+                                  LiveVariables *LV) const {
   MachineFunction &MF = *MI.getParent()->getParent();
   const TargetRegisterClass *RC;
   if (AllowSP) {
@@ -2877,13 +2928,17 @@ bool X86InstrInfo::classifyLEAReg(MachineInstr &MI, const MachineOperand &Src,
     // Virtual register of the wrong class, we have to create a temporary 64-bit
     // vreg to feed into the LEA.
     NewSrc = MF.getRegInfo().createVirtualRegister(RC);
-    BuildMI(*MI.getParent(), MI, MI.getDebugLoc(), get(TargetOpcode::COPY))
+    MachineInstr *Copy = BuildMI(*MI.getParent(), MI, MI.getDebugLoc(),
+                                 get(TargetOpcode::COPY))
         .addReg(NewSrc, RegState::Define | RegState::Undef, X86::sub_32bit)
         .addOperand(Src);
 
     // Which is obviously going to be dead after we're done with it.
     isKill = true;
     isUndef = false;
+
+    if (LV)
+      LV->replaceKillInstruction(SrcReg, MI, *Copy);
   }
 
   // We've set all the parameters without issue.
@@ -3062,7 +3117,7 @@ X86InstrInfo::convertToThreeAddress(MachineFunction::iterator &MFI,
     unsigned SrcReg;
     MachineOperand ImplicitOp = MachineOperand::CreateReg(0, false);
     if (!classifyLEAReg(MI, Src, Opc, /*AllowSP=*/ false,
-                        SrcReg, isKill, isUndef, ImplicitOp))
+                        SrcReg, isKill, isUndef, ImplicitOp, LV))
       return nullptr;
 
     MachineInstrBuilder MIB =
@@ -3105,7 +3160,7 @@ X86InstrInfo::convertToThreeAddress(MachineFunction::iterator &MFI,
     unsigned SrcReg;
     MachineOperand ImplicitOp = MachineOperand::CreateReg(0, false);
     if (!classifyLEAReg(MI, Src, Opc, /*AllowSP=*/ false,
-                        SrcReg, isKill, isUndef, ImplicitOp))
+                        SrcReg, isKill, isUndef, ImplicitOp, LV))
       return nullptr;
 
     MachineInstrBuilder MIB =
@@ -3139,7 +3194,7 @@ X86InstrInfo::convertToThreeAddress(MachineFunction::iterator &MFI,
     unsigned SrcReg;
     MachineOperand ImplicitOp = MachineOperand::CreateReg(0, false);
     if (!classifyLEAReg(MI, Src, Opc, /*AllowSP=*/ false,
-                        SrcReg, isKill, isUndef, ImplicitOp))
+                        SrcReg, isKill, isUndef, ImplicitOp, LV))
       return nullptr;
 
     MachineInstrBuilder MIB = BuildMI(MF, MI.getDebugLoc(), get(Opc))
@@ -3178,7 +3233,7 @@ X86InstrInfo::convertToThreeAddress(MachineFunction::iterator &MFI,
     unsigned SrcReg;
     MachineOperand ImplicitOp = MachineOperand::CreateReg(0, false);
     if (!classifyLEAReg(MI, Src, Opc, /*AllowSP=*/ true,
-                        SrcReg, isKill, isUndef, ImplicitOp))
+                        SrcReg, isKill, isUndef, ImplicitOp, LV))
       return nullptr;
 
     const MachineOperand &Src2 = MI.getOperand(2);
@@ -3186,7 +3241,7 @@ X86InstrInfo::convertToThreeAddress(MachineFunction::iterator &MFI,
     unsigned SrcReg2;
     MachineOperand ImplicitOp2 = MachineOperand::CreateReg(0, false);
     if (!classifyLEAReg(MI, Src2, Opc, /*AllowSP=*/ false,
-                        SrcReg2, isKill2, isUndef2, ImplicitOp2))
+                        SrcReg2, isKill2, isUndef2, ImplicitOp2, LV))
       return nullptr;
 
     MachineInstrBuilder MIB =
@@ -3249,7 +3304,7 @@ X86InstrInfo::convertToThreeAddress(MachineFunction::iterator &MFI,
     unsigned SrcReg;
     MachineOperand ImplicitOp = MachineOperand::CreateReg(0, false);
     if (!classifyLEAReg(MI, Src, Opc, /*AllowSP=*/ true,
-                        SrcReg, isKill, isUndef, ImplicitOp))
+                        SrcReg, isKill, isUndef, ImplicitOp, LV))
       return nullptr;
 
     MachineInstrBuilder MIB = BuildMI(MF, MI.getDebugLoc(), get(Opc))
@@ -3704,6 +3759,22 @@ MachineInstr *X86InstrInfo::commuteInstructionImpl(MachineInstr &MI, bool NewMI,
     unsigned Imm = MI.getOperand(3).getImm() & 0xFF;
     auto &WorkingMI = cloneIfNew(MI);
     WorkingMI.getOperand(3).setImm(Imm ^ 0x22);
+    return TargetInstrInfo::commuteInstructionImpl(WorkingMI, /*NewMI=*/false,
+                                                   OpIdx1, OpIdx2);
+  }
+  case X86::MOVHLPSrr:
+  case X86::UNPCKHPDrr: {
+    if (!Subtarget.hasSSE2())
+      return nullptr;
+
+    unsigned Opc = MI.getOpcode();
+    switch (Opc) {
+      default: llvm_unreachable("Unreachable!");
+      case X86::MOVHLPSrr: Opc = X86::UNPCKHPDrr; break;
+      case X86::UNPCKHPDrr: Opc = X86::MOVHLPSrr; break;
+    }
+    auto &WorkingMI = cloneIfNew(MI);
+    WorkingMI.setDesc(get(Opc));
     return TargetInstrInfo::commuteInstructionImpl(WorkingMI, /*NewMI=*/false,
                                                    OpIdx1, OpIdx2);
   }
@@ -4588,11 +4659,6 @@ static unsigned CopyToFromAsymmetricReg(unsigned DestReg, unsigned SrcReg,
   return 0;
 }
 
-static bool isMaskRegClass(const TargetRegisterClass *RC) {
-  // All KMASK RegClasses hold the same k registers, can be tested against anyone.
-  return X86::VK16RegClass.hasSubClassEq(RC);
-}
-
 static bool MaskRegClassContains(unsigned Reg) {
   // All KMASK RegClasses hold the same k registers, can be tested against anyone.
   return X86::VK16RegClass.contains(Reg);
@@ -4817,37 +4883,15 @@ void X86InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
   llvm_unreachable("Cannot emit physreg copy instruction");
 }
 
-static unsigned getLoadStoreMaskRegOpcode(const TargetRegisterClass *RC,
-                                          bool load) {
-  switch (RC->getSize()) {
-  default:
-    llvm_unreachable("Unknown spill size");
-  case 2:
-    return load ? X86::KMOVWkm : X86::KMOVWmk;
-  case 4:
-    return load ? X86::KMOVDkm : X86::KMOVDmk;
-  case 8:
-    return load ? X86::KMOVQkm : X86::KMOVQmk;
-  }
-}
-
 static unsigned getLoadStoreRegOpcode(unsigned Reg,
                                       const TargetRegisterClass *RC,
                                       bool isStackAligned,
                                       const X86Subtarget &STI,
                                       bool load) {
-  if (STI.hasAVX512()) {
-    if (isMaskRegClass(RC))
-      return getLoadStoreMaskRegOpcode(RC, load);
-    if (RC->getSize() == 4 && X86::FR32XRegClass.hasSubClassEq(RC))
-      return load ? X86::VMOVSSZrm : X86::VMOVSSZmr;
-    if (RC->getSize() == 8 && X86::FR64XRegClass.hasSubClassEq(RC))
-      return load ? X86::VMOVSDZrm : X86::VMOVSDZmr;
-    if (X86::VR512RegClass.hasSubClassEq(RC))
-      return load ? X86::VMOVUPSZrm : X86::VMOVUPSZmr;
-  }
-
   bool HasAVX = STI.hasAVX();
+  bool HasAVX512 = STI.hasAVX512();
+  bool HasVLX = STI.hasVLX();
+
   switch (RC->getSize()) {
   default:
     llvm_unreachable("Unknown spill size");
@@ -4860,69 +4904,65 @@ static unsigned getLoadStoreRegOpcode(unsigned Reg,
         return load ? X86::MOV8rm_NOREX : X86::MOV8mr_NOREX;
     return load ? X86::MOV8rm : X86::MOV8mr;
   case 2:
+    if (X86::VK16RegClass.hasSubClassEq(RC))
+      return load ? X86::KMOVWkm : X86::KMOVWmk;
     assert(X86::GR16RegClass.hasSubClassEq(RC) && "Unknown 2-byte regclass");
     return load ? X86::MOV16rm : X86::MOV16mr;
   case 4:
     if (X86::GR32RegClass.hasSubClassEq(RC))
       return load ? X86::MOV32rm : X86::MOV32mr;
-    if (X86::FR32RegClass.hasSubClassEq(RC))
+    if (X86::FR32XRegClass.hasSubClassEq(RC))
       return load ?
-        (HasAVX ? X86::VMOVSSrm : X86::MOVSSrm) :
-        (HasAVX ? X86::VMOVSSmr : X86::MOVSSmr);
+        (HasAVX512 ? X86::VMOVSSZrm : HasAVX ? X86::VMOVSSrm : X86::MOVSSrm) :
+        (HasAVX512 ? X86::VMOVSSZmr : HasAVX ? X86::VMOVSSmr : X86::MOVSSmr);
     if (X86::RFP32RegClass.hasSubClassEq(RC))
       return load ? X86::LD_Fp32m : X86::ST_Fp32m;
+    if (X86::VK32RegClass.hasSubClassEq(RC))
+      return load ? X86::KMOVDkm : X86::KMOVDmk;
     llvm_unreachable("Unknown 4-byte regclass");
   case 8:
     if (X86::GR64RegClass.hasSubClassEq(RC))
       return load ? X86::MOV64rm : X86::MOV64mr;
-    if (X86::FR64RegClass.hasSubClassEq(RC))
+    if (X86::FR64XRegClass.hasSubClassEq(RC))
       return load ?
-        (HasAVX ? X86::VMOVSDrm : X86::MOVSDrm) :
-        (HasAVX ? X86::VMOVSDmr : X86::MOVSDmr);
+        (HasAVX512 ? X86::VMOVSDZrm : HasAVX ? X86::VMOVSDrm : X86::MOVSDrm) :
+        (HasAVX512 ? X86::VMOVSDZmr : HasAVX ? X86::VMOVSDmr : X86::MOVSDmr);
     if (X86::VR64RegClass.hasSubClassEq(RC))
       return load ? X86::MMX_MOVQ64rm : X86::MMX_MOVQ64mr;
     if (X86::RFP64RegClass.hasSubClassEq(RC))
       return load ? X86::LD_Fp64m : X86::ST_Fp64m;
+    if (X86::VK64RegClass.hasSubClassEq(RC))
+      return load ? X86::KMOVQkm : X86::KMOVQmk;
     llvm_unreachable("Unknown 8-byte regclass");
   case 10:
     assert(X86::RFP80RegClass.hasSubClassEq(RC) && "Unknown 10-byte regclass");
     return load ? X86::LD_Fp80m : X86::ST_FpP80m;
   case 16: {
-    assert((X86::VR128RegClass.hasSubClassEq(RC) ||
-            X86::VR128XRegClass.hasSubClassEq(RC))&& "Unknown 16-byte regclass");
+    assert(X86::VR128XRegClass.hasSubClassEq(RC) && "Unknown 16-byte regclass");
     // If stack is realigned we can use aligned stores.
-    if (X86::VR128RegClass.hasSubClassEq(RC)) {
-      if (isStackAligned)
-        return load ? (HasAVX ? X86::VMOVAPSrm : X86::MOVAPSrm)
-                    : (HasAVX ? X86::VMOVAPSmr : X86::MOVAPSmr);
-      else
-        return load ? (HasAVX ? X86::VMOVUPSrm : X86::MOVUPSrm)
-                    : (HasAVX ? X86::VMOVUPSmr : X86::MOVUPSmr);
-    }
-    assert(STI.hasVLX() && "Using extended register requires VLX");
     if (isStackAligned)
-      return load ? X86::VMOVAPSZ128rm : X86::VMOVAPSZ128mr;
+      return load ?
+        (HasVLX ? X86::VMOVAPSZ128rm : HasAVX ? X86::VMOVAPSrm : X86::MOVAPSrm):
+        (HasVLX ? X86::VMOVAPSZ128mr : HasAVX ? X86::VMOVAPSmr : X86::MOVAPSmr);
     else
-      return load ? X86::VMOVUPSZ128rm : X86::VMOVUPSZ128mr;
+      return load ?
+        (HasVLX ? X86::VMOVUPSZ128rm : HasAVX ? X86::VMOVUPSrm : X86::MOVUPSrm):
+        (HasVLX ? X86::VMOVUPSZ128mr : HasAVX ? X86::VMOVUPSmr : X86::MOVUPSmr);
   }
   case 32:
-    assert((X86::VR256RegClass.hasSubClassEq(RC) ||
-            X86::VR256XRegClass.hasSubClassEq(RC)) && "Unknown 32-byte regclass");
+    assert(X86::VR256XRegClass.hasSubClassEq(RC) && "Unknown 32-byte regclass");
     // If stack is realigned we can use aligned stores.
-    if (X86::VR256RegClass.hasSubClassEq(RC)) {
-      if (isStackAligned)
-        return load ? X86::VMOVAPSYrm : X86::VMOVAPSYmr;
-      else
-        return load ? X86::VMOVUPSYrm : X86::VMOVUPSYmr;
-    }
-    assert(STI.hasVLX() && "Using extended register requires VLX");
     if (isStackAligned)
-      return load ? X86::VMOVAPSZ256rm : X86::VMOVAPSZ256mr;
+      return load ?
+        (HasVLX ? X86::VMOVAPSZ256rm : X86::VMOVAPSYrm) :
+        (HasVLX ? X86::VMOVAPSZ256mr : X86::VMOVAPSYmr);
     else
-      return load ? X86::VMOVUPSZ256rm : X86::VMOVUPSZ256mr;
+      return load ?
+        (HasVLX ? X86::VMOVUPSZ256rm : X86::VMOVUPSYrm) :
+        (HasVLX ? X86::VMOVUPSZ256mr : X86::VMOVUPSYmr);
   case 64:
     assert(X86::VR512RegClass.hasSubClassEq(RC) && "Unknown 64-byte regclass");
-    assert(STI.hasVLX() && "Using 512-bit register requires AVX512");
+    assert(STI.hasAVX512() && "Using 512-bit register requires AVX512");
     if (isStackAligned)
       return load ? X86::VMOVAPSZrm : X86::VMOVAPSZmr;
     else
@@ -4985,7 +5025,7 @@ void X86InstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
                                        const TargetRegisterClass *RC,
                                        const TargetRegisterInfo *TRI) const {
   const MachineFunction &MF = *MBB.getParent();
-  assert(MF.getFrameInfo()->getObjectSize(FrameIdx) >= RC->getSize() &&
+  assert(MF.getFrameInfo().getObjectSize(FrameIdx) >= RC->getSize() &&
          "Stack slot too small for store");
   unsigned Alignment = std::max<uint32_t>(RC->getSize(), 16);
   bool isAligned =
@@ -6172,9 +6212,11 @@ static bool hasPartialRegUpdate(unsigned Opcode) {
   case X86::ROUNDSDr:
   case X86::ROUNDSDm:
   case X86::ROUNDSDr_Int:
+  case X86::ROUNDSDm_Int:
   case X86::ROUNDSSr:
   case X86::ROUNDSSm:
   case X86::ROUNDSSr_Int:
+  case X86::ROUNDSSm_Int:
   case X86::RSQRTSSr:
   case X86::RSQRTSSm:
   case X86::RSQRTSSr_Int:
@@ -6247,28 +6289,74 @@ static bool hasUndefRegUpdate(unsigned Opcode) {
   case X86::Int_VCVTSS2SDrr:
   case X86::Int_VCVTSS2SDrm:
   case X86::VRCPSSr:
+  case X86::VRCPSSr_Int:
   case X86::VRCPSSm:
   case X86::VRCPSSm_Int:
   case X86::VROUNDSDr:
   case X86::VROUNDSDm:
   case X86::VROUNDSDr_Int:
+  case X86::VROUNDSDm_Int:
   case X86::VROUNDSSr:
   case X86::VROUNDSSm:
   case X86::VROUNDSSr_Int:
+  case X86::VROUNDSSm_Int:
   case X86::VRSQRTSSr:
+  case X86::VRSQRTSSr_Int:
   case X86::VRSQRTSSm:
   case X86::VRSQRTSSm_Int:
   case X86::VSQRTSSr:
+  case X86::VSQRTSSr_Int:
   case X86::VSQRTSSm:
   case X86::VSQRTSSm_Int:
   case X86::VSQRTSDr:
+  case X86::VSQRTSDr_Int:
   case X86::VSQRTSDm:
   case X86::VSQRTSDm_Int:
-    // AVX-512
+  // AVX-512
+  case X86::VCVTSI2SSZrr:
+  case X86::VCVTSI2SSZrm:
+  case X86::Int_VCVTSI2SSZrr:
+  case X86::Int_VCVTSI2SSZrm:
+  case X86::VCVTSI2SSZrr_Int:
+  case X86::VCVTSI2SSZrm_Int:
+  case X86::VCVTSI642SSZrr:
+  case X86::VCVTSI642SSZrm:
+  case X86::Int_VCVTSI2SS64Zrr:
+  case X86::Int_VCVTSI2SS64Zrm:
+  case X86::VCVTSI642SSZrr_Int:
+  case X86::VCVTSI642SSZrm_Int:
+  case X86::VCVTSI2SDZrr:
+  case X86::VCVTSI2SDZrm:
+  case X86::Int_VCVTSI2SDZrr:
+  case X86::Int_VCVTSI2SDZrm:
+  case X86::VCVTSI2SDZrr_Int:
+  case X86::VCVTSI2SDZrm_Int:
+  case X86::VCVTSI642SDZrr:
+  case X86::VCVTSI642SDZrm:
+  case X86::Int_VCVTSI2SD64Zrr:
+  case X86::Int_VCVTSI2SD64Zrm:
+  case X86::VCVTSI642SDZrr_Int:
+  case X86::VCVTSI642SDZrm_Int:
   case X86::VCVTSD2SSZrr:
   case X86::VCVTSD2SSZrm:
   case X86::VCVTSS2SDZrr:
   case X86::VCVTSS2SDZrm:
+  case X86::VRNDSCALESDr:
+  case X86::VRNDSCALESDm:
+  case X86::VRNDSCALESSr:
+  case X86::VRNDSCALESSm:
+  case X86::VRCP14SSrr:
+  case X86::VRCP14SSrm:
+  case X86::VRSQRT14SSrr:
+  case X86::VRSQRT14SSrm:
+  case X86::VSQRTSSZr:
+  case X86::VSQRTSSZr_Int:
+  case X86::VSQRTSSZm:
+  case X86::VSQRTSSZm_Int:
+  case X86::VSQRTSDZr:
+  case X86::VSQRTSDZr_Int:
+  case X86::VSQRTSDZm:
+  case X86::VSQRTSDZm_Int:
     return true;
   }
 
@@ -6346,9 +6434,9 @@ X86InstrInfo::foldMemoryOperandImpl(MachineFunction &MF, MachineInstr &MI,
   if (!MF.getFunction()->optForSize() && hasPartialRegUpdate(MI.getOpcode()))
     return nullptr;
 
-  const MachineFrameInfo *MFI = MF.getFrameInfo();
-  unsigned Size = MFI->getObjectSize(FrameIndex);
-  unsigned Alignment = MFI->getObjectAlignment(FrameIndex);
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+  unsigned Size = MFI.getObjectSize(FrameIndex);
+  unsigned Alignment = MFI.getObjectAlignment(FrameIndex);
   // If the function stack isn't realigned we don't want to fold instructions
   // that need increased alignment.
   if (!RI.needsStackRealignment(MF))
@@ -7347,7 +7435,27 @@ static const uint16_t ReplaceableInstrsAVX2[][3] = {
 
 static const uint16_t ReplaceableInstrsAVX512[][4] = {
   // Two integer columns for 64-bit and 32-bit elements.
-  //PackedSingle     PackedDouble     PackedInt        PackedInt
+  //PackedSingle        PackedDouble        PackedInt             PackedInt
+  { X86::VMOVAPSZ128mr, X86::VMOVAPDZ128mr, X86::VMOVDQA64Z128mr, X86::VMOVDQA32Z128mr  },
+  { X86::VMOVAPSZ128rm, X86::VMOVAPDZ128rm, X86::VMOVDQA64Z128rm, X86::VMOVDQA32Z128rm  },
+  { X86::VMOVAPSZ128rr, X86::VMOVAPDZ128rr, X86::VMOVDQA64Z128rr, X86::VMOVDQA32Z128rr  },
+  { X86::VMOVUPSZ128mr, X86::VMOVUPDZ128mr, X86::VMOVDQU64Z128mr, X86::VMOVDQU32Z128mr  },
+  { X86::VMOVUPSZ128rm, X86::VMOVUPDZ128rm, X86::VMOVDQU64Z128rm, X86::VMOVDQU32Z128rm  },
+  { X86::VMOVAPSZ256mr, X86::VMOVAPDZ256mr, X86::VMOVDQA64Z256mr, X86::VMOVDQA32Z256mr  },
+  { X86::VMOVAPSZ256rm, X86::VMOVAPDZ256rm, X86::VMOVDQA64Z256rm, X86::VMOVDQA32Z256rm  },
+  { X86::VMOVAPSZ256rr, X86::VMOVAPDZ256rr, X86::VMOVDQA64Z256rr, X86::VMOVDQA32Z256rr  },
+  { X86::VMOVUPSZ256mr, X86::VMOVUPDZ256mr, X86::VMOVDQU64Z256mr, X86::VMOVDQU32Z256mr  },
+  { X86::VMOVUPSZ256rm, X86::VMOVUPDZ256rm, X86::VMOVDQU64Z256rm, X86::VMOVDQU32Z256rm  },
+  { X86::VMOVAPSZmr,    X86::VMOVAPDZmr,    X86::VMOVDQA64Zmr,    X86::VMOVDQA32Zmr     },
+  { X86::VMOVAPSZrm,    X86::VMOVAPDZrm,    X86::VMOVDQA64Zrm,    X86::VMOVDQA32Zrm     },
+  { X86::VMOVAPSZrr,    X86::VMOVAPDZrr,    X86::VMOVDQA64Zrr,    X86::VMOVDQA32Zrr     },
+  { X86::VMOVUPSZmr,    X86::VMOVUPDZmr,    X86::VMOVDQU64Zmr,    X86::VMOVDQU32Zmr     },
+  { X86::VMOVUPSZrm,    X86::VMOVUPDZrm,    X86::VMOVDQU64Zrm,    X86::VMOVDQU32Zrm     },
+};
+
+static const uint16_t ReplaceableInstrsAVX512DQ[][4] = {
+  // Two integer columns for 64-bit and 32-bit elements.
+  //PackedSingle        PackedDouble        PackedInt           PackedInt
   { X86::VANDNPSZ128rm, X86::VANDNPDZ128rm, X86::VPANDNQZ128rm, X86::VPANDNDZ128rm },
   { X86::VANDNPSZ128rr, X86::VANDNPDZ128rr, X86::VPANDNQZ128rr, X86::VPANDNDZ128rr },
   { X86::VANDPSZ128rm,  X86::VANDPDZ128rm,  X86::VPANDQZ128rm,  X86::VPANDDZ128rm  },
@@ -7372,33 +7480,125 @@ static const uint16_t ReplaceableInstrsAVX512[][4] = {
   { X86::VORPSZrr,      X86::VORPDZrr,      X86::VPORQZrr,      X86::VPORDZrr      },
   { X86::VXORPSZrm,     X86::VXORPDZrm,     X86::VPXORQZrm,     X86::VPXORDZrm     },
   { X86::VXORPSZrr,     X86::VXORPDZrr,     X86::VPXORQZrr,     X86::VPXORDZrr     },
-  { X86::VMOVAPSZmr,    X86::VMOVAPDZmr,    X86::VMOVDQA64Zmr,  X86::VMOVDQA64Zmr  },
-  { X86::VMOVAPSZrm,    X86::VMOVAPDZrm,    X86::VMOVDQA64Zrm,  X86::VMOVDQA64Zrm  },
-  { X86::VMOVAPSZrr,    X86::VMOVAPDZrr,    X86::VMOVDQA64Zrr,  X86::VMOVDQA64Zrr  },
-  { X86::VMOVUPSZmr,    X86::VMOVUPDZmr,    X86::VMOVDQU64Zmr,  X86::VMOVDQU64Zmr  },
-  { X86::VMOVUPSZrm,    X86::VMOVUPDZrm,    X86::VMOVDQU64Zrm,  X86::VMOVDQU64Zrm  },
+};
+
+static const uint16_t ReplaceableInstrsAVX512DQMasked[][4] = {
+  // Two integer columns for 64-bit and 32-bit elements.
+  //PackedSingle          PackedDouble
+  //PackedInt             PackedInt
+  { X86::VANDNPSZ128rmk,  X86::VANDNPDZ128rmk,
+    X86::VPANDNQZ128rmk,  X86::VPANDNDZ128rmk  },
+  { X86::VANDNPSZ128rmkz, X86::VANDNPDZ128rmkz,
+    X86::VPANDNQZ128rmkz, X86::VPANDNDZ128rmkz },
+  { X86::VANDNPSZ128rrk,  X86::VANDNPDZ128rrk,
+    X86::VPANDNQZ128rrk,  X86::VPANDNDZ128rrk  },
+  { X86::VANDNPSZ128rrkz, X86::VANDNPDZ128rrkz,
+    X86::VPANDNQZ128rrkz, X86::VPANDNDZ128rrkz },
+  { X86::VANDPSZ128rmk,   X86::VANDPDZ128rmk,
+    X86::VPANDQZ128rmk,   X86::VPANDDZ128rmk   },
+  { X86::VANDPSZ128rmkz,  X86::VANDPDZ128rmkz,
+    X86::VPANDQZ128rmkz,  X86::VPANDDZ128rmkz  },
+  { X86::VANDPSZ128rrk,   X86::VANDPDZ128rrk,
+    X86::VPANDQZ128rrk,   X86::VPANDDZ128rrk   },
+  { X86::VANDPSZ128rrkz,  X86::VANDPDZ128rrkz,
+    X86::VPANDQZ128rrkz,  X86::VPANDDZ128rrkz  },
+  { X86::VORPSZ128rmk,    X86::VORPDZ128rmk,
+    X86::VPORQZ128rmk,    X86::VPORDZ128rmk    },
+  { X86::VORPSZ128rmkz,   X86::VORPDZ128rmkz,
+    X86::VPORQZ128rmkz,   X86::VPORDZ128rmkz   },
+  { X86::VORPSZ128rrk,    X86::VORPDZ128rrk,
+    X86::VPORQZ128rrk,    X86::VPORDZ128rrk    },
+  { X86::VORPSZ128rrkz,   X86::VORPDZ128rrkz,
+    X86::VPORQZ128rrkz,   X86::VPORDZ128rrkz   },
+  { X86::VXORPSZ128rmk,   X86::VXORPDZ128rmk,
+    X86::VPXORQZ128rmk,   X86::VPXORDZ128rmk   },
+  { X86::VXORPSZ128rmkz,  X86::VXORPDZ128rmkz,
+    X86::VPXORQZ128rmkz,  X86::VPXORDZ128rmkz  },
+  { X86::VXORPSZ128rrk,   X86::VXORPDZ128rrk,
+    X86::VPXORQZ128rrk,   X86::VPXORDZ128rrk   },
+  { X86::VXORPSZ128rrkz,  X86::VXORPDZ128rrkz,
+    X86::VPXORQZ128rrkz,  X86::VPXORDZ128rrkz  },
+  { X86::VANDNPSZ256rmk,  X86::VANDNPDZ256rmk,
+    X86::VPANDNQZ256rmk,  X86::VPANDNDZ256rmk  },
+  { X86::VANDNPSZ256rmkz, X86::VANDNPDZ256rmkz,
+    X86::VPANDNQZ256rmkz, X86::VPANDNDZ256rmkz },
+  { X86::VANDNPSZ256rrk,  X86::VANDNPDZ256rrk,
+    X86::VPANDNQZ256rrk,  X86::VPANDNDZ256rrk  },
+  { X86::VANDNPSZ256rrkz, X86::VANDNPDZ256rrkz,
+    X86::VPANDNQZ256rrkz, X86::VPANDNDZ256rrkz },
+  { X86::VANDPSZ256rmk,   X86::VANDPDZ256rmk,
+    X86::VPANDQZ256rmk,   X86::VPANDDZ256rmk   },
+  { X86::VANDPSZ256rmkz,  X86::VANDPDZ256rmkz,
+    X86::VPANDQZ256rmkz,  X86::VPANDDZ256rmkz  },
+  { X86::VANDPSZ256rrk,   X86::VANDPDZ256rrk,
+    X86::VPANDQZ256rrk,   X86::VPANDDZ256rrk   },
+  { X86::VANDPSZ256rrkz,  X86::VANDPDZ256rrkz,
+    X86::VPANDQZ256rrkz,  X86::VPANDDZ256rrkz  },
+  { X86::VORPSZ256rmk,    X86::VORPDZ256rmk,
+    X86::VPORQZ256rmk,    X86::VPORDZ256rmk    },
+  { X86::VORPSZ256rmkz,   X86::VORPDZ256rmkz,
+    X86::VPORQZ256rmkz,   X86::VPORDZ256rmkz   },
+  { X86::VORPSZ256rrk,    X86::VORPDZ256rrk,
+    X86::VPORQZ256rrk,    X86::VPORDZ256rrk    },
+  { X86::VORPSZ256rrkz,   X86::VORPDZ256rrkz,
+    X86::VPORQZ256rrkz,   X86::VPORDZ256rrkz   },
+  { X86::VXORPSZ256rmk,   X86::VXORPDZ256rmk,
+    X86::VPXORQZ256rmk,   X86::VPXORDZ256rmk   },
+  { X86::VXORPSZ256rmkz,  X86::VXORPDZ256rmkz,
+    X86::VPXORQZ256rmkz,  X86::VPXORDZ256rmkz  },
+  { X86::VXORPSZ256rrk,   X86::VXORPDZ256rrk,
+    X86::VPXORQZ256rrk,   X86::VPXORDZ256rrk   },
+  { X86::VXORPSZ256rrkz,  X86::VXORPDZ256rrkz,
+    X86::VPXORQZ256rrkz,  X86::VPXORDZ256rrkz  },
+  { X86::VANDNPSZrmk,     X86::VANDNPDZrmk,
+    X86::VPANDNQZrmk,     X86::VPANDNDZrmk     },
+  { X86::VANDNPSZrmkz,    X86::VANDNPDZrmkz,
+    X86::VPANDNQZrmkz,    X86::VPANDNDZrmkz    },
+  { X86::VANDNPSZrrk,     X86::VANDNPDZrrk,
+    X86::VPANDNQZrrk,     X86::VPANDNDZrrk     },
+  { X86::VANDNPSZrrkz,    X86::VANDNPDZrrkz,
+    X86::VPANDNQZrrkz,    X86::VPANDNDZrrkz    },
+  { X86::VANDPSZrmk,      X86::VANDPDZrmk,
+    X86::VPANDQZrmk,      X86::VPANDDZrmk      },
+  { X86::VANDPSZrmkz,     X86::VANDPDZrmkz,
+    X86::VPANDQZrmkz,     X86::VPANDDZrmkz     },
+  { X86::VANDPSZrrk,      X86::VANDPDZrrk,
+    X86::VPANDQZrrk,      X86::VPANDDZrrk      },
+  { X86::VANDPSZrrkz,     X86::VANDPDZrrkz,
+    X86::VPANDQZrrkz,     X86::VPANDDZrrkz     },
+  { X86::VORPSZrmk,       X86::VORPDZrmk,
+    X86::VPORQZrmk,       X86::VPORDZrmk       },
+  { X86::VORPSZrmkz,      X86::VORPDZrmkz,
+    X86::VPORQZrmkz,      X86::VPORDZrmkz      },
+  { X86::VORPSZrrk,       X86::VORPDZrrk,
+    X86::VPORQZrrk,       X86::VPORDZrrk       },
+  { X86::VORPSZrrkz,      X86::VORPDZrrkz,
+    X86::VPORQZrrkz,      X86::VPORDZrrkz      },
+  { X86::VXORPSZrmk,      X86::VXORPDZrmk,
+    X86::VPXORQZrmk,      X86::VPXORDZrmk      },
+  { X86::VXORPSZrmkz,     X86::VXORPDZrmkz,
+    X86::VPXORQZrmkz,     X86::VPXORDZrmkz     },
+  { X86::VXORPSZrrk,      X86::VXORPDZrrk,
+    X86::VPXORQZrrk,      X86::VPXORDZrrk      },
+  { X86::VXORPSZrrkz,     X86::VXORPDZrrkz,
+    X86::VPXORQZrrkz,     X86::VPXORDZrrkz     },
 };
 
 // FIXME: Some shuffle and unpack instructions have equivalents in different
 // domains, but they require a bit more work than just switching opcodes.
 
-static const uint16_t *lookup(unsigned opcode, unsigned domain) {
-  for (const uint16_t (&Row)[3] : ReplaceableInstrs)
+static const uint16_t *lookup(unsigned opcode, unsigned domain,
+                              ArrayRef<uint16_t[3]> Table) {
+  for (const uint16_t (&Row)[3] : Table)
     if (Row[domain-1] == opcode)
       return Row;
   return nullptr;
 }
 
-static const uint16_t *lookupAVX2(unsigned opcode, unsigned domain) {
-  for (const uint16_t (&Row)[3] : ReplaceableInstrsAVX2)
-    if (Row[domain-1] == opcode)
-      return Row;
-  return nullptr;
-}
-
-static const uint16_t *lookupAVX512(unsigned opcode, unsigned domain) {
+static const uint16_t *lookupAVX512(unsigned opcode, unsigned domain,
+                                    ArrayRef<uint16_t[4]> Table) {
   // If this is the integer domain make sure to check both integer columns.
-  for (const uint16_t (&Row)[4] : ReplaceableInstrsAVX512)
+  for (const uint16_t (&Row)[4] : Table)
     if (Row[domain-1] == opcode || (domain == 3 && Row[3] == opcode))
       return Row;
   return nullptr;
@@ -7407,14 +7607,25 @@ static const uint16_t *lookupAVX512(unsigned opcode, unsigned domain) {
 std::pair<uint16_t, uint16_t>
 X86InstrInfo::getExecutionDomain(const MachineInstr &MI) const {
   uint16_t domain = (MI.getDesc().TSFlags >> X86II::SSEDomainShift) & 3;
-  bool hasAVX2 = Subtarget.hasAVX2();
+  unsigned opcode = MI.getOpcode();
   uint16_t validDomains = 0;
-  if (domain && lookup(MI.getOpcode(), domain))
-    validDomains = 0xe;
-  else if (domain && lookupAVX2(MI.getOpcode(), domain))
-    validDomains = hasAVX2 ? 0xe : 0x6;
-  else if (domain && lookupAVX512(MI.getOpcode(), domain))
-    validDomains = 0xe;
+  if (domain) {
+    if (lookup(MI.getOpcode(), domain, ReplaceableInstrs)) {
+      validDomains = 0xe;
+    } else if (lookup(opcode, domain, ReplaceableInstrsAVX2)) {
+      validDomains = Subtarget.hasAVX2() ? 0xe : 0x6;
+    } else if (lookupAVX512(opcode, domain, ReplaceableInstrsAVX512)) {
+      validDomains = 0xe;
+    } else if (lookupAVX512(opcode, domain, ReplaceableInstrsAVX512DQ)) {
+      validDomains = Subtarget.hasDQI() ? 0xe : 0x8;
+    } else if (const uint16_t *table = lookupAVX512(opcode, domain,
+                                             ReplaceableInstrsAVX512DQMasked)) {
+      if (domain == 1 || (domain == 3 && table[3] == opcode))
+        validDomains = Subtarget.hasDQI() ? 0xa : 0x8;
+      else
+        validDomains = Subtarget.hasDQI() ? 0xc : 0x8;
+    }
+  }
   return std::make_pair(domain, validDomains);
 }
 
@@ -7422,16 +7633,31 @@ void X86InstrInfo::setExecutionDomain(MachineInstr &MI, unsigned Domain) const {
   assert(Domain>0 && Domain<4 && "Invalid execution domain");
   uint16_t dom = (MI.getDesc().TSFlags >> X86II::SSEDomainShift) & 3;
   assert(dom && "Not an SSE instruction");
-  const uint16_t *table = lookup(MI.getOpcode(), dom);
+  const uint16_t *table = lookup(MI.getOpcode(), dom, ReplaceableInstrs);
   if (!table) { // try the other table
     assert((Subtarget.hasAVX2() || Domain < 3) &&
            "256-bit vector operations only available in AVX2");
-    table = lookupAVX2(MI.getOpcode(), dom);
+    table = lookup(MI.getOpcode(), dom, ReplaceableInstrsAVX2);
   }
   if (!table) { // try the AVX512 table
-    table = lookupAVX512(MI.getOpcode(), dom);
+    assert(Subtarget.hasAVX512() && "Requires AVX-512");
+    table = lookupAVX512(MI.getOpcode(), dom, ReplaceableInstrsAVX512);
     // Don't change integer Q instructions to D instructions.
-    if (dom == 3 && table[3] == MI.getOpcode())
+    if (table && Domain == 3 && table[3] == MI.getOpcode())
+      Domain = 4;
+  }
+  if (!table) { // try the AVX512DQ table
+    assert((Subtarget.hasDQI() || Domain >= 3) && "Requires AVX-512DQ");
+    table = lookupAVX512(MI.getOpcode(), dom, ReplaceableInstrsAVX512DQ);
+    // Don't change integer Q instructions to D instructions and
+    // use D intructions if we started with a PS instruction.
+    if (table && Domain == 3 && (dom == 1 || table[3] == MI.getOpcode()))
+      Domain = 4;
+  }
+  if (!table) { // try the AVX512DQMasked table
+    assert((Subtarget.hasDQI() || Domain >= 3) && "Requires AVX-512DQ");
+    table = lookupAVX512(MI.getOpcode(), dom, ReplaceableInstrsAVX512DQMasked);
+    if (table && Domain == 3 && (dom == 1 || table[3] == MI.getOpcode()))
       Domain = 4;
   }
   assert(table && "Cannot change domain");

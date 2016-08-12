@@ -387,7 +387,6 @@ define i16 @test35(i16 %a) {
   ret i16 %c2
 }
 
-; icmp sgt i32 %a, -1
 ; rdar://6480391
 define i1 @test36(i32 %a) {
 ; CHECK-LABEL: @test36(
@@ -400,7 +399,20 @@ define i1 @test36(i32 %a) {
   ret i1 %d
 }
 
-; ret i1 false
+; FIXME: Vectors should fold too.
+define <2 x i1> @test36vec(<2 x i32> %a) {
+; CHECK-LABEL: @test36vec(
+; CHECK-NEXT:    [[B:%.*]] = lshr <2 x i32> %a, <i32 31, i32 31>
+; CHECK-NEXT:    [[C:%.*]] = trunc <2 x i32> [[B]] to <2 x i8>
+; CHECK-NEXT:    [[D:%.*]] = icmp eq <2 x i8> [[C]], zeroinitializer
+; CHECK-NEXT:    ret <2 x i1> [[D]]
+;
+  %b = lshr <2 x i32> %a, <i32 31, i32 31>
+  %c = trunc <2 x i32> %b to <2 x i8>
+  %d = icmp eq <2 x i8> %c, zeroinitializer
+  ret <2 x i1> %d
+}
+
 define i1 @test37(i32 %a) {
 ; CHECK-LABEL: @test37(
 ; CHECK-NEXT:    ret i1 false
@@ -1371,4 +1383,25 @@ define i16 @PR24763(i8 %V) {
   %l = lshr i32 %conv, 1
   %t = trunc i32 %l to i16
   ret i16 %t
+}
+
+define i64 @PR28745() {
+; CHECK-LABEL: @PR28745(
+; CHECK-NEXT:    ret i64 1
+
+  %b = zext i32 extractvalue ({ i32 } select (i1 icmp eq (i16 extractelement (<2 x i16> bitcast (<1 x i32> <i32 1> to <2 x i16>), i32 0), i16 0), { i32 } { i32 1 }, { i32 } zeroinitializer), 0) to i64
+  ret i64 %b
+}
+
+define i32 @test89() {
+; CHECK-LABEL: @test89(
+; CHECK-NEXT:    ret i32 393216
+  ret i32 bitcast (<2 x i16> <i16 6, i16 undef> to i32)
+}
+
+define <2 x i32> @test90() {
+; CHECK-LABEL: @test90(
+; CHECK: ret <2 x i32> <i32 0, i32 15360>
+  %tmp6 = bitcast <4 x half> <half undef, half undef, half undef, half 0xH3C00> to <2 x i32>
+  ret <2 x i32> %tmp6
 }

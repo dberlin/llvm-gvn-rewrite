@@ -28,6 +28,12 @@ define i32* @return_deref_arg_multilevel_callee(i32*** %arg1) {
 ; CHECK: MayAlias: i32* %c, i32* %lp
 ; CHECK: NoAlias: i32* %lp, i32** %lpp
 ; CHECK: MayAlias: i32* %lp, i32* %lpp_deref
+
+; Temporarily disable modref checks
+; Just Ref: Ptr: i32** %p <-> %c = call i32* @return_deref_arg_multilevel_callee(i32*** %pp)
+; Just Ref: Ptr: i32*** %pp <-> %c = call i32* @return_deref_arg_multilevel_callee(i32*** %pp)
+; Just Ref: Ptr: i32** %lpp <-> %c = call i32* @return_deref_arg_multilevel_callee(i32*** %pp)
+
 define void @test_return_deref_arg_multilevel() {
   %a = alloca i32, align 4
   %b = alloca i32, align 4

@@ -494,7 +494,6 @@ class MemorySSAWalker;
 class MemorySSA {
 public:
   MemorySSA(Function &, AliasAnalysis *, DominatorTree *);
-  MemorySSA(MemorySSA &&);
   ~MemorySSA();
 
   MemorySSAWalker *getWalker();
@@ -530,11 +529,12 @@ public:
   ///
   /// This list is not modifiable by the user.
   const AccessList *getBlockAccesses(const BasicBlock *BB) const {
-    auto It = PerBlockAccesses.find(BB);
-    return It == PerBlockAccesses.end() ? nullptr : It->second.get();
+    return getWritableBlockAccesses(BB);
   }
 
-  /// \brief Create an empty MemoryPhi in MemorySSA
+  /// \brief Create an empty MemoryPhi in MemorySSA for a given basic block.
+  /// Only one MemoryPhi for a block exists at a time, so this function will
+  /// assert if you try to create one where it already exists.
   MemoryPhi *createMemoryPhi(BasicBlock *BB);
 
   enum InsertionPlace { Beginning, End };
@@ -550,6 +550,8 @@ public:
   /// will be placed. The caller is expected to keep ordering the same as
   /// instructions.
   /// It will return the new MemoryAccess.
+  /// Note: If a MemoryAccess already exists for I, this function will make it
+  /// inaccessible and it *must* have removeMemoryAccess called on it.
   MemoryAccess *createMemoryAccessInBB(Instruction *I, MemoryAccess *Definition,
                                        const BasicBlock *BB,
                                        InsertionPlace Point);
@@ -561,6 +563,8 @@ public:
   /// used to replace an existing memory instruction. It will *not* create PHI
   /// nodes, or verify the clobbering definition.  The clobbering definition
   /// must be non-null.
+  /// Note: If a MemoryAccess already exists for I, this function will make it
+  /// inaccessible and it *must* have removeMemoryAccess called on it.
   MemoryAccess *createMemoryAccessBefore(Instruction *I,
                                          MemoryAccess *Definition,
                                          MemoryAccess *InsertPt);
@@ -584,6 +588,10 @@ public:
   /// determine whether MemoryAccess \p A dominates MemoryAccess \p B.
   bool dominates(const MemoryAccess *A, const MemoryAccess *B) const;
 
+  /// \brief Given a MemoryAccess and a Use, determine whether MemoryAccess \p A
+  /// dominates Use \p B.
+  bool dominates(const MemoryAccess *A, const Use &B) const;
+
   /// \brief Verify that MemorySSA is self consistent (IE definitions dominate
   /// all uses, uses appear in the right places).  This is used by unit tests.
   void verifyMemorySSA() const;
@@ -596,11 +604,20 @@ protected:
   void verifyDomination(Function &F) const;
   void verifyOrdering(Function &F) const;
 
+  // This is used by the use optimizer class
+  AccessList *getWritableBlockAccesses(const BasicBlock *BB) const {
+    auto It = PerBlockAccesses.find(BB);
+    return It == PerBlockAccesses.end() ? nullptr : It->second.get();
+  }
+
 private:
   class CachingWalker;
+  class OptimizeUses;
 
   CachingWalker *getWalkerImpl();
   void buildMemorySSA();
+  void optimizeUses();
+
   void verifyUseInDefs(MemoryAccess *, MemoryAccess *) const;
   using AccessMap = DenseMap<const BasicBlock *, std::unique_ptr<AccessList>>;
 
@@ -658,9 +675,21 @@ class MemorySSAAnalysis : public AnalysisInfoMixin<MemorySSAAnalysis> {
   static char PassID;
 
 public:
-  typedef MemorySSA Result;
+  // Wrap MemorySSA result to ensure address stability of internal MemorySSA
+  // pointers after construction.  Use a wrapper class instead of plain
+  // unique_ptr<MemorySSA> to avoid build breakage on MSVC.
+  struct Result {
+    Result(std::unique_ptr<MemorySSA> &&MSSA) : MSSA(std::move(MSSA)) {}
+    Result(Result &&R) : MSSA(std::move(R.MSSA)) {}
+    MemorySSA &getMSSA() { return *MSSA.get(); }
 
-  MemorySSA run(Function &F, AnalysisManager<Function> &AM);
+    Result(const Result &) = delete;
+    void operator=(const Result &) = delete;
+
+    std::unique_ptr<MemorySSA> MSSA;
+  };
+
+  Result run(Function &F, FunctionAnalysisManager &AM);
 };
 
 /// \brief Printer pass for \c MemorySSA.
@@ -669,12 +698,12 @@ class MemorySSAPrinterPass : public PassInfoMixin<MemorySSAPrinterPass> {
 
 public:
   explicit MemorySSAPrinterPass(raw_ostream &OS) : OS(OS) {}
-  PreservedAnalyses run(Function &F, AnalysisManager<Function> &AM);
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
 };
 
 /// \brief Verifier pass for \c MemorySSA.
 struct MemorySSAVerifierPass : PassInfoMixin<MemorySSAVerifierPass> {
-  PreservedAnalyses run(Function &F, AnalysisManager<Function> &AM);
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
 };
 
 /// \brief Legacy analysis pass which computes \c MemorySSA.
@@ -767,6 +796,8 @@ public:
   /// invalidation.  This will be called by MemorySSA at appropriate times for
   /// the walker it uses or returns.
   virtual void invalidateInfo(MemoryAccess *) {}
+
+  virtual void verify(const MemorySSA *MSSA) { assert(MSSA == this->MSSA); }
 
 protected:
   friend class MemorySSA; // For updating MSSA pointer in MemorySSA move

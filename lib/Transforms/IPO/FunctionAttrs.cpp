@@ -333,6 +333,7 @@ struct ArgumentUsesTracker : public CaptureTracker {
 namespace llvm {
 template <> struct GraphTraits<ArgumentGraphNode *> {
   typedef ArgumentGraphNode NodeType;
+  typedef ArgumentGraphNode *NodeRef;
   typedef SmallVectorImpl<ArgumentGraphNode *>::iterator ChildIteratorType;
 
   static inline NodeType *getEntryNode(NodeType *A) { return A; }
@@ -1266,10 +1267,17 @@ bool ReversePostOrderFunctionAttrsLegacyPass::runOnModule(Module &M) {
 }
 
 PreservedAnalyses
-ReversePostOrderFunctionAttrsPass::run(Module &M, AnalysisManager<Module> &AM) {
+ReversePostOrderFunctionAttrsPass::run(Module &M, ModuleAnalysisManager &AM) {
   auto &CG = AM.getResult<CallGraphAnalysis>(M);
 
   bool Changed = deduceFunctionAttributeInRPO(M, CG);
+
+  // CallGraphAnalysis holds AssertingVH and must be invalidated eagerly so
+  // that other passes don't delete stuff from under it.
+  // FIXME: We need to invalidate this to avoid PR28400. Is there a better
+  // solution?
+  AM.invalidate<CallGraphAnalysis>(M);
+
   if (!Changed)
     return PreservedAnalyses::all();
   PreservedAnalyses PA;

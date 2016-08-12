@@ -64,7 +64,14 @@ private:
   // do not appear in that map.
   SmallSetVector<const Constant *, 8> Constants;
 
+  // N.b. it's not completely obvious that this will be sufficient for every
+  // LLVM IR construct (with "invoke" being the obvious candidate to mess up our
+  // lives.
   DenseMap<const BasicBlock *, MachineBasicBlock *> BBToMBB;
+
+  // List of stubbed PHI instructions, for values and basic blocks to be filled
+  // in once all MachineBasicBlocks have been created.
+  SmallVector<std::pair<const PHINode *, MachineInstr *>, 4> PendingPHIs;
 
   /// Methods for translating form LLVM IR to MachineInstr.
   /// \see ::translate for general information on the translate methods.
@@ -93,6 +100,13 @@ private:
   /// \return true if the translation succeeded.
   bool translate(const Instruction &Inst);
 
+  /// Materialize \p C into virtual-register \p Reg. The generic instructions
+  /// performing this materialization will be inserted into the entry block of
+  /// the function.
+  ///
+  /// \return true if the materialization succeeded.
+  bool translate(const Constant &C, unsigned Reg);
+
   /// Translate an LLVM bitcast into generic IR. Either a COPY or a G_BITCAST is
   /// emitted.
   bool translateBitCast(const CastInst &CI);
@@ -103,27 +117,39 @@ private:
   /// Translate an LLVM store instruction into generic IR.
   bool translateStore(const StoreInst &SI);
 
+  /// Translate call instruction.
+  /// \pre \p Inst is a branch instruction.
+  bool translateCall(const CallInst &Inst);
+
   /// Translate one of LLVM's cast instructions into MachineInstrs, with the
   /// given generic Opcode.
   bool translateCast(unsigned Opcode, const CastInst &CI);
 
-  /// Translate alloca instruction (i.e. one of constant size and in the first
-  /// basic block).
+  /// Translate static alloca instruction (i.e. one  of constant size and in the
+  /// first basic block).
   bool translateStaticAlloca(const AllocaInst &Inst);
+
+  /// Translate a phi instruction.
+  bool translatePhi(const PHINode &PI);
+
+  /// Add remaining operands onto phis we've translated. Executed after all
+  /// MachineBasicBlocks for the function have been created.
+  void finishPendingPhis();
 
   /// Translate \p Inst into a binary operation \p Opcode.
   /// \pre \p Inst is a binary operation.
-  bool translateBinaryOp(unsigned Opcode, const Instruction &Inst);
+  bool translateBinaryOp(unsigned Opcode, const BinaryOperator &Inst);
 
   /// Translate branch (br) instruction.
   /// \pre \p Inst is a branch instruction.
-  bool translateBr(const Instruction &Inst);
+  bool translateBr(const BranchInst &Inst);
+
 
   /// Translate return (ret) instruction.
   /// The target needs to implement CallLowering::lowerReturn for
   /// this to succeed.
   /// \pre \p Inst is a return instruction.
-  bool translateReturn(const Instruction &Inst);
+  bool translateReturn(const ReturnInst &Inst);
   /// @}
 
   // Builder for machine instruction a la IRBuilder.
@@ -131,6 +157,10 @@ private:
   // in the current block, it can creates block, etc., basically a kind of
   // IRBuilder, but for Machine IR.
   MachineIRBuilder MIRBuilder;
+
+  // Builder set to the entry block (just after ABI lowering instructions). Used
+  // as a convenient location for Constants.
+  MachineIRBuilder EntryBuilder;
 
   /// MachineRegisterInfo used to create virtual registers.
   MachineRegisterInfo *MRI;

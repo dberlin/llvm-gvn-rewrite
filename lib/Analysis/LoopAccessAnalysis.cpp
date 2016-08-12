@@ -1752,7 +1752,14 @@ void LoopAccessInfo::emitAnalysis(LoopAccessReport &Message) {
 }
 
 bool LoopAccessInfo::isUniform(Value *V) const {
-  return (PSE->getSE()->isLoopInvariant(PSE->getSE()->getSCEV(V), TheLoop));
+  auto *SE = PSE->getSE();
+  // Since we rely on SCEV for uniformity, if the type is not SCEVable, it is
+  // never considered uniform.
+  // TODO: Is this really what we want? Even without FP SCEV, we may want some
+  // trivially loop-invariant FP values to be considered uniform.
+  if (!SE->isSCEVable(V->getType()))
+    return false;
+  return (SE->isLoopInvariant(SE->getSCEV(V), TheLoop));
 }
 
 // FIXME: this function is currently a duplicate of the one in
@@ -2023,8 +2030,8 @@ INITIALIZE_PASS_END(LoopAccessLegacyAnalysis, LAA_NAME, laa_name, false, true)
 
 char LoopAccessAnalysis::PassID;
 
-LoopAccessInfo LoopAccessAnalysis::run(Loop &L, AnalysisManager<Loop> &AM) {
-  const AnalysisManager<Function> &FAM =
+LoopAccessInfo LoopAccessAnalysis::run(Loop &L, LoopAnalysisManager &AM) {
+  const FunctionAnalysisManager &FAM =
       AM.getResult<FunctionAnalysisManagerLoopProxy>(L).getManager();
   Function &F = *L.getHeader()->getParent();
   auto *SE = FAM.getCachedResult<ScalarEvolutionAnalysis>(F);
@@ -2045,7 +2052,7 @@ LoopAccessInfo LoopAccessAnalysis::run(Loop &L, AnalysisManager<Loop> &AM) {
 }
 
 PreservedAnalyses LoopAccessInfoPrinterPass::run(Loop &L,
-                                                 AnalysisManager<Loop> &AM) {
+                                                 LoopAnalysisManager &AM) {
   Function &F = *L.getHeader()->getParent();
   auto &LAI = AM.getResult<LoopAccessAnalysis>(L);
   OS << "Loop access info in function '" << F.getName() << "':\n";
