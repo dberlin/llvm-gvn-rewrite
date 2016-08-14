@@ -448,8 +448,7 @@ void Formula::deleteBaseReg(const SCEV *&S) {
 
 /// Test if this formula references the given register.
 bool Formula::referencesReg(const SCEV *S) const {
-  return S == ScaledReg ||
-         std::find(BaseRegs.begin(), BaseRegs.end(), S) != BaseRegs.end();
+  return S == ScaledReg || is_contained(BaseRegs, S);
 }
 
 /// Test whether this formula uses registers which are used by uses other than
@@ -2800,8 +2799,7 @@ void LSRInstance::FinalizeChain(IVChain &Chain) {
 
   for (const IVInc &Inc : Chain) {
     DEBUG(dbgs() << "        Inc: " << Inc.UserInst << "\n");
-    auto UseI = std::find(Inc.UserInst->op_begin(), Inc.UserInst->op_end(),
-                          Inc.IVOperand);
+    auto UseI = find(Inc.UserInst->operands(), Inc.IVOperand);
     assert(UseI != Inc.UserInst->op_end() && "cannot find IV operand");
     IVIncSet.insert(UseI);
   }
@@ -2934,8 +2932,8 @@ void LSRInstance::CollectFixupsAndInitialFormulae() {
   for (const IVStrideUse &U : IU) {
     Instruction *UserInst = U.getUser();
     // Skip IV users that are part of profitable IV Chains.
-    User::op_iterator UseI = std::find(UserInst->op_begin(), UserInst->op_end(),
-                                       U.getOperandValToReplace());
+    User::op_iterator UseI =
+        find(UserInst->operands(), U.getOperandValToReplace());
     assert(UseI != UserInst->op_end() && "cannot find IV operand");
     if (IVIncSet.count(UseI))
       continue;
@@ -4231,8 +4229,7 @@ void LSRInstance::SolveRecurse(SmallVectorImpl<const Formula *> &Solution,
     int NumReqRegsToFind = std::min(F.getNumRegs(), ReqRegs.size());
     for (const SCEV *Reg : ReqRegs) {
       if ((F.ScaledReg && F.ScaledReg == Reg) ||
-          std::find(F.BaseRegs.begin(), F.BaseRegs.end(), Reg) !=
-          F.BaseRegs.end()) {
+          is_contained(F.BaseRegs, Reg)) {
         --NumReqRegsToFind;
         if (NumReqRegsToFind == 0)
           break;

@@ -525,16 +525,6 @@ bool TailDuplicator::shouldTailDuplicate(const MachineFunction &MF,
   else
     MaxDuplicateCount = TailDuplicateSize;
 
-  // If the block to be duplicated ends in an unanalyzable fallthrough, don't
-  // duplicate it.
-  // A similar check is necessary in MachineBlockPlacement to make sure pairs of
-  // blocks with unanalyzable fallthrough get layed out contiguously.
-  MachineBasicBlock *PredTBB = nullptr, *PredFBB = nullptr;
-  SmallVector<MachineOperand, 4> PredCond;
-  if (TII->analyzeBranch(TailBB, PredTBB, PredFBB, PredCond, true)
-      && TailBB.canFallThrough())
-    return false;
-
   // If the target has hardware branch prediction that can handle indirect
   // branches, duplicating them can often make them predictable when there
   // are common paths through the code.  The limit needs to be high enough
@@ -900,7 +890,7 @@ bool TailDuplicator::tailDuplicate(MachineFunction &MF, bool IsSimple,
                                                         PE = Preds.end();
        PI != PE; ++PI) {
     MachineBasicBlock *PredBB = *PI;
-    if (std::find(TDBBs.begin(), TDBBs.end(), PredBB) != TDBBs.end())
+    if (is_contained(TDBBs, PredBB))
       continue;
 
     // EH edges
