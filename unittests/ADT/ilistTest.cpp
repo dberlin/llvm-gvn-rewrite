@@ -128,6 +128,42 @@ TEST(ilistTest, UnsafeClear) {
   EXPECT_EQ(6, List.back().Value);
 }
 
+struct Empty {};
+TEST(ilistTest, HasObsoleteCustomizationTrait) {
+  // Negative test for HasObsoleteCustomization.
+  static_assert(!ilist_detail::HasObsoleteCustomization<Empty, Node>::value,
+                "Empty has no customizations");
+}
+
+struct GetNext {
+  Node *getNext(Node *);
+};
+TEST(ilistTest, HasGetNextTrait) {
+  static_assert(ilist_detail::HasGetNext<GetNext, Node>::value,
+                "GetNext has a getNext(Node*)");
+  static_assert(ilist_detail::HasObsoleteCustomization<GetNext, Node>::value,
+                "Empty should be obsolete because of getNext()");
+
+  // Negative test for HasGetNext.
+  static_assert(!ilist_detail::HasGetNext<Empty, Node>::value,
+                "Empty does not have a getNext(Node*)");
+}
+
+struct CreateSentinel {
+  Node *createSentinel();
+};
+TEST(ilistTest, HasCreateSentinelTrait) {
+  static_assert(ilist_detail::HasCreateSentinel<CreateSentinel>::value,
+                "CreateSentinel has a getNext(Node*)");
+  static_assert(
+      ilist_detail::HasObsoleteCustomization<CreateSentinel, Node>::value,
+      "Empty should be obsolete because of createSentinel()");
+
+  // Negative test for HasCreateSentinel.
+  static_assert(!ilist_detail::HasCreateSentinel<Empty>::value,
+                "Empty does not have a createSentinel()");
+}
+
 struct NodeWithCallback : ilist_node<NodeWithCallback> {
   int Value = 0;
   bool IsInList = false;
@@ -188,23 +224,6 @@ TEST(ilistTest, privateNode) {
   ilist<NodeWithCallback> L2;
   L2.splice(L2.end(), L);
   L2.remove(&N);
-}
-
-struct GetNext {
-  Node *getNext(Node *);
-};
-TEST(ilistTest, HasGetNextTrait) {
-  EXPECT_TRUE((ilist_detail::HasGetNext<GetNext, Node>::value));
-  EXPECT_TRUE((ilist_detail::HasObsoleteCustomization<GetNext, Node>::value));
-}
-
-struct CreateSentinel {
-  Node *createSentinel();
-};
-TEST(ilistTest, HasCreateSentinel) {
-  EXPECT_TRUE((ilist_detail::HasCreateSentinel<CreateSentinel>::value));
-  EXPECT_TRUE(
-      (ilist_detail::HasObsoleteCustomization<CreateSentinel, Node>::value));
 }
 
 } // end namespace

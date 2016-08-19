@@ -83,7 +83,7 @@ template <class T> T &make();
 
 /// Type trait to check for a traits class that has a getNext member (as a
 /// canary for any of the ilist_nextprev_traits API).
-template <class TraitsT, class NodeT> class HasGetNext {
+template <class TraitsT, class NodeT> struct HasGetNext {
   typedef char Yes[1];
   typedef char No[2];
   template <size_t N> struct SFINAE {};
@@ -98,14 +98,13 @@ public:
 
 /// Type trait to check for a traits class that has a createSentinel member (as
 /// a canary for any of the ilist_sentinel_traits API).
-template <class TraitsT> class HasCreateSentinel {
+template <class TraitsT> struct HasCreateSentinel {
   typedef char Yes[1];
   typedef char No[2];
-  template <size_t N> struct SFINAE {};
 
   template <class U>
   static Yes &test(U *I, decltype(I->createSentinel()) * = 0);
-  template <class U> static No &test(...);
+  template <class> static No &test(...);
 
 public:
   static const bool value = sizeof(test<TraitsT>(nullptr)) == sizeof(Yes);
@@ -288,8 +287,9 @@ template<typename NodeTy> struct simplify_type<const ilist_iterator<NodeTy> > {
 /// list.
 template <typename NodeTy, typename Traits = ilist_traits<NodeTy>>
 class iplist : public Traits, ilist_node_access {
-  // TODO: Drop these assertions anytime after 4.0 is branched (keep them for
-  // one release to help out-of-tree code update).
+  // TODO: Drop this assertion and the transitive type traits anytime after
+  // v4.0 is branched (i.e,. keep them for one release to help out-of-tree code
+  // update).
   static_assert(!ilist_detail::HasObsoleteCustomization<Traits, NodeTy>::value,
                 "ilist customization points have changed!");
 
