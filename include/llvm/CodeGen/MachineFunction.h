@@ -84,7 +84,6 @@ struct MachineFunctionInfo {
 /// require that a property be set.
 class MachineFunctionProperties {
   // TODO: Add MachineVerifier checks for AllVRegsAllocated
-  // TODO: Add a way to print the properties and make more useful error messages
   // Possible TODO: Allow targets to extend this (perhaps by allowing the
   // constructor to specify the size of the bit vector)
   // Possible TODO: Allow requiring the negative (e.g. VRegsAllocated could be
@@ -127,7 +126,7 @@ public:
     Legalized,
     RegBankSelected,
     Selected,
-    LastProperty,
+    LastProperty = Selected,
   };
 
   bool hasProperty(Property P) const {
@@ -155,13 +154,12 @@ public:
     return !V.Properties.test(Properties);
   }
 
-  // Print the MachineFunctionProperties in human-readable form. If OnlySet is
-  // true, only print the properties that are set.
-  void print(raw_ostream &ROS, bool OnlySet=false) const;
+  /// Print the MachineFunctionProperties in human-readable form.
+  void print(raw_ostream &OS) const;
 
 private:
   BitVector Properties =
-      BitVector(static_cast<unsigned>(Property::LastProperty));
+      BitVector(static_cast<unsigned>(Property::LastProperty)+1);
 };
 
 class MachineFunction {
