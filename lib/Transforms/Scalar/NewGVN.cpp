@@ -1506,6 +1506,7 @@ NewGVN::performSymbolicAggrValueEvaluation(Instruction *I,
 /// before value numbering
 const Expression *NewGVN::performSymbolicEvaluation(Value *V,
                                                     const BasicBlock *B) {
+  // XXX: Use forward propagation by substituting DefiningExpr
   const Expression *E = NULL;
   if (Constant *C = dyn_cast<Constant>(V))
     E = createConstantExpression(C, false);
