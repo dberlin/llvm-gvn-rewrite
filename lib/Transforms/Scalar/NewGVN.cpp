@@ -259,9 +259,6 @@ private:
   const AggregateValueExpression *
   createAggregateValueExpression(Instruction *, const BasicBlock *);
 
-  const BasicExpression *createCmpExpression(unsigned, Type *,
-                                             CmpInst::Predicate, Value *,
-                                             Value *, const BasicBlock *);
   // Congruence class handling
   CongruenceClass *createCongruenceClass(Value *Leader, const Expression *E) {
     CongruenceClass *result =
@@ -413,27 +410,6 @@ bool NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
   }
   E->setUsedEquivalence(UsedEquiv);
   return AllConstant;
-}
-
-// This is a special function only used by equality propagation, it
-// should not be called elsewhere
-const BasicExpression *NewGVN::createCmpExpression(unsigned Opcode, Type *Type,
-                                                   CmpInst::Predicate Predicate,
-                                                   Value *LHS, Value *RHS,
-                                                   const BasicBlock *B) {
-  BasicExpression *E = new (ExpressionAllocator) BasicExpression(2);
-  bool UsedEquiv = false;
-  E->allocateOperands(ArgRecycler, ExpressionAllocator);
-  E->setType(Type);
-  E->setOpcode((Opcode << 8) | Predicate);
-  auto Result = lookupOperandLeader(LHS, nullptr, B);
-  UsedEquiv |= Result.second;
-  E->ops_push_back(Result.first);
-  Result = lookupOperandLeader(RHS, nullptr, B);
-  UsedEquiv |= Result.second;
-  E->ops_push_back(Result.first);
-  E->setUsedEquivalence(UsedEquiv);
-  return E;
 }
 
 const Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
@@ -1137,42 +1113,6 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
         if (isa<ConstantFP>(Op1) && !cast<ConstantFP>(Op1)->isZero())
           Worklist.emplace_back(Op0, Op1);
       }
-
-      // If "A >= B" is known true, replace "A < B" with false
-      // everywhere.
-      // Since we don't have the instruction "A < B" immediately to
-      // hand, work out the value number that it would have and use
-      // that to find an appropriate instruction (if any).
-      CmpInst::Predicate NotPred = Cmp->getInversePredicate();
-      Constant *NotVal = ConstantInt::get(Cmp->getType(), isKnownFalse);
-      const BasicExpression *E =
-          createCmpExpression(Cmp->getOpcode(), Cmp->getType(), NotPred, Op0,
-                              Op1, Cmp->getParent());
-
-      // We cannot directly propagate into the congruence class members
-      // unless it is a singleton class.
-      // This is because at least one of the members may later get
-      // split out of the class.
-
-      CongruenceClass *CC = ExpressionToClass.lookup(E);
-      // E->deallocateArgs(ArgRecycler);
-      // ExpressionAllocator.Deallocate(E);
-
-      // TODO: Equality propagation - do equivalent of this
-      // The problem in our world is that if nothing has this value
-      // and this expression never appears, we would end up with a
-      // class that has no leader (this value can't be a leader for
-      // all members), no members, etc.
-
-      // Ensure that any instruction in scope that gets the "A < B" value
-      // number
-      // is replaced with false.
-      // The leader table only tracks basic blocks, not edges. Only add to if
-      // we
-      // have the simple case where the edge dominates the end.
-      // if (RootDominatesEnd)
-      //   addToLeaderTable(Num, NotVal, Root.getEnd());
-      continue;
     }
   }
 
