@@ -250,9 +250,6 @@ private:
                                                const BasicBlock *);
   LoadExpression *createLoadExpression(Type *, Value *, LoadInst *,
                                        MemoryAccess *, const BasicBlock *);
-  const CoercibleLoadExpression *
-  createCoercibleLoadExpression(Type *, Value *, LoadInst *, MemoryAccess *,
-                                unsigned, Value *, const BasicBlock *);
 
   const CallExpression *createCallExpression(CallInst *, MemoryAccess *,
                                              const BasicBlock *);
@@ -676,24 +673,6 @@ LoadExpression *NewGVN::createLoadExpression(Type *LoadType, Value *PointerOp,
     E->setAlignment(LI->getAlignment());
   E->setUsedEquivalence(Operand.second);
 
-  // TODO: Value number heap versions. We may be able to discover
-  // things alias analysis can't on it's own (IE that a store and a
-  // load have the same value, and thus, it isn't clobbering the load)
-  return E;
-}
-
-const CoercibleLoadExpression *NewGVN::createCoercibleLoadExpression(
-    Type *LoadType, Value *PtrOperand, LoadInst *Original, MemoryAccess *DA,
-    unsigned Offset, Value *SrcVal, const BasicBlock *B) {
-  CoercibleLoadExpression *E = new (ExpressionAllocator)
-      CoercibleLoadExpression(1, Original, DA, Offset, SrcVal);
-  E->allocateOperands(ArgRecycler, ExpressionAllocator);
-  E->setType(LoadType);
-  // Give store and loads same opcode so they value number together
-  E->setOpcode(0);
-  auto Operand = lookupOperandLeader(PtrOperand, Original, B);
-  E->ops_push_back(Operand.first);
-  E->setUsedEquivalence(Operand.second);
   // TODO: Value number heap versions. We may be able to discover
   // things alias analysis can't on it's own (IE that a store and a
   // load have the same value, and thus, it isn't clobbering the load)
@@ -1196,14 +1175,8 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
       DEBUG(dbgs() << "New congruence class for " << V << " is " << EClass->ID
                    << "\n");
 
-      if (E && isa<CoercibleLoadExpression>(E)) {
-        VClass->CoercibleMembers.erase(V);
-        EClass->CoercibleMembers.insert(V);
-      } else {
-        VClass->Members.erase(V);
-        EClass->Members.insert(V);
-      }
-
+      VClass->Members.erase(V);
+      EClass->Members.insert(V);
       ValueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
       if ((VClass->Members.empty() && VClass->CoercibleMembers.empty()) &&
