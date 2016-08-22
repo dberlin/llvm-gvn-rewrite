@@ -80,39 +80,6 @@ STATISTIC(NumGVNPhisAllSame, "Number of PHIs whos arguments are all the same");
 //                                GVN Pass
 //===----------------------------------------------------------------------===//
 
-// This represents a single equivalence found by equality propagation, for a
-// single congruence class.
-// That is, this is a thing the congruence class is also equivalent to when the
-// member of the congruence class is dominated by either Edge.getEnd() (if EOnly
-// is false) or Edge (if EOnly is true).
-//
-// For a concrete example, an Equivalence of {"constant int 0", "{block 0, block
-// 1}", false}, means that any member of the congruence class is equal to
-// constant int 0 if the member is dominated by block 1.
-
-struct Equivalence {
-  Value *Val;
-  const BasicBlockEdge Edge;
-  bool EdgeOnly;
-  Equivalence(Value *V, const BasicBlockEdge E, bool EOnly)
-      : Val(V), Edge(E), EdgeOnly(EOnly) {}
-};
-
-// These are equivalences that are valid for a single user.  This happens when
-// we know particular edge equivalences are valid for some users, but can't
-// prove they are valid for all users.
-// Because we don't have control regions, when we have
-// equivalences along edges to blocks with multiple predecessors, we can't add
-// them to the general equivalences list, because they don't dominate a given
-// root, but instead, they really represent something valid in certain control
-// regions of the program, a concept that is not really expressible using the
-// a standard dominator (and not postdominator) tree.
-struct SingleUserEquivalence {
-  User *U;
-  unsigned OperandNo;
-  Value *Replacement;
-};
-
 // Congruence classes represent the set of expressions/instructions
 // that are all the same *during some scope in the function*.
 // That is, because of the way we perform equality propagation, and
@@ -149,14 +116,6 @@ struct CongruenceClass {
   // elimination to do this, but they are otherwise the same as members,
   // in particular, we can eliminate one in favor of a dominating one.
   MemberSet CoercibleMembers;
-
-  typedef std::list<Equivalence> EquivalenceSet;
-
-  // See the comments on struct Equivalence and SingleUserEquivalence for a
-  // discussion of what these are.
-
-  EquivalenceSet Equivs;
-  std::unordered_multimap<Value *, SingleUserEquivalence> SingleUserEquivs;
 
   // True if this class has no members left.  This is mainly used for assertion
   // purposes, and for skipping empty classes.
@@ -213,13 +172,6 @@ class NewGVN : public FunctionPass {
   struct hash_expression {
     size_t operator()(const Expression *A) const { return A->getHashValue(); }
   };
-
-  // This multimap holds equivalences that we've detected that we haven't see
-  // users in the program for, yet. If we later see a user, we will add these to
-  // it's equivalences
-  std::unordered_multimap<const Expression *, Equivalence, hash_expression,
-                          expression_equal_to>
-      PendingEquivalences;
 
   // Expression to class mapping
   typedef DenseMap<const Expression *, CongruenceClass *,
@@ -1051,8 +1003,6 @@ void NewGVN::markDominatedSingleUserEquivalences(CongruenceClass *CC,
     }
     if (!Dominates)
       continue;
-    CC->SingleUserEquivs.emplace(
-        From, SingleUserEquivalence{U.getUser(), U.getOperandNo(), To});
     // Mark the users as touched
     if (Instruction *I = dyn_cast<Instruction>(U.getUser()))
       TouchedInstructions.set(InstrDFS[I]);
@@ -1174,7 +1124,6 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
     // 'RHS' within the scope Root.
     CongruenceClass *CC = ValueToClass[LHS];
     assert(CC && "Should have found a congruence class");
-    CC->Equivs.emplace_back(RHS, Root, !RootDominatesEnd);
 
     if (RootDominatesEnd)
       markDominatedSingleUserEquivalences(CC, LHS, RHS,
@@ -1278,14 +1227,6 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
         }
         // Ensure that any instruction in scope that gets the "A < B"
         // value number is replaced with false.
-
-        CC->Equivs.emplace_back(NotVal, Root, !RootDominatesEnd);
-
-      } else {
-        // Put this in pending equivalences so if an expression shows up, we'll
-        // add the equivalence
-        PendingEquivalences.emplace(
-            E, Equivalence{NotVal, Root, !RootDominatesEnd});
       }
 
       // TODO: Equality propagation - do equivalent of this
@@ -1392,16 +1333,6 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
       } else {
         VClass->Members.erase(V);
         EClass->Members.insert(V);
-      }
-
-      // See if we have any pending equivalences for this class.
-      // We should only end up with pending equivalences for comparison
-      // instructions.
-      if (E && isa<CmpInst>(V)) {
-        auto Pending = PendingEquivalences.equal_range(E);
-        for (auto PI = Pending.first, PE = Pending.second; PI != PE; ++PI)
-          EClass->Equivs.emplace_back(PI->second);
-        PendingEquivalences.erase(Pending.first, Pending.second);
       }
 
       ValueToClass[V] = EClass;
@@ -1720,7 +1651,6 @@ void NewGVN::cleanupTables() {
   TouchedInstructions.clear();
   InvolvedInEquivalence.clear();
   DominatedInstRange.clear();
-  PendingEquivalences.clear();
 }
 
 std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
@@ -2206,8 +2136,6 @@ bool NewGVN::eliminateInstructions(Function &F) {
       for (auto M : CC->Members) {
 
         Value *Member = M;
-        for (auto &Equiv : CC->Equivs)
-          replaceAllDominatedUsesWith(M, Equiv.Val, Equiv.Edge, Equiv.EdgeOnly);
 
         // Void things have no uses we can replace
         if (Member == CC->RepLeader || Member->getType()->isVoidTy()) {
@@ -2235,17 +2163,8 @@ bool NewGVN::eliminateInstructions(Function &F) {
 
     } else {
       DEBUG(dbgs() << "Eliminating in congruence class " << CC->ID << "\n");
-      // If this is a singleton, with no equivalences, we can skip it
-      if (CC->Members.size() != 1 || !CC->Equivs.empty() ||
-          !CC->CoercibleMembers.empty()) {
-        // If it's a singleton with equivalences, just do equivalence
-        // replacement and move on
-        if (CC->Members.size() == 1 && 0) {
-          for (auto &Equiv : CC->Equivs)
-            replaceAllDominatedUsesWith(CC->RepLeader, Equiv.Val, Equiv.Edge,
-                                        Equiv.EdgeOnly);
-          continue;
-        }
+      // If this is a singleton, we can skip it
+      if (CC->Members.size() != 1 || !CC->CoercibleMembers.empty()) {
 
         // This is a stack because equality replacement/etc may place
         // constants in the middle of the member list, and we want to use
