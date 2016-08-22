@@ -1684,13 +1684,12 @@ struct NewGVN::ValueDFS {
   int DFSIn;
   int DFSOut;
   int LocalNum;
-  bool Equivalence;
   bool Coercible;
   // Only one of these will be set
   Value *Val;
   Use *U;
   ValueDFS()
-      : DFSIn(0), DFSOut(0), LocalNum(0), Equivalence(false), Coercible(false),
+      : DFSIn(0), DFSOut(0), LocalNum(0), Coercible(false),
         Val(nullptr), U(nullptr) {}
 
   bool operator<(const ValueDFS &other) const {
@@ -1714,8 +1713,6 @@ struct NewGVN::ValueDFS {
         if (LocalNum < other.LocalNum)
           return true;
         else if (LocalNum == other.LocalNum) {
-          if (!!Equivalence < !!other.Equivalence)
-            return true;
           if (!!Coercible < !!other.Coercible)
             return true;
           if (Val < other.Val)
