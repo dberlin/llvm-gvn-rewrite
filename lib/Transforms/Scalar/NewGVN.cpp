@@ -289,10 +289,7 @@ private:
                                                  const BasicBlock *);
   const Expression *performSymbolicAggrValueEvaluation(Instruction *,
                                                        const BasicBlock *);
-  int analyzeLoadFromClobberingStore(Type *, Value *, StoreInst *);
-  int analyzeLoadFromClobberingLoad(Type *, Value *, LoadInst *);
-  int analyzeLoadFromClobberingMemInst(Type *, Value *, MemIntrinsic *);
-  int analyzeLoadFromClobberingWrite(Type *, Value *, Value *, uint64_t);
+
   // Congruence finding
   // Templated to allow them to work both on BB's and BB-edges
   template <class T>
