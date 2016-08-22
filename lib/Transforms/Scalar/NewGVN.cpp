@@ -111,11 +111,6 @@ struct CongruenceClass {
   const Expression *DefiningExpr;
   // Actual members of this class.  These are the things the same everywhere
   MemberSet Members;
-  // Coercible members of this class. These are loads where we can pull the
-  // value out of a store. This means they need special processing during
-  // elimination to do this, but they are otherwise the same as members,
-  // in particular, we can eliminate one in favor of a dominating one.
-  MemberSet CoercibleMembers;
 
   // True if this class has no members left.  This is mainly used for assertion
   // purposes, and for skipping empty classes.
@@ -1176,8 +1171,7 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
       EClass->Members.insert(V);
       ValueToClass[V] = EClass;
       // See if we destroyed the class or need to swap leaders
-      if ((VClass->Members.empty() && VClass->CoercibleMembers.empty()) &&
-          VClass != InitialClass) {
+      if (VClass->Members.empty() && VClass != InitialClass) {
         if (VClass->DefiningExpr) {
           VClass->Dead = true;
 
@@ -1196,11 +1190,6 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
           if (Instruction *I = dyn_cast<Instruction>(M))
             TouchedInstructions.set(InstrDFS[I]);
           ChangedValues.insert(M);
-        }
-        for (auto EM : VClass->CoercibleMembers) {
-          if (Instruction *I = dyn_cast<Instruction>(EM))
-            TouchedInstructions.set(InstrDFS[I]);
-          ChangedValues.insert(EM);
         }
       }
     }
@@ -2003,7 +1992,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
     } else {
       DEBUG(dbgs() << "Eliminating in congruence class " << CC->ID << "\n");
       // If this is a singleton, we can skip it
-      if (CC->Members.size() != 1 || !CC->CoercibleMembers.empty()) {
+      if (CC->Members.size() != 1) {
 
         // This is a stack because equality replacement/etc may place
         // constants in the middle of the member list, and we want to use
@@ -2016,7 +2005,6 @@ bool NewGVN::eliminateInstructions(Function &F) {
         // then merge them.
         std::vector<ValueDFS> DFSOrderedSet;
         convertDenseToDFSOrdered(CC->Members, DFSOrderedSet, false);
-        convertDenseToDFSOrdered(CC->CoercibleMembers, DFSOrderedSet, true);
 
         // Sort the whole thing
         sort(DFSOrderedSet.begin(), DFSOrderedSet.end());
@@ -2123,7 +2111,6 @@ bool NewGVN::eliminateInstructions(Function &F) {
       MembersLeft.insert(Member);
     }
     CC->Members.swap(MembersLeft);
-    CC->CoercibleMembers.clear();
   }
 
   return AnythingReplaced;
