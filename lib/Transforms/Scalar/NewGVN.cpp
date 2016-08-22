@@ -303,7 +303,7 @@ private:
   // Elimination
   struct ValueDFS;
   void convertDenseToDFSOrdered(CongruenceClass::MemberSet &,
-                                std::vector<ValueDFS> &, bool);
+                                std::vector<ValueDFS> &);
 
   bool eliminateInstructions(Function &);
   void replaceInstruction(Instruction *, Value *);
@@ -1723,8 +1723,7 @@ struct NewGVN::ValueDFS {
 };
 
 void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
-                                      std::vector<ValueDFS> &DFSOrderedSet,
-                                      bool Coercible) {
+                                      std::vector<ValueDFS> &DFSOrderedSet) {
   for (auto D : Dense) {
     // First add the value
     BasicBlock *BB = getBlockForValue(D);
@@ -1988,7 +1987,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
         // Convert the members and equivalences to DFS ordered sets and
         // then merge them.
         std::vector<ValueDFS> DFSOrderedSet;
-        convertDenseToDFSOrdered(CC->Members, DFSOrderedSet, false);
+        convertDenseToDFSOrdered(CC->Members, DFSOrderedSet);
 
         // Sort the whole thing
         sort(DFSOrderedSet.begin(), DFSOrderedSet.end());
