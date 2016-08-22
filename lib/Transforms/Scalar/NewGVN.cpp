@@ -352,9 +352,6 @@ private:
   template <class T>
   std::pair<Value *, bool> lookupOperandLeader(Value *, const User *,
                                                const T &) const;
-  template <class T>
-  Value *findDominatingEquivalent(CongruenceClass *, const User *,
-                                  const T &) const;
   void performCongruenceFinding(Value *, const Expression *);
   // Predicate and reachability handling
   void updateReachableEdge(BasicBlock *, BasicBlock *);
@@ -730,48 +727,6 @@ const CallExpression *NewGVN::createCallExpression(CallInst *CI,
   return E;
 }
 
-// Find an equivalence in congruence class CC that dominates block B,
-// if one exists
-// TODO: Compare this against the predicate handling system in the paper
-
-template <class T>
-Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, const User *U,
-                                        const T &B) const {
-
-  // TODO: This can be made faster by different set ordering, if
-  // necessary, or caching whether we found one before and only updating it when
-  // things change.
-  for (const auto &Member : CC->Equivs) {
-    // We can't process edge only equivalences without edges
-    if (Member.EdgeOnly)
-      continue;
-    if (DT->dominates(Member.Edge.getEnd(), B))
-      return Member.Val;
-  }
-  // FIXME: Use single user equivalences too
-
-  return nullptr;
-}
-
-// If we are asked about a basic block edge, it's for an edge carried value
-// (like a phi node incoming edge).  So even if it doesn't dominate the block at
-// the end of the edge, if it's the same edge, that's fine too.
-template <>
-Value *NewGVN::findDominatingEquivalent(CongruenceClass *CC, const User *U,
-                                        const BasicBlockEdge &B) const {
-  // TODO: This can be made faster by different set ordering, if
-  // necessary, or caching whether we found one before and only updating it when
-  // things change.
-  for (const auto &Member : CC->Equivs) {
-    if ((Member.Edge.getStart() == B.getStart() &&
-         Member.Edge.getEnd() == B.getEnd()) ||
-        (!Member.EdgeOnly && DT->dominates(Member.Edge.getEnd(), B.getEnd())))
-      return Member.Val;
-  }
-  // FIXME: Use single user equivalences too
-  return nullptr;
-}
-
 // lookupOperandLeader -- See if we have a congruence class and leader
 // for this operand, and if so, return it. Otherwise, return the
 // original operand.  The second part of the return value is true if a
@@ -780,15 +735,8 @@ template <class T>
 std::pair<Value *, bool> NewGVN::lookupOperandLeader(Value *V, const User *U,
                                                      const T &B) const {
   CongruenceClass *CC = ValueToClass.lookup(V);
-  if (CC && (CC != InitialClass)) {
-    Value *Equivalence = findDominatingEquivalent(CC, U, B);
-    if (Equivalence) {
-      DEBUG(dbgs() << "Found equivalence " << *Equivalence << " for value "
-                   << *V << " in block " << getBlockName(B) << "\n");
-      return std::make_pair(Equivalence, true);
-    }
+  if (CC && (CC != InitialClass))
     return std::make_pair(CC->RepLeader, false);
-  }
   return std::make_pair(V, false);
 }
 
