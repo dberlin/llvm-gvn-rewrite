@@ -72,7 +72,6 @@ using namespace llvm::GVNExpression;
 
 STATISTIC(NumGVNInstrDeleted, "Number of instructions deleted");
 STATISTIC(NumGVNBlocksDeleted, "Number of blocks deleted");
-STATISTIC(NumGVNEqProp, "Number of equalities propagated");
 STATISTIC(NumGVNOpsSimplified, "Number of Expressions simplified");
 STATISTIC(NumGVNPhisAllSame, "Number of PHIs whos arguments are all the same");
 
@@ -333,11 +332,8 @@ FunctionPass *llvm::createNewGVNPass() { return new NewGVN(); }
 static std::string getBlockName(const BasicBlock *B) {
   return DOTGraphTraits<const Function *>::getSimpleNodeLabel(B, NULL);
 }
-static std::string getBlockName(const BasicBlockEdge &B) {
-  return DOTGraphTraits<const Function *>::getSimpleNodeLabel(B.getEnd(), NULL);
-}
-
 #endif
+
 INITIALIZE_PASS_BEGIN(NewGVN, "newgvn", "Global Value Numbering", false, false)
 INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
 INITIALIZE_PASS_DEPENDENCY(MemorySSAWrapperPass)
