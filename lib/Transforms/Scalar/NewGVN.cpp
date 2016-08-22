@@ -355,6 +355,7 @@ private:
   template <class T>
   Value *findDominatingEquivalent(CongruenceClass *, const User *,
                                   const T &) const;
+  void performCongruenceFinding(Value *, const Expression *);
   // Predicate and reachability handling
   void updateReachableEdge(BasicBlock *, BasicBlock *);
   void processOutgoingEdges(TerminatorInst *, BasicBlock *);
@@ -373,8 +374,20 @@ private:
                                        bool);
 
   // Elimination
+  struct ValueDFS;
+  void convertDenseToDFSOrdered(CongruenceClass::MemberSet &,
+                                std::vector<ValueDFS> &, bool);
+  void convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &,
+                                std::vector<ValueDFS> &);
+
+  bool eliminateInstructions(Function &);
+  void replaceInstruction(Instruction *, Value *);
   void markInstructionForDeletion(Instruction *);
   void deleteInstructionsInBlock(BasicBlock *);
+
+  // New instruction creation
+  void handleNewInstruction(Instruction *){};
+  void markUsersTouched(Value *);
 
   // Utilities
   void cleanupTables();
@@ -1548,6 +1561,135 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
   return Changed;
 }
 
+void NewGVN::markUsersTouched(Value *V) {
+  // Now mark the users as touched
+  for (auto &U : V->uses()) {
+    Instruction *User = dyn_cast<Instruction>(U.getUser());
+    assert(User && "Use of value not within an instruction?");
+    TouchedInstructions.set(InstrDFS[User]);
+  }
+}
+
+/// performCongruenceFinding - Perform congruence finding on a given
+/// value numbering expression
+void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
+
+  ValueToExpression[V] = E;
+  // This is guaranteed to return something, since it will at least find
+  // INITIAL
+  CongruenceClass *VClass = ValueToClass[V];
+  assert(VClass && "Should have found a vclass");
+  // Dead classes should have been eliminated from the mapping
+  assert(!VClass->Dead && "Found a dead class");
+
+  CongruenceClass *EClass;
+  // Expressions we can't symbolize are always in their own unique
+  // congruence class
+  if (E == NULL) {
+    // We may have already made a unique class
+    if (VClass->Members.size() != 1 || VClass->RepLeader != V) {
+      CongruenceClass *NewClass = createCongruenceClass(V, NULL);
+      // We should always be adding the member in the below code
+      EClass = NewClass;
+      DEBUG(dbgs() << "Created new congruence class for " << *V
+                   << " due to NULL expression\n");
+    } else {
+      EClass = VClass;
+    }
+  } else if (const VariableExpression *VE = dyn_cast<VariableExpression>(E)) {
+    EClass = ValueToClass[VE->getVariableValue()];
+  } else {
+    auto lookupResult = ExpressionToClass.insert({E, nullptr});
+
+    // If it's not in the value table, create a new congruence class
+    if (lookupResult.second) {
+      CongruenceClass *NewClass = createCongruenceClass(NULL, E);
+      auto place = lookupResult.first;
+      place->second = NewClass;
+
+      // Constants and variables should always be made the leader
+      if (const ConstantExpression *CE = dyn_cast<ConstantExpression>(E))
+        NewClass->RepLeader = CE->getConstantValue();
+      else if (const VariableExpression *VE = dyn_cast<VariableExpression>(E))
+        NewClass->RepLeader = VE->getVariableValue();
+      else if (const StoreExpression *SE = dyn_cast<StoreExpression>(E))
+        NewClass->RepLeader = SE->getStoreInst()->getValueOperand();
+      else
+        NewClass->RepLeader = V;
+
+      EClass = NewClass;
+      DEBUG(dbgs() << "Created new congruence class for " << *V
+                   << " using expression " << *E << " at " << NewClass->ID
+                   << "\n");
+      DEBUG(dbgs() << "Hash value was " << E->getHashValue() << "\n");
+    } else {
+      EClass = lookupResult.first->second;
+      assert(EClass && "Somehow don't have an eclass");
+
+      assert(!EClass->Dead && "We accidentally looked up a dead class");
+    }
+  }
+  bool WasInChanged = ChangedValues.erase(V);
+  if (VClass != EClass || WasInChanged) {
+    DEBUG(dbgs() << "Found class " << EClass->ID << " for expression " << E
+                 << "\n");
+
+    if (VClass != EClass) {
+      DEBUG(dbgs() << "New congruence class for " << V << " is " << EClass->ID
+                   << "\n");
+
+      if (E && isa<CoercibleLoadExpression>(E)) {
+        VClass->CoercibleMembers.erase(V);
+        EClass->CoercibleMembers.insert(V);
+      } else {
+        VClass->Members.erase(V);
+        EClass->Members.insert(V);
+      }
+
+      // See if we have any pending equivalences for this class.
+      // We should only end up with pending equivalences for comparison
+      // instructions.
+      if (E && isa<CmpInst>(V)) {
+        auto Pending = PendingEquivalences.equal_range(E);
+        for (auto PI = Pending.first, PE = Pending.second; PI != PE; ++PI)
+          EClass->Equivs.emplace_back(PI->second);
+        PendingEquivalences.erase(Pending.first, Pending.second);
+      }
+
+      ValueToClass[V] = EClass;
+      // See if we destroyed the class or need to swap leaders
+      if ((VClass->Members.empty() && VClass->CoercibleMembers.empty()) &&
+          VClass != InitialClass) {
+        if (VClass->DefiningExpr) {
+          VClass->Dead = true;
+
+          DEBUG(dbgs() << "Erasing expression " << *E << " from table\n");
+          // bool wasE = *E == *VClass->expression;
+          ExpressionToClass.erase(VClass->DefiningExpr);
+          // if (wasE)
+          //   lookupMap->insert({E, EClass});
+        }
+        // delete VClass;
+      } else if (VClass->RepLeader == V) {
+        /// XXX: Check this. When the leader changes, the value numbering of
+        /// everything may change, so we need to reprocess.
+        VClass->RepLeader = *(VClass->Members.begin());
+        for (auto M : VClass->Members) {
+          if (Instruction *I = dyn_cast<Instruction>(M))
+            TouchedInstructions.set(InstrDFS[I]);
+          ChangedValues.insert(M);
+        }
+        for (auto EM : VClass->CoercibleMembers) {
+          if (Instruction *I = dyn_cast<Instruction>(EM))
+            TouchedInstructions.set(InstrDFS[I]);
+          ChangedValues.insert(EM);
+        }
+      }
+    }
+    markUsersTouched(V);
+  }
+}
+
 // updateReachableEdge - Process the fact that Edge (from, to) is
 // reachable, including marking any newly reachable blocks and
 // instructions for processing
@@ -1958,6 +2100,7 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
         const Expression *Symbolized = performSymbolicEvaluation(I, CurrBlock);
         if (Symbolized && Symbolized->usedEquivalence())
           InvolvedInEquivalence.set(InstrDFS[I]);
+        performCongruenceFinding(I, Symbolized);
       } else {
         processOutgoingEdges(dyn_cast<TerminatorInst>(I), CurrBlock);
       }
@@ -1967,12 +2110,13 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
     }
   }
 
-  Changed = false;
+  Changed |= eliminateInstructions(F);
 
   // Delete all instructions marked for deletion.
   for (Instruction *ToErase : InstructionsToErase) {
     if (!ToErase->use_empty())
       ToErase->replaceAllUsesWith(UndefValue::get(ToErase->getType()));
+
     ToErase->eraseFromParent();
   }
 
@@ -2012,7 +2156,7 @@ PreservedAnalyses NewGVNPass::run(Function &F,
   auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
   auto &TLI = AM.getResult<TargetLibraryAnalysis>(F);
   auto &AA = AM.getResult<AAManager>(F);
-  auto &MSSA = AM.getResult<MemorySSAAnalysis>(F).getMSSA();
+  auto &MSSA = AM.getResult<MemorySSAAnalysis>(F);
   bool Changed = Impl.runGVN(F, &DT, &AC, &TLI, &AA, &MSSA);
   if (!Changed)
     return PreservedAnalyses::all();
@@ -2020,6 +2164,183 @@ PreservedAnalyses NewGVNPass::run(Function &F,
   PA.preserve<DominatorTreeAnalysis>();
   PA.preserve<GlobalsAA>();
   return PA;
+}
+
+// Return true if V is a value that will always be available (IE can
+// be placed anywhere) in the function.  We don't do globals here
+// because they are often worse to put in place
+// TODO: Separate cost from availability
+
+static bool alwaysAvailable(Value *V) {
+  return isa<Constant>(V) || isa<Argument>(V);
+}
+
+//  Get the basic block from an instruction/value
+static BasicBlock *getBlockForValue(Value *V) {
+  if (Instruction *I = dyn_cast<Instruction>(V))
+    return I->getParent();
+  return nullptr;
+}
+struct NewGVN::ValueDFS {
+  int DFSIn;
+  int DFSOut;
+  int LocalNum;
+  bool Equivalence;
+  bool Coercible;
+  // Only one of these will be set
+  Value *Val;
+  Use *U;
+  ValueDFS()
+      : DFSIn(0), DFSOut(0), LocalNum(0), Equivalence(false), Coercible(false),
+        Val(nullptr), U(nullptr) {}
+
+  bool operator<(const ValueDFS &other) const {
+    // It's not enough that any given field be less than - we have sets
+    // of fields that need to be evaluated together to give a proper ordering
+    // for example, if you have
+    // DFS (1, 3)
+    // Val 0
+    // DFS (1, 2)
+    // Val 50
+    // We want the second to be less than the first, but if we just go field
+    // by field, we will get to Val 0 < Val 50 and say the first is less than
+    // the second. We only want it to be less than if the DFS orders are equal.
+
+    if (DFSIn < other.DFSIn)
+      return true;
+    else if (DFSIn == other.DFSIn) {
+      if (DFSOut < other.DFSOut)
+        return true;
+      else if (DFSOut == other.DFSOut) {
+        if (LocalNum < other.LocalNum)
+          return true;
+        else if (LocalNum == other.LocalNum) {
+          if (!!Equivalence < !!other.Equivalence)
+            return true;
+          if (!!Coercible < !!other.Coercible)
+            return true;
+          if (Val < other.Val)
+            return true;
+          if (U < other.U)
+            return true;
+        }
+      }
+    }
+    return false;
+  }
+};
+
+void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
+                                      std::vector<ValueDFS> &DFSOrderedSet,
+                                      bool Coercible) {
+  for (auto D : Dense) {
+    // First add the value
+    BasicBlock *BB = getBlockForValue(D);
+    // Constants are handled prior to ever calling this function, so
+    // we should only be left with instructions as members
+    assert(BB || "Should have figured out a basic block for value");
+    ValueDFS VD;
+
+    std::pair<int, int> DFSPair = DFSDomMap[BB];
+    assert(DFSPair.first != -1 && DFSPair.second != -1 && "Invalid DFS Pair");
+    VD.DFSIn = DFSPair.first;
+    VD.DFSOut = DFSPair.second;
+    VD.Val = D;
+    VD.Coercible = Coercible;
+    // If it's an instruction, use the real local dfs number,
+    if (Instruction *I = dyn_cast<Instruction>(D))
+      VD.LocalNum = InstrDFS[I];
+    else
+      llvm_unreachable("Should have been an instruction");
+
+    DFSOrderedSet.emplace_back(VD);
+
+    // Now add the users
+    for (auto &U : D->uses()) {
+      if (Instruction *I = dyn_cast<Instruction>(U.getUser())) {
+        ValueDFS VD;
+        VD.Coercible = Coercible;
+        // Put the phi node uses in the incoming block
+        BasicBlock *IBlock;
+        if (PHINode *P = dyn_cast<PHINode>(I)) {
+          IBlock = P->getIncomingBlock(U);
+          // Make phi node users appear last in the incoming block
+          // they are from.
+          VD.LocalNum = InstrDFS.size() + 1;
+        } else {
+          IBlock = I->getParent();
+          VD.LocalNum = InstrDFS[I];
+        }
+        std::pair<int, int> DFSPair = DFSDomMap[IBlock];
+        VD.DFSIn = DFSPair.first;
+        VD.DFSOut = DFSPair.second;
+        VD.U = &U;
+        DFSOrderedSet.emplace_back(VD);
+      }
+    }
+  }
+}
+
+void NewGVN::convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &Dense,
+                                      std::vector<ValueDFS> &DFSOrderedSet) {
+  for (const auto &D : Dense) {
+    // FIXME: We don't have the machinery to handle edge only equivalences yet.
+    // We should be using control regions to know where they are valid.
+    // Otherwise, replace in phi nodes for the specific edge
+    if (D.EdgeOnly)
+      continue;
+    std::pair<int, int> &DFSPair = DFSDomMap[D.Edge.getEnd()];
+    assert(DFSPair.first != -1 && DFSPair.second != -1 && "Invalid DFS Pair");
+    ValueDFS VD;
+    VD.DFSIn = DFSPair.first;
+    VD.DFSOut = DFSPair.second;
+    VD.Equivalence = true;
+
+    // If it's an instruction, use the real local dfs number.
+    // If it's a value, it *must* have come from equality propagation,
+    // and thus we know it is valid for the entire block.  By giving
+    // the local number as -1, it should sort before the instructions
+    // in that block.
+    if (Instruction *I = dyn_cast<Instruction>(D.Val))
+      VD.LocalNum = InstrDFS[I];
+    else
+      VD.LocalNum = -1;
+
+    VD.Val = D.Val;
+    DFSOrderedSet.emplace_back(VD);
+  }
+}
+static void patchReplacementInstruction(Instruction *I, Value *Repl) {
+  // Patch the replacement so that it is not more restrictive than the value
+  // being replaced.
+  BinaryOperator *Op = dyn_cast<BinaryOperator>(I);
+  BinaryOperator *ReplOp = dyn_cast<BinaryOperator>(Repl);
+
+  if (Op && ReplOp)
+    ReplOp->andIRFlags(Op);
+
+  if (Instruction *ReplInst = dyn_cast<Instruction>(Repl)) {
+    // FIXME: If both the original and replacement value are part of the
+    // same control-flow region (meaning that the execution of one
+    // guarentees the executation of the other), then we can combine the
+    // noalias scopes here and do better than the general conservative
+    // answer used in combineMetadata().
+
+    // In general, GVN unifies expressions over different control-flow
+    // regions, and so we need a conservative combination of the noalias
+    // scopes.
+    unsigned KnownIDs[] = {
+        LLVMContext::MD_tbaa,           LLVMContext::MD_alias_scope,
+        LLVMContext::MD_noalias,        LLVMContext::MD_range,
+        LLVMContext::MD_fpmath,         LLVMContext::MD_invariant_load,
+        LLVMContext::MD_invariant_group};
+    combineMetadata(ReplInst, I, KnownIDs);
+  }
+}
+
+static void patchAndReplaceAllUsesWith(Instruction *I, Value *Repl) {
+  patchReplacementInstruction(I, Repl);
+  I->replaceAllUsesWith(Repl);
 }
 
 void NewGVN::deleteInstructionsInBlock(BasicBlock *BB) {
@@ -2054,5 +2375,300 @@ void NewGVN::deleteInstructionsInBlock(BasicBlock *BB) {
 void NewGVN::markInstructionForDeletion(Instruction *I) {
   DEBUG(dbgs() << "Marking " << *I << " for deletion\n");
   InstructionsToErase.insert(I);
+}
+
+void NewGVN::replaceInstruction(Instruction *I, Value *V) {
+
+  DEBUG(dbgs() << "Replacing " << *I << " with " << *V << "\n");
+  patchAndReplaceAllUsesWith(I, V);
+  // We save the actual erasing to avoid invalidating memory
+  // dependencies until we are done with everything.
+  markInstructionForDeletion(I);
+}
+
+namespace {
+// This is a stack that contains both the value and dfs info of where
+// that value is valid
+
+class ValueDFSStack {
+public:
+  Value *back() const { return ValueStack.back(); }
+  std::pair<int, int> dfs_back() const { return DFSStack.back(); }
+
+  void push_back(Value *V, int DFSIn, int DFSOut) {
+    ValueStack.emplace_back(V);
+    DFSStack.emplace_back(DFSIn, DFSOut);
+  }
+  bool empty() const { return DFSStack.empty(); }
+  bool isInScope(int DFSIn, int DFSOut) const {
+    if (empty())
+      return false;
+    return DFSIn >= DFSStack.back().first && DFSOut <= DFSStack.back().second;
+  }
+
+  void popUntilDFSScope(int DFSIn, int DFSOut) {
+    // These two should always be in sync at this point
+    assert(ValueStack.size() == DFSStack.size() &&
+           "Mismatch between ValueStack and DFSStack");
+    while (
+        !DFSStack.empty() &&
+        !(DFSIn >= DFSStack.back().first && DFSOut <= DFSStack.back().second)) {
+      DFSStack.pop_back();
+      ValueStack.pop_back();
+    }
+  }
+
+private:
+  SmallVector<Value *, 8> ValueStack;
+  SmallVector<std::pair<int, int>, 8> DFSStack;
+};
+}
+
+bool NewGVN::eliminateInstructions(Function &F) {
+  // This is a non-standard eliminator. The normal way to eliminate is
+  // to walk the dominator tree in order, keeping track of available
+  // values, and eliminating them.  However, this is mildly
+  // pointless. It requires doing lookups on every instruction,
+  // regardless of whether we will ever eliminate it.  For
+  // instructions part of most singleton congruence class, we know we
+  // will never eliminate it.
+
+  // Instead, this eliminator looks at the congruence classes directly, sorts
+  // them into a DFS ordering of the dominator tree, and then we just
+  // perform eliminate straight on the sets by walking the congruence
+  // class member uses in order, and eliminate the ones dominated by the
+  // last member.   This is technically O(N log N) where N = number of
+  // instructions (since in theory all instructions may be in the same
+  // congruence class).
+  // When we find something not dominated, it becomes the new leader
+  // for elimination purposes
+
+  bool AnythingReplaced = false;
+
+  // Since we are going to walk the domtree anyway, and we can't guarantee the
+  // DFS numbers are updated, we compute some ourselves.
+
+  DT->updateDFSNumbers();
+  for (auto &B : F) {
+    if (!ReachableBlocks.count(&B)) {
+      for (const auto S : successors(&B)) {
+        for (auto II = S->begin(); isa<PHINode>(II); ++II) {
+          PHINode &Phi = cast<PHINode>(*II);
+          DEBUG(dbgs() << "Replacing incoming value of " << *II << " for block "
+                       << getBlockName(&B)
+                       << " with undef due to it being unreachable\n");
+          for (auto &Operand : Phi.incoming_values())
+            if (Phi.getIncomingBlock(Operand) == &B)
+              Operand.set(UndefValue::get(Phi.getType()));
+        }
+      }
+    }
+    DomTreeNode *Node = DT->getNode(&B);
+    if (Node)
+      DFSDomMap[&B] = {Node->getDFSNumIn(), Node->getDFSNumOut()};
+  }
+
+  for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
+    CongruenceClass *CC = CongruenceClasses[i];
+    // FIXME: We should eventually be able to replace everything still
+    // in the initial class with undef, as they should be unreachable.
+    // Right now, initial still contains some things we skip value
+    // numbering of (UNREACHABLE's, for example)
+    if (CC == InitialClass || CC->Dead)
+      continue;
+    assert(CC->RepLeader && "We should have had a leader");
+
+    // If this is a leader that is always available, and it's a
+    // constant or has no equivalences, just replace everything with
+    // it. We then update the congruence class with whatever members
+    // are left.
+    if (alwaysAvailable(CC->RepLeader)) {
+      SmallPtrSet<Value *, 4> MembersLeft;
+      for (auto M : CC->Members) {
+
+        Value *Member = M;
+        for (auto &Equiv : CC->Equivs)
+          replaceAllDominatedUsesWith(M, Equiv.Val, Equiv.Edge, Equiv.EdgeOnly);
+
+        // Void things have no uses we can replace
+        if (Member == CC->RepLeader || Member->getType()->isVoidTy()) {
+          MembersLeft.insert(Member);
+          continue;
+        }
+
+        DEBUG(dbgs() << "Found replacement " << *(CC->RepLeader) << " for "
+                     << *Member << "\n");
+        // Due to equality propagation, these may not always be
+        // instructions, they may be real values.  We don't really
+        // care about trying to replace the non-instructions.
+        if (Instruction *I = dyn_cast<Instruction>(Member)) {
+          assert(CC->RepLeader != I &&
+                 "About to accidentally remove our leader");
+          replaceInstruction(I, CC->RepLeader);
+          AnythingReplaced = true;
+
+          continue;
+        } else {
+          MembersLeft.insert(I);
+        }
+      }
+      CC->Members.swap(MembersLeft);
+
+    } else {
+      DEBUG(dbgs() << "Eliminating in congruence class " << CC->ID << "\n");
+      // If this is a singleton, with no equivalences, we can skip it
+      if (CC->Members.size() != 1 || !CC->Equivs.empty() ||
+          !CC->CoercibleMembers.empty()) {
+        // If it's a singleton with equivalences, just do equivalence
+        // replacement and move on
+        if (CC->Members.size() == 1 && 0) {
+          for (auto &Equiv : CC->Equivs)
+            replaceAllDominatedUsesWith(CC->RepLeader, Equiv.Val, Equiv.Edge,
+                                        Equiv.EdgeOnly);
+          continue;
+        }
+
+        // This is a stack because equality replacement/etc may place
+        // constants in the middle of the member list, and we want to use
+        // those constant values in preference to the current leader, over
+        // the scope of those constants.
+
+        ValueDFSStack EliminationStack;
+
+        // Convert the members and equivalences to DFS ordered sets and
+        // then merge them.
+        std::vector<ValueDFS> DFSOrderedSet;
+        convertDenseToDFSOrdered(CC->Members, DFSOrderedSet, false);
+        convertDenseToDFSOrdered(CC->CoercibleMembers, DFSOrderedSet, true);
+        // During value numbering, we already proceed as if the
+        // equivalences have been propagated through, but this is the
+        // only place we actually do elimination (so that other passes
+        // know the same thing we do)
+
+        convertDenseToDFSOrdered(CC->Equivs, DFSOrderedSet);
+        // Sort the whole thing
+        sort(DFSOrderedSet.begin(), DFSOrderedSet.end());
+
+        for (auto &C : DFSOrderedSet) {
+          int MemberDFSIn = C.DFSIn;
+          int MemberDFSOut = C.DFSOut;
+          Value *Member = C.Val;
+          Use *MemberUse = C.U;
+          bool EquivalenceOnly = C.Equivalence;
+
+          // See if we have single user equivalences for this member
+          auto EquivalenceRange = CC->SingleUserEquivs.equal_range(Member);
+          auto EquivalenceIt = EquivalenceRange.first;
+          while (EquivalenceIt != EquivalenceRange.second) {
+            const SingleUserEquivalence &Equiv = EquivalenceIt->second;
+            DEBUG(dbgs() << "Using single user equivalence to replace ");
+            DEBUG(dbgs() << *Equiv.U << " with " << *Equiv.Replacement);
+            DEBUG(dbgs() << "\n");
+            Equiv.U->getOperandUse(Equiv.OperandNo).set(Equiv.Replacement);
+            ++EquivalenceIt;
+            // FIXME Don't reprocess the use this represents
+          }
+
+          // We ignore void things because we can't get a value from
+          // them.
+          if (Member && Member->getType()->isVoidTy())
+            continue;
+
+          if (EliminationStack.empty()) {
+            DEBUG(dbgs() << "Elimination Stack is empty\n");
+          } else {
+            DEBUG(dbgs() << "Elimination Stack Top DFS numbers are ("
+                         << EliminationStack.dfs_back().first << ","
+                         << EliminationStack.dfs_back().second << ")\n");
+          }
+          if (Member && isa<Constant>(Member))
+            assert(isa<Constant>(CC->RepLeader) || EquivalenceOnly);
+
+          DEBUG(dbgs() << "Current DFS numbers are (" << MemberDFSIn << ","
+                       << MemberDFSOut << ")\n");
+          // First, we see if we are out of scope or empty.  If so,
+          // and there equivalences, we try to replace the top of
+          // stack with equivalences (if it's on the stack, it must
+          // not have been eliminated yet)
+          // Then we synchronize to our current scope, by
+          // popping until we are back within a DFS scope that
+          // dominates the current member.
+          // Then, what happens depends on a few factors
+          // If the stack is now empty, we need to push
+          // If we have a constant or a local equivalence we want to
+          // start using, we also push
+          // Otherwise, we walk along, processing members who are
+          // dominated by this scope, and eliminate them
+          bool ShouldPush =
+              Member && (EliminationStack.empty() || isa<Constant>(Member) ||
+                         EquivalenceOnly);
+          bool OutOfScope =
+              !EliminationStack.isInScope(MemberDFSIn, MemberDFSOut);
+
+          if (OutOfScope || ShouldPush) {
+            // Sync to our current scope
+            EliminationStack.popUntilDFSScope(MemberDFSIn, MemberDFSOut);
+            // Push if we need to
+            ShouldPush |= Member && EliminationStack.empty();
+            if (ShouldPush) {
+              EliminationStack.push_back(Member, MemberDFSIn, MemberDFSOut);
+            }
+          }
+
+          // If we get to this point, and the stack is empty we must have a use
+          // with nothing we can use to eliminate it, just skip it
+          if (EliminationStack.empty())
+            continue;
+
+          // Skip the Value's, we only want to eliminate on their uses
+          if (Member || EquivalenceOnly)
+            continue;
+          Value *Result = EliminationStack.back();
+
+          // Don't replace our existing users with ourselves
+          if (MemberUse->get() == Result)
+            continue;
+
+          DEBUG(dbgs() << "Found replacement " << *Result << " for "
+                       << *MemberUse->get() << " in " << *(MemberUse->getUser())
+                       << "\n");
+
+          // If we replaced something in an instruction, handle the patching of
+          // metadata
+          if (Instruction *ReplacedInst =
+                  dyn_cast<Instruction>(MemberUse->get()))
+            patchReplacementInstruction(ReplacedInst, Result);
+
+          assert(isa<Instruction>(MemberUse->getUser()));
+          MemberUse->set(Result);
+          AnythingReplaced = true;
+        }
+      }
+    }
+    // Cleanup the congruence class
+    SmallPtrSet<Value *, 4> MembersLeft;
+    for (auto MI = CC->Members.begin(), ME = CC->Members.end(); MI != ME;) {
+      auto CurrIter = MI;
+      ++MI;
+      Value *Member = *CurrIter;
+      if (Member->getType()->isVoidTy()) {
+        MembersLeft.insert(Member);
+        continue;
+      }
+
+      if (Instruction *MemberInst = dyn_cast<Instruction>(Member)) {
+        if (isInstructionTriviallyDead(MemberInst)) {
+          // TODO: Don't mark loads of undefs.
+          markInstructionForDeletion(MemberInst);
+          continue;
+        }
+      }
+      MembersLeft.insert(Member);
+    }
+    CC->Members.swap(MembersLeft);
+    CC->CoercibleMembers.clear();
+  }
+
+  return AnythingReplaced;
 }
 
