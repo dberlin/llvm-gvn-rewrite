@@ -1684,13 +1684,11 @@ struct NewGVN::ValueDFS {
   int DFSIn;
   int DFSOut;
   int LocalNum;
-  bool Coercible;
   // Only one of these will be set
   Value *Val;
   Use *U;
   ValueDFS()
-      : DFSIn(0), DFSOut(0), LocalNum(0), Coercible(false),
-        Val(nullptr), U(nullptr) {}
+      : DFSIn(0), DFSOut(0), LocalNum(0), Val(nullptr), U(nullptr) {}
 
   bool operator<(const ValueDFS &other) const {
     // It's not enough that any given field be less than - we have sets
@@ -1713,8 +1711,6 @@ struct NewGVN::ValueDFS {
         if (LocalNum < other.LocalNum)
           return true;
         else if (LocalNum == other.LocalNum) {
-          if (!!Coercible < !!other.Coercible)
-            return true;
           if (Val < other.Val)
             return true;
           if (U < other.U)
@@ -1742,7 +1738,6 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
     VD.DFSIn = DFSPair.first;
     VD.DFSOut = DFSPair.second;
     VD.Val = D;
-    VD.Coercible = Coercible;
     // If it's an instruction, use the real local dfs number,
     if (Instruction *I = dyn_cast<Instruction>(D))
       VD.LocalNum = InstrDFS[I];
@@ -1755,7 +1750,6 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
     for (auto &U : D->uses()) {
       if (Instruction *I = dyn_cast<Instruction>(U.getUser())) {
         ValueDFS VD;
-        VD.Coercible = Coercible;
         // Put the phi node uses in the incoming block
         BasicBlock *IBlock;
         if (PHINode *P = dyn_cast<PHINode>(I)) {
