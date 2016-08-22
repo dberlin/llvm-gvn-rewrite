@@ -374,8 +374,6 @@ private:
   struct ValueDFS;
   void convertDenseToDFSOrdered(CongruenceClass::MemberSet &,
                                 std::vector<ValueDFS> &, bool);
-  void convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &,
-                                std::vector<ValueDFS> &);
 
   bool eliminateInstructions(Function &);
   void replaceInstruction(Instruction *, Value *);
@@ -2031,35 +2029,6 @@ void NewGVN::convertDenseToDFSOrdered(CongruenceClass::MemberSet &Dense,
   }
 }
 
-void NewGVN::convertDenseToDFSOrdered(CongruenceClass::EquivalenceSet &Dense,
-                                      std::vector<ValueDFS> &DFSOrderedSet) {
-  for (const auto &D : Dense) {
-    // FIXME: We don't have the machinery to handle edge only equivalences yet.
-    // We should be using control regions to know where they are valid.
-    // Otherwise, replace in phi nodes for the specific edge
-    if (D.EdgeOnly)
-      continue;
-    std::pair<int, int> &DFSPair = DFSDomMap[D.Edge.getEnd()];
-    assert(DFSPair.first != -1 && DFSPair.second != -1 && "Invalid DFS Pair");
-    ValueDFS VD;
-    VD.DFSIn = DFSPair.first;
-    VD.DFSOut = DFSPair.second;
-    VD.Equivalence = true;
-
-    // If it's an instruction, use the real local dfs number.
-    // If it's a value, it *must* have come from equality propagation,
-    // and thus we know it is valid for the entire block.  By giving
-    // the local number as -1, it should sort before the instructions
-    // in that block.
-    if (Instruction *I = dyn_cast<Instruction>(D.Val))
-      VD.LocalNum = InstrDFS[I];
-    else
-      VD.LocalNum = -1;
-
-    VD.Val = D.Val;
-    DFSOrderedSet.emplace_back(VD);
-  }
-}
 static void patchReplacementInstruction(Instruction *I, Value *Repl) {
   // Patch the replacement so that it is not more restrictive than the value
   // being replaced.
@@ -2290,12 +2259,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
         std::vector<ValueDFS> DFSOrderedSet;
         convertDenseToDFSOrdered(CC->Members, DFSOrderedSet, false);
         convertDenseToDFSOrdered(CC->CoercibleMembers, DFSOrderedSet, true);
-        // During value numbering, we already proceed as if the
-        // equivalences have been propagated through, but this is the
-        // only place we actually do elimination (so that other passes
-        // know the same thing we do)
 
-        convertDenseToDFSOrdered(CC->Equivs, DFSOrderedSet);
         // Sort the whole thing
         sort(DFSOrderedSet.begin(), DFSOrderedSet.end());
 
@@ -2304,20 +2268,6 @@ bool NewGVN::eliminateInstructions(Function &F) {
           int MemberDFSOut = C.DFSOut;
           Value *Member = C.Val;
           Use *MemberUse = C.U;
-          bool EquivalenceOnly = C.Equivalence;
-
-          // See if we have single user equivalences for this member
-          auto EquivalenceRange = CC->SingleUserEquivs.equal_range(Member);
-          auto EquivalenceIt = EquivalenceRange.first;
-          while (EquivalenceIt != EquivalenceRange.second) {
-            const SingleUserEquivalence &Equiv = EquivalenceIt->second;
-            DEBUG(dbgs() << "Using single user equivalence to replace ");
-            DEBUG(dbgs() << *Equiv.U << " with " << *Equiv.Replacement);
-            DEBUG(dbgs() << "\n");
-            Equiv.U->getOperandUse(Equiv.OperandNo).set(Equiv.Replacement);
-            ++EquivalenceIt;
-            // FIXME Don't reprocess the use this represents
-          }
 
           // We ignore void things because we can't get a value from
           // them.
@@ -2332,7 +2282,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
                          << EliminationStack.dfs_back().second << ")\n");
           }
           if (Member && isa<Constant>(Member))
-            assert(isa<Constant>(CC->RepLeader) || EquivalenceOnly);
+            assert(isa<Constant>(CC->RepLeader));
 
           DEBUG(dbgs() << "Current DFS numbers are (" << MemberDFSIn << ","
                        << MemberDFSOut << ")\n");
@@ -2350,8 +2300,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
           // Otherwise, we walk along, processing members who are
           // dominated by this scope, and eliminate them
           bool ShouldPush =
-              Member && (EliminationStack.empty() || isa<Constant>(Member) ||
-                         EquivalenceOnly);
+              Member && (EliminationStack.empty() || isa<Constant>(Member));
           bool OutOfScope =
               !EliminationStack.isInScope(MemberDFSIn, MemberDFSOut);
 
@@ -2371,7 +2320,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
             continue;
 
           // Skip the Value's, we only want to eliminate on their uses
-          if (Member || EquivalenceOnly)
+          if (Member)
             continue;
           Value *Result = EliminationStack.back();
 
