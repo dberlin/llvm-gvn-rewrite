@@ -318,10 +318,6 @@ private:
   const std::pair<unsigned, unsigned>
   calculateDominatedInstRange(const DomTreeNode *);
 
-  // Instruction replacement
-  unsigned replaceAllDominatedUsesWith(Value *, Value *, const BasicBlockEdge &,
-                                       bool);
-
   // Elimination
   struct ValueDFS;
   void convertDenseToDFSOrdered(CongruenceClass::MemberSet &,
@@ -1009,47 +1005,6 @@ void NewGVN::markDominatedSingleUserEquivalences(CongruenceClass *CC,
   }
 }
 
-/// replaceAllDominatedUsesWith - Replace all uses of 'From' with 'To'
-/// if the use is dominated by the given basic block.  Returns the
-/// number of uses that were replaced.
-unsigned NewGVN::replaceAllDominatedUsesWith(Value *From, Value *To,
-                                             const BasicBlockEdge &Root,
-                                             bool EdgeEquivOnly) {
-  unsigned Count = 0;
-  for (auto UI = From->use_begin(), UE = From->use_end(); UI != UE;) {
-    Use &U = *UI++;
-    // Edge equivalents
-    if (EdgeEquivOnly) {
-      PHINode *PN = dyn_cast<PHINode>(U.getUser());
-      if (PN && PN->getParent() == Root.getEnd() &&
-          PN->getIncomingBlock(U) == Root.getStart()) {
-        U.set(To);
-        ++Count;
-      }
-    } else {
-      // If From occurs as a phi node operand then the use implicitly lives in
-      // the
-      // corresponding incoming block.  Otherwise it is the block containing the
-      // user that must be dominated by Root.
-      BasicBlock *UsingBlock;
-      if (PHINode *PN = dyn_cast<PHINode>(U.getUser()))
-        UsingBlock = PN->getIncomingBlock(U);
-      else
-        UsingBlock = cast<Instruction>(U.getUser())->getParent();
-
-      if (DT->dominates(Root, UsingBlock)) {
-        // Mark the users as touched
-        if (Instruction *I = dyn_cast<Instruction>(U.getUser()))
-          TouchedInstructions.set(InstrDFS[I]);
-        DEBUG(dbgs() << "Equality propagation replacing " << *From << " with "
-                     << *To << " in " << *(U.getUser()) << "\n");
-        U.set(To);
-        ++Count;
-      }
-    }
-  }
-  return Count;
-}
 /// There is an edge from 'Src' to 'Dst'.  Return
 /// true if every path from the entry block to 'Dst' passes via this edge.  In
 /// particular 'Dst' must not be reachable via another edge from 'Src'.
@@ -1128,17 +1083,6 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
     if (RootDominatesEnd)
       markDominatedSingleUserEquivalences(CC, LHS, RHS,
                                           MultipleEdgesOneReachable, Root);
-    // Replace all occurrences of 'LHS' with 'RHS' everywhere in the
-    // scope.  As LHS always has at least one use that is not
-    // dominated by Root, this will never do anything if LHS has only
-    // one use.
-    // FIXME: I think this can be deleted now, bootstrap with an assert
-    if (!LHS->hasOneUse() && 0) {
-      unsigned NumReplacements =
-          replaceAllDominatedUsesWith(LHS, RHS, Root, false);
-      Changed |= NumReplacements > 0;
-      NumGVNEqProp += NumReplacements;
-    }
 
     // Now try to deduce additional equalities from this one.  For
     // example, if the known equality was "(A != B)" == "false" then
@@ -1213,21 +1157,6 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
       CongruenceClass *CC = ExpressionToClass.lookup(E);
       // E->deallocateArgs(ArgRecycler);
       // ExpressionAllocator.Deallocate(E);
-
-      // If we didn't find a congruence class, there is no equivalent
-      // instruction already
-      if (CC) {
-        // FIXME: I think this can be deleted now, need to bootstrap with an
-        // assert
-        if (CC->Members.size() == 1 && 0) {
-          unsigned NumReplacements =
-              replaceAllDominatedUsesWith(CC->RepLeader, NotVal, Root, false);
-          Changed |= NumReplacements > 0;
-          NumGVNEqProp += NumReplacements;
-        }
-        // Ensure that any instruction in scope that gets the "A < B"
-        // value number is replaced with false.
-      }
 
       // TODO: Equality propagation - do equivalent of this
       // The problem in our world is that if nothing has this value
