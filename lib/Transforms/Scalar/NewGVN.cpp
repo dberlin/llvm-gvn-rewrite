@@ -270,9 +270,6 @@ private:
   const Expression *checkSimplificationResults(Expression *, Instruction *,
                                                Value *);
   const Expression *performSymbolicEvaluation(Value *, const BasicBlock *);
-  const Expression *performSymbolicLoadCoercion(Type *, Value *, LoadInst *,
-                                                Instruction *, MemoryAccess *,
-                                                const BasicBlock *);
   const Expression *performSymbolicLoadEvaluation(Instruction *,
                                                   const BasicBlock *);
   const Expression *performSymbolicStoreEvaluation(Instruction *,
