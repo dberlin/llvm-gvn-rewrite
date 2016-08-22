@@ -1037,47 +1037,6 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
       if (!ReachableBlocks.count(DefiningInst->getParent()))
         return createConstantExpression(UndefValue::get(LI->getType()), false);
     }
-  } else {
-    BasicBlock *LoadBlock = LI->getParent();
-    MemoryAccess *LoadAccess = MSSA->getMemoryAccess(LI);
-    // Okay, so uh, we couldn't use the defining access to grab a value out of
-    // See if we can reuse any of it's uses by widening a load.
-    for (const auto &U : DefiningAccess->users()) {
-      MemoryAccess *MA = cast<MemoryAccess>(U);
-      if (MA == LoadAccess)
-        continue;
-      if (isa<MemoryPhi>(MA))
-        continue;
-      Instruction *DefiningInst = cast<MemoryUseOrDef>(MA)->getMemoryInst();
-      if (LoadInst *DepLI = dyn_cast<LoadInst>(DefiningInst)) {
-        BasicBlock *DefiningBlock = DefiningInst->getParent();
-        if (!DT->dominates(DefiningBlock, LoadBlock))
-          continue;
-
-        // Make sure the dependent load comes before the load we are trying
-        // to coerce if they are in the same block
-        if (InstrDFS[DepLI] >= InstrDFS[LI])
-          continue;
-
-        // Now, first make sure they really aren't identical loads, and if
-        // they aren't see if the dominating one can be coerced.
-        // We don't want to mark identical loads coercible, since coercible
-        // loads don't value number with normal loads.
-        Value *DepAddressLeader =
-            lookupOperandLeader(DepLI->getPointerOperand(), DepLI, B).first;
-
-        if (LI->getType() != DepLI->getType() ||
-            DepAddressLeader != LoadAddressLeader ||
-            LI->isSimple() != DepLI->isSimple()) {
-          int Offset = analyzeLoadFromClobberingLoad(
-              LI->getType(), LI->getPointerOperand(), DepLI);
-          if (Offset >= 0)
-            return createCoercibleLoadExpression(
-                LI->getType(), LI->getPointerOperand(), LI, DefiningAccess,
-                (unsigned)Offset, DepLI, B);
-        }
-      }
-    }
   }
 
   const Expression *E = createLoadExpression(
