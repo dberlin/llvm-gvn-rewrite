@@ -188,9 +188,6 @@ class NewGVN : public FunctionPass {
   // individual and ranges, as well as "find next element" This
   // enables us to use it as a worklist with essentially 0 cost.
   BitVector TouchedInstructions;
-  // We mark which instructions were affected by an equivalence, so we only have
-  // to revisit those instructions when an edge change occurs
-  BitVector InvolvedInEquivalence;
   DenseMap<const BasicBlock *, std::pair<unsigned, unsigned>> BlockInstRange;
   DenseMap<const DomTreeNode *, std::pair<unsigned, unsigned>>
       DominatedInstRange;
@@ -289,11 +286,8 @@ private:
   // Predicate and reachability handling
   void updateReachableEdge(BasicBlock *, BasicBlock *);
   void processOutgoingEdges(TerminatorInst *, BasicBlock *);
-  void propagateChangeInEdge(BasicBlock *);
   bool isOnlyReachableViaThisEdge(const BasicBlockEdge &);
   Value *findConditionEquivalence(Value *, BasicBlock *) const;
-  const std::pair<unsigned, unsigned>
-  calculateDominatedInstRange(const DomTreeNode *);
 
   // Elimination
   struct ValueDFS;
@@ -1048,8 +1042,6 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
         TouchedInstructions.set(InstrDFS[&*BI]);
         ++BI;
       }
-      // Propagate the change downstream.
-      propagateChangeInEdge(To);
     }
   }
 }
@@ -1083,8 +1075,6 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
       } else if (isa<ConstantInt>(Cond)) {
         CondEvaluated = Cond;
       }
-    } else {
-      InvolvedInEquivalence.set(InstrDFS[TI]);
     }
     ConstantInt *CI;
     BasicBlock *TrueSucc = BR->getSuccessor(0);
@@ -1115,7 +1105,6 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
     Value *CondEvaluated = findConditionEquivalence(SwitchCond, B);
     // See if we were able to turn this switch statement into a constant
     if (CondEvaluated && isa<ConstantInt>(CondEvaluated)) {
-      InvolvedInEquivalence.set(InstrDFS[TI]);
       ConstantInt *CondVal = cast<ConstantInt>(CondEvaluated);
       // We should be able to get case value for this
       auto CaseVal = SI->findCaseValue(CondVal);
@@ -1154,88 +1143,6 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
       BasicBlock *TargetBlock = TI->getSuccessor(i);
       updateReachableEdge(B, TargetBlock);
     }
-  }
-}
-
-// Figure out and cache the dominated instruction range for this block. We do
-// this by doing a depth first search, and figuring out the min and the max of
-// the dominated instruction range.
-// On the way up, we cache the ranges for all the child blocks.
-// This is essentially an incremental DFS
-
-const std::pair<unsigned, unsigned>
-NewGVN::calculateDominatedInstRange(const DomTreeNode *DTN) {
-
-  // First see if we have it, if not, we need to recalculate
-  const auto &DominatedRange = DominatedInstRange.find(DTN);
-  if (DominatedRange != DominatedInstRange.end()) {
-    return DominatedRange->second;
-  }
-  // Recalculate
-  SmallVector<std::pair<const DomTreeNode *, DomTreeNode::const_iterator>, 32>
-      WorkStack;
-  WorkStack.emplace_back(DTN, DTN->begin());
-  unsigned MaxSeen = 0;
-  while (!WorkStack.empty()) {
-    const auto &Back = WorkStack.back();
-    const DomTreeNode *Node = Back.first;
-    auto ChildIt = Back.second;
-    const auto &Result = BlockInstRange.lookup(Node->getBlock());
-    MaxSeen = std::max(MaxSeen, Result.second);
-    // If we visited all of the children of this node, "recurse" back up the
-    // stack setting the ranges
-    if (ChildIt == Node->end()) {
-      const auto &Result = BlockInstRange.lookup(Node->getBlock());
-      DominatedInstRange[DTN] = {Result.first, MaxSeen};
-      WorkStack.pop_back();
-      if (WorkStack.empty())
-        return {Result.first, MaxSeen};
-    } else {
-      while (ChildIt != Node->end()) {
-        // Otherwise, recursively visit this child.
-        const DomTreeNode *Child = *ChildIt;
-        ++WorkStack.back().second;
-        const auto &LookupResult = DominatedInstRange.find(Child);
-        if (LookupResult == DominatedInstRange.end()) {
-          WorkStack.emplace_back(Child, Child->begin());
-          break;
-        } else {
-          // We already have calculated this subtree
-          MaxSeen = std::max(MaxSeen, LookupResult->second.second);
-          ++ChildIt;
-        }
-      }
-    }
-  }
-  llvm_unreachable("Should have returned a value already");
-}
-
-/// propagateChangeInEdge - Propagate a change in edge reachability
-// When we discover a new edge to an existing reachable block, that
-// can affect the value of instructions that used equivalences.
-//
-void NewGVN::propagateChangeInEdge(BasicBlock *Dest) {
-  // Unlike, the published algorithm, we don't touch blocks because we aren't
-  // recomputing predicates.
-  // Instead, we touch all the instructions we dominate that were used in an
-  // equivalence, in case they changed.
-  // We incrementally compute the dominated instruction ranges, because doing it
-  // up front requires a DFS walk of the dominator tree that is a complete waste
-  // of time if no equivalences ever get seen.
-  // Note that we expect phi nodes in the Dest block will have already been
-  // touched by our caller.
-  DomTreeNode *DTN = DT->getNode(Dest);
-
-  // Note that this is an overshoot, because the inst ranges are calculated in
-  // RPO order, not dominator tree order.
-  const std::pair<unsigned, unsigned> Result = calculateDominatedInstRange(DTN);
-
-  // Touch all the downstream dominated instructions that used equivalences.
-  for (int InstrNum = InvolvedInEquivalence.find_next(Result.first - 1);
-       InstrNum != -1 && (Result.second - InstrNum > 0);
-       InstrNum = InvolvedInEquivalence.find_next(InstrNum)) {
-    // TODO: We could do confluence block checks here.
-    TouchedInstructions.set(InstrNum);
   }
 }
 
@@ -1285,7 +1192,6 @@ void NewGVN::cleanupTables() {
   DFSToInstr.clear();
   BlockInstRange.clear();
   TouchedInstructions.clear();
-  InvolvedInEquivalence.clear();
   DominatedInstRange.clear();
 }
 
@@ -1360,7 +1266,6 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
   }
 
   TouchedInstructions.resize(ICount + 1);
-  InvolvedInEquivalence.resize(ICount + 1);
   DominatedInstRange.reserve(F.size());
   // Ensure we don't end up resizing the expressionToClass map, as
   // that can be quite expensive. At most, we have one expression per
@@ -1412,8 +1317,6 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
       // along the way.
       if (!I->isTerminator()) {
         const Expression *Symbolized = performSymbolicEvaluation(I, CurrBlock);
-        if (Symbolized && Symbolized->usedEquivalence())
-          InvolvedInEquivalence.set(InstrDFS[I]);
         performCongruenceFinding(I, Symbolized);
       } else {
         processOutgoingEdges(dyn_cast<TerminatorInst>(I), CurrBlock);
