@@ -291,11 +291,7 @@ private:
   void updateReachableEdge(BasicBlock *, BasicBlock *);
   void processOutgoingEdges(TerminatorInst *, BasicBlock *);
   void propagateChangeInEdge(BasicBlock *);
-  bool propagateEquality(Value *, Value *, bool, const BasicBlockEdge &);
   bool isOnlyReachableViaThisEdge(const BasicBlockEdge &);
-
-  void markDominatedSingleUserEquivalences(CongruenceClass *, Value *, Value *,
-                                           bool, const BasicBlockEdge &);
   Value *findConditionEquivalence(Value *, BasicBlock *) const;
   const std::pair<unsigned, unsigned>
   calculateDominatedInstRange(const DomTreeNode *);
@@ -909,42 +905,6 @@ const Expression *NewGVN::performSymbolicEvaluation(Value *V,
   return E;
 }
 
-/// \brief Given an edge we know does not dominate its end, go through all uses
-/// of \p From, figure out if we dominate them, and if so, mark them
-/// individually as equivalent to \p To.
-
-void NewGVN::markDominatedSingleUserEquivalences(CongruenceClass *CC,
-                                                 Value *From, Value *To,
-                                                 bool MultipleEdgesOneReachable,
-                                                 const BasicBlockEdge &Root) {
-
-  // The MultipleEdgesOneReachable case means we know there are multiple edges
-  // to the block, but *only one from us is reachable*.  This occurs if, for
-  // example, we discover the value of a switch's condition is constant, and it
-  // normally had multiple case values that go to the same block.  Because the
-  // dominators API asserts isSingleEdge, we have to special case this, since we
-  // know isSingleEdge doesn't matter.
-  for (const auto &U : From->uses()) {
-    bool Dominates = false;
-    if (MultipleEdgesOneReachable) {
-      Instruction *UserInst = cast<Instruction>(U.getUser());
-      PHINode *PN = dyn_cast<PHINode>(UserInst);
-      if (PN && PN->getParent() == Root.getEnd() &&
-          PN->getIncomingBlock(U) == Root.getStart()) {
-        Dominates = true;
-      } else
-        Dominates = DT->dominates(Root.getStart(), UserInst->getParent());
-    } else {
-      Dominates = DT->dominates(Root, U);
-    }
-    if (!Dominates)
-      continue;
-    // Mark the users as touched
-    if (Instruction *I = dyn_cast<Instruction>(U.getUser()))
-      TouchedInstructions.set(InstrDFS[I]);
-  }
-}
-
 /// There is an edge from 'Src' to 'Dst'.  Return
 /// true if every path from the entry block to 'Dst' passes via this edge.  In
 /// particular 'Dst' must not be reachable via another edge from 'Src'.
@@ -959,128 +919,6 @@ bool NewGVN::isOnlyReachableViaThisEdge(const BasicBlockEdge &E) {
   assert((!Pred || Pred == Src) && "No edge between these basic blocks!");
   (void)Src;
   return Pred != nullptr;
-}
-
-/// propagateEquality - The given values are known to be equal in
-/// every block dominated by 'Root'.  Exploit this, for example by
-/// replacing 'LHS' with 'RHS' everywhere in the scope.  Returns
-/// whether a change was made.
-// FIXME: This is part of the old GVN algorithm that we have
-// temporarily kept.  It should be replaced with proper predicate
-// support.
-// Right now it requires touching and replacing instructions in the
-// middle of analysis.  Worse, it requires elimination on every
-// iteration in order to maximize the equalities found, because
-// the elimination it performs is fairly simple, and it expects
-// something to go looking for leaders and eliminating on every
-// iteration.
-
-bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
-                               bool MultipleEdgesOneReachable,
-                               const BasicBlockEdge &Root) {
-  SmallVector<std::pair<Value *, Value *>, 4> Worklist;
-  Worklist.emplace_back(LHS, RHS);
-  bool Changed = false;
-
-  bool RootDominatesEnd = isOnlyReachableViaThisEdge(Root);
-
-  while (!Worklist.empty()) {
-    std::pair<Value *, Value *> Item = Worklist.pop_back_val();
-    LHS = Item.first;
-    RHS = Item.second;
-    DEBUG(dbgs() << "Setting equivalence " << *LHS << " = " << *RHS
-                 << " in blocks dominated by " << getBlockName(Root.getEnd())
-                 << "\n");
-
-    if (LHS == RHS)
-      continue;
-    assert(LHS->getType() == RHS->getType() && "Equality but unequal types!");
-
-    // Don't try to propagate equalities between constants.
-    if (isa<Constant>(LHS) && isa<Constant>(RHS))
-      continue;
-
-    // Prefer a constant on the right-hand side, or an Argument if no
-    // constants.
-    if (isa<Constant>(LHS) || (isa<Argument>(LHS) && !isa<Constant>(RHS)))
-      std::swap(LHS, RHS);
-
-    // Put the most dominating value on the RHS. This ensures that we
-    // replace later things in favor of earlier things
-    if (isa<Instruction>(LHS) && isa<Instruction>(RHS))
-      if (InstrDFS[cast<Instruction>(LHS)] < InstrDFS[cast<Instruction>(RHS)])
-        std::swap(LHS, RHS);
-
-    assert((isa<Argument>(LHS) || isa<Instruction>(LHS)) &&
-           "Unexpected value!");
-
-    // If value numbering later deduces that an instruction in the
-    // scope is equal to 'LHS' then ensure it will be turned into
-    // 'RHS' within the scope Root.
-    CongruenceClass *CC = ValueToClass[LHS];
-    assert(CC && "Should have found a congruence class");
-
-    if (RootDominatesEnd)
-      markDominatedSingleUserEquivalences(CC, LHS, RHS,
-                                          MultipleEdgesOneReachable, Root);
-
-    // Now try to deduce additional equalities from this one.  For
-    // example, if the known equality was "(A != B)" == "false" then
-    // it follows that A and B are equal in the scope.  Only boolean
-    // equalities with an explicit true or false RHS are currently
-    // supported.
-    if (!RHS->getType()->isIntegerTy(1))
-      // Not a boolean equality - bail out.
-      continue;
-    ConstantInt *CI = dyn_cast<ConstantInt>(RHS);
-    if (!CI)
-      // RHS neither 'true' nor 'false' - bail out.
-      continue;
-    // Whether RHS equals 'true'.  Otherwise it equals 'false'.
-    bool isKnownTrue = CI->isAllOnesValue();
-    bool isKnownFalse = !isKnownTrue;
-
-    // If "A && B" is known true then both A and B are known true.  If
-    // "A || B" is known false then both A and B are known false.
-    Value *A, *B;
-    if ((isKnownTrue && match(LHS, m_And(m_Value(A), m_Value(B)))) ||
-        (isKnownFalse && match(LHS, m_Or(m_Value(A), m_Value(B))))) {
-      Worklist.emplace_back(A, RHS);
-      Worklist.emplace_back(B, RHS);
-      continue;
-    }
-    // If we are propagating an equality like "(A == B)" == "true"
-    // then also propagate the equality A == B.  When propagating a
-    // comparison such as "(A >= B)" == "true", replace all instances
-    // of "A < B" with "false".
-    if (CmpInst *Cmp = dyn_cast<CmpInst>(LHS)) {
-      Value *Op0 = Cmp->getOperand(0), *Op1 = Cmp->getOperand(1);
-
-      // If "A == B" is known true, or "A != B" is known false, then replace
-      // A with B everywhere in the scope.
-      if ((isKnownTrue && Cmp->getPredicate() == CmpInst::ICMP_EQ) ||
-          (isKnownFalse && Cmp->getPredicate() == CmpInst::ICMP_NE))
-        Worklist.emplace_back(Op0, Op1);
-
-      // Handle the floating point versions of equality comparisons too.
-      if ((isKnownTrue && Cmp->getPredicate() == CmpInst::FCMP_OEQ) ||
-          (isKnownFalse && Cmp->getPredicate() == CmpInst::FCMP_UNE)) {
-
-        // Floating point -0.0 and 0.0 compare equal, so we can only
-        // propagate values if we know that we have a constant and that
-        // its value is non-zero.
-
-        // FIXME: We should do this optimization if 'no signed zeros' is
-        // applicable via an instruction-level fast-math-flag or some other
-        // indicator that relaxed FP semantics are being used.
-
-        if (isa<ConstantFP>(Op1) && !cast<ConstantFP>(Op1)->isZero())
-          Worklist.emplace_back(Op0, Op1);
-      }
-    }
-  }
-
-  return Changed;
 }
 
 void NewGVN::markUsersTouched(Value *V) {
@@ -1267,11 +1105,6 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
         updateReachableEdge(B, FalseSucc);
       }
     } else {
-      propagateEquality(Cond, ConstantInt::getTrue(TrueSucc->getContext()),
-                        false, {B, TrueSucc});
-
-      propagateEquality(Cond, ConstantInt::getFalse(FalseSucc->getContext()),
-                        false, {B, FalseSucc});
       updateReachableEdge(B, TrueSucc);
       updateReachableEdge(B, FalseSucc);
     }
@@ -1312,24 +1145,11 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
         if (Block == TargetBlock)
           MultipleEdgesOneReachable = true;
       }
-      const BasicBlockEdge E(B, TargetBlock);
-      propagateEquality(SwitchCond, CaseVal.getCaseValue(),
-                        MultipleEdgesOneReachable, E);
     } else {
       for (unsigned i = 0, e = SI->getNumSuccessors(); i != e; ++i) {
         BasicBlock *TargetBlock = SI->getSuccessor(i);
         ++SwitchEdges[TargetBlock];
         updateReachableEdge(B, TargetBlock);
-      }
-
-      // Regardless of answers, propagate equalities for case values
-      for (auto i = SI->case_begin(), e = SI->case_end(); i != e; ++i) {
-        BasicBlock *TargetBlock = i.getCaseSuccessor();
-        if (SwitchEdges.lookup(TargetBlock) == 1) {
-          const BasicBlockEdge E(B, TargetBlock);
-          propagateEquality(SwitchCond, i.getCaseValue(),
-                            MultipleEdgesOneReachable, E);
-        }
       }
     }
   } else {
