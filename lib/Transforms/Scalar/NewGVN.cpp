@@ -1304,7 +1304,7 @@ std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
 }
 
 void NewGVN::updateProcessedCount(Value *V) {
-#if 1 /* NDEBUG */
+#ifndef NDEBUG
   if (ProcessedCount.count(V) == 0) {
     ProcessedCount.insert({V, 1});
   } else {
