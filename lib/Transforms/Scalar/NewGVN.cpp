@@ -1004,12 +1004,8 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
       if (VClass->Members.empty() && VClass != InitialClass) {
         if (VClass->DefiningExpr) {
           VClass->Dead = true;
-
           DEBUG(dbgs() << "Erasing expression " << *E << " from table\n");
-          // bool wasE = *E == *VClass->expression;
           ExpressionToClass.erase(VClass->DefiningExpr);
-          // if (wasE)
-          //   lookupMap->insert({E, EClass});
         }
         // delete VClass;
       } else if (VClass->RepLeader == V) {
