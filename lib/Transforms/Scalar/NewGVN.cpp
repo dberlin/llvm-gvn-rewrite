@@ -122,7 +122,6 @@ struct CongruenceClass {
 };
 
 class NewGVN : public FunctionPass {
-  MemoryDependenceResults *MD;
   DominatorTree *DT;
   const DataLayout *DL;
   const TargetLibraryInfo *TLI;
@@ -208,7 +207,7 @@ class NewGVN : public FunctionPass {
 
 public:
   static char ID; // Pass identification, replacement for typeid
-  explicit NewGVN() : FunctionPass(ID), MD(nullptr) {
+  explicit NewGVN() : FunctionPass(ID) {
     initializeNewGVNPass(*PassRegistry::getPassRegistry());
   }
 
