@@ -490,8 +490,7 @@ define i1 @test39(i32 %X, i32 %Y) {
 
 define <2 x i1> @test39vec(<2 x i32> %X, <2 x i32> %Y) {
 ; CHECK-LABEL: @test39vec(
-; CHECK-NEXT:    [[A:%.*]] = ashr exact <2 x i32> %X, %Y
-; CHECK-NEXT:    [[B:%.*]] = icmp eq <2 x i32> [[A]], zeroinitializer
+; CHECK-NEXT:    [[B:%.*]] = icmp eq <2 x i32> %X, zeroinitializer
 ; CHECK-NEXT:    ret <2 x i1> [[B]]
 ;
   %A = ashr exact <2 x i32> %X, %Y
@@ -511,13 +510,32 @@ define i1 @test40(i32 %X, i32 %Y) {
 
 define <2 x i1> @test40vec(<2 x i32> %X, <2 x i32> %Y) {
 ; CHECK-LABEL: @test40vec(
-; CHECK-NEXT:    [[A:%.*]] = lshr exact <2 x i32> %X, %Y
-; CHECK-NEXT:    [[B:%.*]] = icmp ne <2 x i32> [[A]], zeroinitializer
+; CHECK-NEXT:    [[B:%.*]] = icmp ne <2 x i32> %X, zeroinitializer
 ; CHECK-NEXT:    ret <2 x i1> [[B]]
 ;
   %A = lshr exact <2 x i32> %X, %Y
   %B = icmp ne <2 x i32> %A, zeroinitializer
   ret <2 x i1> %B
+}
+
+define i1 @shr_exact(i132 %x) {
+; CHECK-LABEL: @shr_exact(
+; CHECK-NEXT:    [[CMP:%.*]] = icmp eq i132 %x, 32
+; CHECK-NEXT:    ret i1 [[CMP]]
+;
+  %sh = ashr exact i132 %x, 4
+  %cmp = icmp eq i132 %sh, 2
+  ret i1 %cmp
+}
+
+define <2 x i1> @shr_exact_vec(<2 x i132> %x) {
+; CHECK-LABEL: @shr_exact_vec(
+; CHECK-NEXT:    [[CMP:%.*]] = icmp ne <2 x i132> %x, <i132 32, i132 32>
+; CHECK-NEXT:    ret <2 x i1> [[CMP]]
+;
+  %sh = lshr exact <2 x i132> %x, <i132 4, i132 4>
+  %cmp = icmp ne <2 x i132> %sh, <i132 2, i132 2>
+  ret <2 x i1> %cmp
 }
 
 ; PR9343 #3

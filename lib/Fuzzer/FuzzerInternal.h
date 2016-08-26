@@ -19,16 +19,11 @@
 #include <climits>
 #include <cstddef>
 #include <cstdlib>
-#include <memory>
 #include <random>
 #include <string.h>
 #include <string>
 #include <unordered_set>
 #include <vector>
-
-#include "FuzzerExtFunctions.h"
-#include "FuzzerInterface.h"
-#include "FuzzerValueBitMap.h"
 
 // Platform detection.
 #ifdef __linux__
@@ -40,6 +35,16 @@
 #else
 #error "Support for your platform has not been implemented"
 #endif
+
+#ifdef __x86_64
+#define ATTRIBUTE_TARGET_POPCNT __attribute__((target("popcnt")))
+#else
+#define ATTRIBUTE_TARGET_POPCNT
+#endif
+
+#include "FuzzerExtFunctions.h"
+#include "FuzzerInterface.h"
+#include "FuzzerValueBitMap.h"
 
 namespace fuzzer {
 
@@ -354,8 +359,6 @@ private:
   std::vector<Mutator> DefaultMutators;
 };
 
-class CoverageController;
-
 class Fuzzer {
 public:
 
@@ -452,6 +455,7 @@ private:
   void InterruptCallback();
   void MutateAndTestOne();
   void ReportNewCoverage(const Unit &U);
+  void PrintNewPCs();
   bool RunOne(const Unit &U) { return RunOne(U.data(), U.size()); }
   void RunOneAndUpdateCorpus(const uint8_t *Data, size_t Size);
   void WriteToOutputCorpus(const Unit &U);
@@ -482,6 +486,11 @@ private:
   void DumpCurrentUnit(const char *Prefix);
   void DeathCallback();
 
+  void ResetEdgeCoverage();
+  void ResetCounters();
+  void PrepareCounters(Fuzzer::Coverage *C);
+  bool RecordMaxCoverage(Fuzzer::Coverage *C);
+
   void LazyAllocateCurrentUnitData();
   uint8_t *CurrentUnitData = nullptr;
   std::atomic<size_t> CurrentUnitSize;
@@ -507,7 +516,11 @@ private:
 
   // Maximum recorded coverage.
   Coverage MaxCoverage;
-  std::unique_ptr<CoverageController> CController;
+
+  // For -print_pcs
+  uintptr_t* PcBuffer = nullptr;
+  size_t PcBufferLen = 0;
+  size_t PrevPcBufferPos;
 
   // Need to know our own thread.
   static thread_local bool IsMyThread;

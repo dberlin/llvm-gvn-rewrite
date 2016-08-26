@@ -49,10 +49,6 @@ struct MachinePointerInfo;
 struct WinEHFuncInfo;
 
 template <>
-struct ilist_sentinel_traits<MachineBasicBlock>
-    : public ilist_half_embedded_sentinel_traits<MachineBasicBlock> {};
-
-template <>
 struct ilist_traits<MachineBasicBlock>
     : public ilist_default_traits<MachineBasicBlock> {
   void addNodeToList(MachineBasicBlock* MBB);
@@ -83,7 +79,6 @@ struct MachineFunctionInfo {
 /// Each of these has checking code in the MachineVerifier, and passes can
 /// require that a property be set.
 class MachineFunctionProperties {
-  // TODO: Add MachineVerifier checks for AllVRegsAllocated
   // Possible TODO: Allow targets to extend this (perhaps by allowing the
   // constructor to specify the size of the bit vector)
   // Possible TODO: Allow requiring the negative (e.g. VRegsAllocated could be
@@ -96,6 +91,7 @@ public:
   // Property descriptions:
   // IsSSA: True when the machine function is in SSA form and virtual registers
   //  have a single def.
+  // NoPHIs: The machine function does not contain any PHI instruction.
   // TracksLiveness: True when tracking register liveness accurately.
   //  While this property is set, register liveness information in basic block
   //  live-in lists and machine instruction operands (e.g. kill flags, implicit
@@ -103,8 +99,7 @@ public:
   //  that affect the values in registers, for example by the register
   //  scavenger.
   //  When this property is clear, liveness is no longer reliable.
-  // AllVRegsAllocated: All virtual registers have been allocated; i.e. all
-  //  register operands are physical registers.
+  // NoVRegs: The machine function does not use any virtual registers.
   // Legalized: In GlobalISel: the MachineLegalizer ran and all pre-isel generic
   //  instructions have been legalized; i.e., all instructions are now one of:
   //   - generic and always legal (e.g., COPY)
@@ -121,8 +116,9 @@ public:
   //  all sizes attached to them have been eliminated.
   enum class Property : unsigned {
     IsSSA,
+    NoPHIs,
     TracksLiveness,
-    AllVRegsAllocated,
+    NoVRegs,
     Legalized,
     RegBankSelected,
     Selected,
@@ -618,9 +614,7 @@ public:
 //
 template <> struct GraphTraits<MachineFunction*> :
   public GraphTraits<MachineBasicBlock*> {
-  static NodeType *getEntryNode(MachineFunction *F) {
-    return &F->front();
-  }
+  static NodeRef getEntryNode(MachineFunction *F) { return &F->front(); }
 
   // nodes_iterator/begin/end - Allow iteration over all nodes in the graph
   typedef pointer_iterator<MachineFunction::iterator> nodes_iterator;
@@ -634,9 +628,7 @@ template <> struct GraphTraits<MachineFunction*> :
 };
 template <> struct GraphTraits<const MachineFunction*> :
   public GraphTraits<const MachineBasicBlock*> {
-  static NodeType *getEntryNode(const MachineFunction *F) {
-    return &F->front();
-  }
+  static NodeRef getEntryNode(const MachineFunction *F) { return &F->front(); }
 
   // nodes_iterator/begin/end - Allow iteration over all nodes in the graph
   typedef pointer_iterator<MachineFunction::const_iterator> nodes_iterator;
@@ -659,13 +651,13 @@ template <> struct GraphTraits<const MachineFunction*> :
 //
 template <> struct GraphTraits<Inverse<MachineFunction*> > :
   public GraphTraits<Inverse<MachineBasicBlock*> > {
-  static NodeType *getEntryNode(Inverse<MachineFunction*> G) {
+  static NodeRef getEntryNode(Inverse<MachineFunction *> G) {
     return &G.Graph->front();
   }
 };
 template <> struct GraphTraits<Inverse<const MachineFunction*> > :
   public GraphTraits<Inverse<const MachineBasicBlock*> > {
-  static NodeType *getEntryNode(Inverse<const MachineFunction *> G) {
+  static NodeRef getEntryNode(Inverse<const MachineFunction *> G) {
     return &G.Graph->front();
   }
 };

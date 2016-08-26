@@ -268,6 +268,7 @@ set(LLVM_ALL_TARGETS
   ARM
   BPF
   Hexagon
+  Lanai
   Mips
   MSP430
   NVPTX
@@ -453,6 +454,7 @@ option (LLVM_BUILD_DOCS "Build the llvm documentation." OFF)
 option (LLVM_INCLUDE_DOCS "Generate build targets for llvm documentation." ON)
 option (LLVM_ENABLE_DOXYGEN "Use doxygen to generate llvm API documentation." OFF)
 option (LLVM_ENABLE_SPHINX "Use Sphinx to generate llvm documentation." OFF)
+option (LLVM_ENABLE_OCAMLDOC "Build OCaml bindings documentation." ON)
 
 option (LLVM_BUILD_EXTERNAL_COMPILER_RT
   "Build compiler-rt as an external project." OFF)
@@ -827,6 +829,9 @@ if( LLVM_INCLUDE_TESTS )
     DEPENDS ${LLVM_LIT_DEPENDS}
     ARGS ${LLVM_LIT_EXTRA_ARGS}
     )
+  if(TARGET check-runtimes)
+    add_dependencies(check-all check-runtimes)
+  endif()
   add_custom_target(test-depends DEPENDS ${LLVM_LIT_DEPENDS})
   set_target_properties(test-depends PROPERTIES FOLDER "Tests")
 endif()
