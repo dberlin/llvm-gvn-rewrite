@@ -334,10 +334,13 @@ int FuzzerDriver(int *argc, char ***argv, UserCallback Callback) {
     Printf("Dictionary: %zd entries\n", Dictionary.size());
   bool DoPlainRun = AllInputsAreFiles();
   Options.SaveArtifacts = !DoPlainRun;
-  Options.PrintNewCovPcs = Flags.print_new_cov_pcs;
+  Options.PrintNewCovPcs = Flags.print_pcs;
   Options.PrintFinalStats = Flags.print_final_stats;
   Options.TruncateUnits = Flags.truncate_units;
   Options.PruneCorpus = Flags.prune_corpus;
+
+  if (Flags.use_value_profile)
+    EnableValueProfile();
 
   unsigned Seed = Flags.seed;
   // Initialize Seed.
@@ -382,6 +385,10 @@ int FuzzerDriver(int *argc, char ***argv, UserCallback Callback) {
       auto MS = duration_cast<milliseconds>(StopTime - StartTime).count();
       Printf("Executed %s in %zd ms\n", Path.c_str(), (long)MS);
     }
+    Printf("***\n"
+           "*** NOTE: fuzzing was not performed, you have only\n"
+           "***       executed the target code on a fixed set of inputs.\n"
+           "***\n");
     F.PrintFinalStats();
     exit(0);
   }

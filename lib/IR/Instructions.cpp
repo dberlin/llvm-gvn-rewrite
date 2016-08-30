@@ -1209,15 +1209,7 @@ void BranchInst::swapSuccessors() {
 
   // Update profile metadata if present and it matches our structural
   // expectations.
-  MDNode *ProfileData = getMetadata(LLVMContext::MD_prof);
-  if (!ProfileData || ProfileData->getNumOperands() != 3)
-    return;
-
-  // The first operand is the name. Fetch them backwards and build a new one.
-  Metadata *Ops[] = {ProfileData->getOperand(0), ProfileData->getOperand(2),
-                     ProfileData->getOperand(1)};
-  setMetadata(LLVMContext::MD_prof,
-              MDNode::get(ProfileData->getContext(), Ops));
+  swapProfMetadata();
 }
 
 BasicBlock *BranchInst::getSuccessorV(unsigned idx) const {
@@ -3462,6 +3454,38 @@ CmpInst::Predicate CmpInst::getInversePredicate(Predicate pred) {
     case FCMP_UNO: return FCMP_ORD;
     case FCMP_TRUE: return FCMP_FALSE;
     case FCMP_FALSE: return FCMP_TRUE;
+  }
+}
+
+StringRef CmpInst::getPredicateName(Predicate Pred) {
+  switch (Pred) {
+  default:                   return "unknown";
+  case FCmpInst::FCMP_FALSE: return "false";
+  case FCmpInst::FCMP_OEQ:   return "oeq";
+  case FCmpInst::FCMP_OGT:   return "ogt";
+  case FCmpInst::FCMP_OGE:   return "oge";
+  case FCmpInst::FCMP_OLT:   return "olt";
+  case FCmpInst::FCMP_OLE:   return "ole";
+  case FCmpInst::FCMP_ONE:   return "one";
+  case FCmpInst::FCMP_ORD:   return "ord";
+  case FCmpInst::FCMP_UNO:   return "uno";
+  case FCmpInst::FCMP_UEQ:   return "ueq";
+  case FCmpInst::FCMP_UGT:   return "ugt";
+  case FCmpInst::FCMP_UGE:   return "uge";
+  case FCmpInst::FCMP_ULT:   return "ult";
+  case FCmpInst::FCMP_ULE:   return "ule";
+  case FCmpInst::FCMP_UNE:   return "une";
+  case FCmpInst::FCMP_TRUE:  return "true";
+  case ICmpInst::ICMP_EQ:    return "eq";
+  case ICmpInst::ICMP_NE:    return "ne";
+  case ICmpInst::ICMP_SGT:   return "sgt";
+  case ICmpInst::ICMP_SGE:   return "sge";
+  case ICmpInst::ICMP_SLT:   return "slt";
+  case ICmpInst::ICMP_SLE:   return "sle";
+  case ICmpInst::ICMP_UGT:   return "ugt";
+  case ICmpInst::ICMP_UGE:   return "uge";
+  case ICmpInst::ICMP_ULT:   return "ult";
+  case ICmpInst::ICMP_ULE:   return "ule";
   }
 }
 

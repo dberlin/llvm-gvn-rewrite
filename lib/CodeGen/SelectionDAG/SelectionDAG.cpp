@@ -521,24 +521,6 @@ static void AddNodeIDNode(FoldingSetNodeID &ID, const SDNode *N) {
   AddNodeIDCustom(ID, N);
 }
 
-/// encodeMemSDNodeFlags - Generic routine for computing a value for use in
-/// the CSE map that carries volatility, temporalness, indexing mode, and
-/// extension/truncation information.
-///
-static inline unsigned
-encodeMemSDNodeFlags(int ConvType, ISD::MemIndexedMode AM, bool isVolatile,
-                     bool isNonTemporal, bool isInvariant) {
-  assert((ConvType & 3) == ConvType &&
-         "ConvType may not require more than 2 bits!");
-  assert((AM & 7) == AM &&
-         "AM may not require more than 3 bits!");
-  return ConvType |
-         (AM << 2) |
-         (isVolatile << 5) |
-         (isNonTemporal << 6) |
-         (isInvariant << 7);
-}
-
 //===----------------------------------------------------------------------===//
 //                              SelectionDAG Class
 //===----------------------------------------------------------------------===//
@@ -1943,29 +1925,29 @@ SDValue SelectionDAG::FoldSetCC(EVT VT, SDValue N1, SDValue N2,
       default: break;
       case ISD::SETEQ:  if (R==APFloat::cmpUnordered)
                           return getUNDEF(VT);
-                        // fall through
+                        LLVM_FALLTHROUGH;
       case ISD::SETOEQ: return getConstant(R==APFloat::cmpEqual, dl, VT);
       case ISD::SETNE:  if (R==APFloat::cmpUnordered)
                           return getUNDEF(VT);
-                        // fall through
+                        LLVM_FALLTHROUGH;
       case ISD::SETONE: return getConstant(R==APFloat::cmpGreaterThan ||
                                            R==APFloat::cmpLessThan, dl, VT);
       case ISD::SETLT:  if (R==APFloat::cmpUnordered)
                           return getUNDEF(VT);
-                        // fall through
+                        LLVM_FALLTHROUGH;
       case ISD::SETOLT: return getConstant(R==APFloat::cmpLessThan, dl, VT);
       case ISD::SETGT:  if (R==APFloat::cmpUnordered)
                           return getUNDEF(VT);
-                        // fall through
+                        LLVM_FALLTHROUGH;
       case ISD::SETOGT: return getConstant(R==APFloat::cmpGreaterThan, dl, VT);
       case ISD::SETLE:  if (R==APFloat::cmpUnordered)
                           return getUNDEF(VT);
-                        // fall through
+                        LLVM_FALLTHROUGH;
       case ISD::SETOLE: return getConstant(R==APFloat::cmpLessThan ||
                                            R==APFloat::cmpEqual, dl, VT);
       case ISD::SETGE:  if (R==APFloat::cmpUnordered)
                           return getUNDEF(VT);
-                        // fall through
+                        LLVM_FALLTHROUGH;
       case ISD::SETOGE: return getConstant(R==APFloat::cmpGreaterThan ||
                                            R==APFloat::cmpEqual, dl, VT);
       case ISD::SETO:   return getConstant(R!=APFloat::cmpUnordered, dl, VT);
@@ -2350,8 +2332,8 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
         }
       }
     }
+    LLVM_FALLTHROUGH;
   }
-  // fall through
   case ISD::ADD:
   case ISD::ADDE: {
     // Output known-0 bits are known if clear or set in both the low clear bits
@@ -2481,7 +2463,7 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
   default:
     if (Op.getOpcode() < ISD::BUILTIN_OP_END)
       break;
-    // Fallthrough
+    LLVM_FALLTHROUGH;
   case ISD::INTRINSIC_WO_CHAIN:
   case ISD::INTRINSIC_W_CHAIN:
   case ISD::INTRINSIC_VOID:
@@ -3394,8 +3376,8 @@ SDValue SelectionDAG::FoldConstantVectorArithmetic(unsigned Opcode,
   // All operands must be vector types with the same number of elements as
   // the result type and must be either UNDEF or a build vector of constant
   // or UNDEF scalars.
-  if (!std::all_of(Ops.begin(), Ops.end(), IsConstantBuildVectorOrUndef) ||
-      !std::all_of(Ops.begin(), Ops.end(), IsScalarOrSameVectorSize))
+  if (!all_of(Ops, IsConstantBuildVectorOrUndef) ||
+      !all_of(Ops, IsScalarOrSameVectorSize))
     return SDValue();
 
   // If we are comparing vectors, then the result needs to be a i1 boolean
@@ -3868,7 +3850,7 @@ SDValue SelectionDAG::getNode(unsigned Opcode, const SDLoc &DL, EVT VT,
         // Handle undef ^ undef -> 0 special case. This is a common
         // idiom (misuse).
         return getConstant(0, DL, VT);
-      // fallthrough
+      LLVM_FALLTHROUGH;
     case ISD::ADD:
     case ISD::ADDC:
     case ISD::ADDE:
@@ -5101,9 +5083,8 @@ SDValue SelectionDAG::getLoad(ISD::MemIndexedMode AM, ISD::LoadExtType ExtType,
   FoldingSetNodeID ID;
   AddNodeIDNode(ID, ISD::LOAD, VTs, Ops);
   ID.AddInteger(MemVT.getRawBits());
-  ID.AddInteger(encodeMemSDNodeFlags(ExtType, AM, MMO->isVolatile(),
-                                     MMO->isNonTemporal(),
-                                     MMO->isInvariant()));
+  ID.AddInteger(getSyntheticNodeSubclassData<LoadSDNode>(
+      dl.getIROrder(), VTs, AM, ExtType, MemVT, MMO));
   ID.AddInteger(MMO->getPointerInfo().getAddrSpace());
   void *IP = nullptr;
   if (SDNode *E = FindNodeOrInsertPos(ID, dl, IP)) {
@@ -5200,8 +5181,8 @@ SDValue SelectionDAG::getStore(SDValue Chain, const SDLoc &dl, SDValue Val,
   FoldingSetNodeID ID;
   AddNodeIDNode(ID, ISD::STORE, VTs, Ops);
   ID.AddInteger(VT.getRawBits());
-  ID.AddInteger(encodeMemSDNodeFlags(false, ISD::UNINDEXED, MMO->isVolatile(),
-                                     MMO->isNonTemporal(), MMO->isInvariant()));
+  ID.AddInteger(getSyntheticNodeSubclassData<StoreSDNode>(
+      dl.getIROrder(), VTs, ISD::UNINDEXED, false, VT, MMO));
   ID.AddInteger(MMO->getPointerInfo().getAddrSpace());
   void *IP = nullptr;
   if (SDNode *E = FindNodeOrInsertPos(ID, dl, IP)) {
@@ -5265,8 +5246,8 @@ SDValue SelectionDAG::getTruncStore(SDValue Chain, const SDLoc &dl, SDValue Val,
   FoldingSetNodeID ID;
   AddNodeIDNode(ID, ISD::STORE, VTs, Ops);
   ID.AddInteger(SVT.getRawBits());
-  ID.AddInteger(encodeMemSDNodeFlags(true, ISD::UNINDEXED, MMO->isVolatile(),
-                                     MMO->isNonTemporal(), MMO->isInvariant()));
+  ID.AddInteger(getSyntheticNodeSubclassData<StoreSDNode>(
+      dl.getIROrder(), VTs, ISD::UNINDEXED, true, SVT, MMO));
   ID.AddInteger(MMO->getPointerInfo().getAddrSpace());
   void *IP = nullptr;
   if (SDNode *E = FindNodeOrInsertPos(ID, dl, IP)) {
@@ -5318,10 +5299,8 @@ SDValue SelectionDAG::getMaskedLoad(EVT VT, const SDLoc &dl, SDValue Chain,
   FoldingSetNodeID ID;
   AddNodeIDNode(ID, ISD::MLOAD, VTs, Ops);
   ID.AddInteger(VT.getRawBits());
-  ID.AddInteger(encodeMemSDNodeFlags(ExtTy, ISD::UNINDEXED,
-                                     MMO->isVolatile(),
-                                     MMO->isNonTemporal(),
-                                     MMO->isInvariant()));
+  ID.AddInteger(getSyntheticNodeSubclassData<MaskedLoadSDNode>(
+      dl.getIROrder(), VTs, ExtTy, MemVT, MMO));
   ID.AddInteger(MMO->getPointerInfo().getAddrSpace());
   void *IP = nullptr;
   if (SDNode *E = FindNodeOrInsertPos(ID, dl, IP)) {
@@ -5349,8 +5328,8 @@ SDValue SelectionDAG::getMaskedStore(SDValue Chain, const SDLoc &dl,
   FoldingSetNodeID ID;
   AddNodeIDNode(ID, ISD::MSTORE, VTs, Ops);
   ID.AddInteger(VT.getRawBits());
-  ID.AddInteger(encodeMemSDNodeFlags(false, ISD::UNINDEXED, MMO->isVolatile(),
-                                     MMO->isNonTemporal(), MMO->isInvariant()));
+  ID.AddInteger(getSyntheticNodeSubclassData<MaskedStoreSDNode>(
+      dl.getIROrder(), VTs, isTrunc, MemVT, MMO));
   ID.AddInteger(MMO->getPointerInfo().getAddrSpace());
   void *IP = nullptr;
   if (SDNode *E = FindNodeOrInsertPos(ID, dl, IP)) {
@@ -5374,10 +5353,8 @@ SDValue SelectionDAG::getMaskedGather(SDVTList VTs, EVT VT, const SDLoc &dl,
   FoldingSetNodeID ID;
   AddNodeIDNode(ID, ISD::MGATHER, VTs, Ops);
   ID.AddInteger(VT.getRawBits());
-  ID.AddInteger(encodeMemSDNodeFlags(ISD::NON_EXTLOAD, ISD::UNINDEXED,
-                                     MMO->isVolatile(),
-                                     MMO->isNonTemporal(),
-                                     MMO->isInvariant()));
+  ID.AddInteger(getSyntheticNodeSubclassData<MaskedGatherSDNode>(
+      dl.getIROrder(), VTs, VT, MMO));
   ID.AddInteger(MMO->getPointerInfo().getAddrSpace());
   void *IP = nullptr;
   if (SDNode *E = FindNodeOrInsertPos(ID, dl, IP)) {
@@ -5411,9 +5388,8 @@ SDValue SelectionDAG::getMaskedScatter(SDVTList VTs, EVT VT, const SDLoc &dl,
   FoldingSetNodeID ID;
   AddNodeIDNode(ID, ISD::MSCATTER, VTs, Ops);
   ID.AddInteger(VT.getRawBits());
-  ID.AddInteger(encodeMemSDNodeFlags(false, ISD::UNINDEXED, MMO->isVolatile(),
-                                     MMO->isNonTemporal(),
-                                     MMO->isInvariant()));
+  ID.AddInteger(getSyntheticNodeSubclassData<MaskedScatterSDNode>(
+      dl.getIROrder(), VTs, VT, MMO));
   ID.AddInteger(MMO->getPointerInfo().getAddrSpace());
   void *IP = nullptr;
   if (SDNode *E = FindNodeOrInsertPos(ID, dl, IP)) {
@@ -6711,11 +6687,10 @@ AddrSpaceCastSDNode::AddrSpaceCastSDNode(unsigned Order, const DebugLoc &dl,
 MemSDNode::MemSDNode(unsigned Opc, unsigned Order, const DebugLoc &dl,
                      SDVTList VTs, EVT memvt, MachineMemOperand *mmo)
     : SDNode(Opc, Order, dl, VTs), MemoryVT(memvt), MMO(mmo) {
-  SubclassData = encodeMemSDNodeFlags(0, ISD::UNINDEXED, MMO->isVolatile(),
-                                      MMO->isNonTemporal(), MMO->isInvariant());
-  assert(isVolatile() == MMO->isVolatile() && "Volatile encoding error!");
-  assert(isNonTemporal() == MMO->isNonTemporal() &&
-         "Non-temporal encoding error!");
+  MemSDNodeBits.IsVolatile = MMO->isVolatile();
+  MemSDNodeBits.IsNonTemporal = MMO->isNonTemporal();
+  MemSDNodeBits.IsInvariant = MMO->isInvariant();
+
   // We check here that the size of the memory operand fits within the size of
   // the MMO. This is because the MMO might indicate only a possible address
   // range instead of specifying the affected memory addresses precisely.

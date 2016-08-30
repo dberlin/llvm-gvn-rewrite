@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Support/YAMLParser.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
@@ -148,21 +149,6 @@ struct Token : ilist_node<Token> {
 }
 
 namespace llvm {
-template<>
-struct ilist_sentinel_traits<Token> {
-  Token *createSentinel() const {
-    return &Sentinel;
-  }
-  static void destroySentinel(Token*) {}
-
-  Token *provideInitialHead() const { return createSentinel(); }
-  Token *ensureHead(Token*) const { return createSentinel(); }
-  static void noteHead(Token*, Token*) {}
-
-private:
-  mutable Token Sentinel;
-};
-
 template<>
 struct ilist_node_traits<Token> {
   Token *createNode(const Token &V) {
@@ -802,8 +788,7 @@ Token &Scanner::peekNext() {
     removeStaleSimpleKeyCandidates();
     SimpleKey SK;
     SK.Tok = TokenQueue.begin();
-    if (std::find(SimpleKeys.begin(), SimpleKeys.end(), SK)
-        == SimpleKeys.end())
+    if (!is_contained(SimpleKeys, SK))
       break;
     else
       NeedMore = true;

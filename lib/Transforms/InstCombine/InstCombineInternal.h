@@ -541,16 +541,13 @@ private:
 
   Instruction *foldGEPICmp(GEPOperator *GEPLHS, Value *RHS,
                            ICmpInst::Predicate Cond, Instruction &I);
-  Instruction *foldAllocaCmp(ICmpInst &ICI, AllocaInst *Alloca, Value *Other);
+  Instruction *foldAllocaCmp(ICmpInst &ICI, const AllocaInst *Alloca,
+                             const Value *Other);
   Instruction *foldCmpLoadFromIndexedGlobal(GetElementPtrInst *GEP,
                                             GlobalVariable *GV, CmpInst &ICI,
                                             ConstantInt *AndCst = nullptr);
   Instruction *foldFCmpIntToFPConst(FCmpInst &I, Instruction *LHSI,
                                     Constant *RHSC);
-  Instruction *foldICmpDivConst(ICmpInst &ICI, BinaryOperator *DivI,
-                                ConstantInt *DivRHS);
-  Instruction *foldICmpShrConst(ICmpInst &ICI, BinaryOperator *DivI,
-                                ConstantInt *DivRHS);
   Instruction *foldICmpCstShrConst(ICmpInst &I, Value *Op, Value *A,
                                    ConstantInt *CI1, ConstantInt *CI2);
   Instruction *foldICmpCstShlConst(ICmpInst &I, Value *Op, Value *A,
@@ -558,8 +555,31 @@ private:
   Instruction *foldICmpAddOpConst(Instruction &ICI, Value *X, ConstantInt *CI,
                                   ICmpInst::Predicate Pred);
   Instruction *foldICmpWithCastAndCast(ICmpInst &ICI);
-  Instruction *foldICmpWithConstant(ICmpInst &ICI, Instruction *LHS,
-                                    ConstantInt *RHS);
+  Instruction *foldICmpWithConstant(ICmpInst &Cmp);
+
+  Instruction *foldICmpTruncConstant(ICmpInst &Cmp, Instruction *Trunc,
+                                     const APInt *C);
+  Instruction *foldICmpAndConstant(ICmpInst &Cmp, BinaryOperator *And,
+                                   const APInt *C);
+  Instruction *foldICmpXorConstant(ICmpInst &Cmp, BinaryOperator *Xor,
+                                   const APInt *C);
+  Instruction *foldICmpOrConstant(ICmpInst &Cmp, BinaryOperator *Or,
+                                  const APInt *C);
+  Instruction *foldICmpMulConstant(ICmpInst &Cmp, BinaryOperator *Mul,
+                                   const APInt *C);
+  Instruction *foldICmpShlConstant(ICmpInst &Cmp, BinaryOperator *Shl,
+                                   const APInt *C);
+  Instruction *foldICmpShrConstant(ICmpInst &Cmp, BinaryOperator *Shr,
+                                   const APInt *C);
+  Instruction *foldICmpUDivConstant(ICmpInst &Cmp, BinaryOperator *UDiv,
+                                    const APInt *C);
+  Instruction *foldICmpDivConstant(ICmpInst &Cmp, BinaryOperator *Div,
+                                   const APInt *C);
+  Instruction *foldICmpSubConstant(ICmpInst &Cmp, BinaryOperator *Sub,
+                                   const APInt *C);
+  Instruction *foldICmpAddConstant(ICmpInst &Cmp, BinaryOperator *Add,
+                                   const APInt *C);
+
   Instruction *foldICmpEqualityWithConstant(ICmpInst &ICI);
   Instruction *foldICmpIntrinsicWithConstant(ICmpInst &ICI);
 

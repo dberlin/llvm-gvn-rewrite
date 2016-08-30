@@ -431,15 +431,15 @@ analyzeLoopUnrollCost(const Loop *L, unsigned TripCount, DominatorTree &DT,
         if (IsFree)
           continue;
 
-        // If the instruction might have a side-effect recursively account for
-        // the cost of it and all the instructions leading up to it.
-        if (I.mayHaveSideEffects())
-          AddCostRecursively(I, Iteration);
-
         // Can't properly model a cost of a call.
         // FIXME: With a proper cost model we should be able to do it.
         if(isa<CallInst>(&I))
           return None;
+
+        // If the instruction might have a side-effect recursively account for
+        // the cost of it and all the instructions leading up to it.
+        if (I.mayHaveSideEffects())
+          AddCostRecursively(I, Iteration);
 
         // If unrolled body turns out to be too big, bail out.
         if (UnrolledCost > MaxUnrolledLoopSize) {
@@ -947,6 +947,10 @@ static bool tryToUnrollLoop(Loop *L, DominatorTree &DT, LoopInfo *LI,
   TargetTransformInfo::UnrollingPreferences UP = gatherUnrollingPreferences(
       L, TTI, ProvidedThreshold, ProvidedCount, ProvidedAllowPartial,
       ProvidedRuntime);
+
+  // Exit early if unrolling is disabled.
+  if (UP.Threshold == 0 && (!UP.Partial || UP.PartialThreshold == 0))
+    return false;
 
   // If the loop contains a convergent operation, the prelude we'd add
   // to do the first few instructions before we hit the unrolled loop

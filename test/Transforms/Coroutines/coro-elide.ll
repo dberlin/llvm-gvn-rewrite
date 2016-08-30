@@ -1,6 +1,6 @@
 ; Tests that the coro.destroy and coro.resume are devirtualized where possible,
 ; SCC pipeline restarts and inlines the direct calls.
-; RUN: opt < %s -S -inline -coro-elide | FileCheck %s
+; RUN: opt < %s -S -inline -coro-elide -dce | FileCheck %s
 
 declare void @print(i32) nounwind
 
@@ -22,8 +22,9 @@ define fastcc void @f.destroy(i8*) {
 ; a coroutine start function
 define i8* @f() {
 entry:
-  %hdl = call i8* @llvm.coro.begin(i8* null, i32 0, i8* null,
+  %id = call token @llvm.coro.id(i32 0, i8* null,
                           i8* bitcast ([2 x void (i8*)*]* @f.resumers to i8*))
+  %hdl = call i8* @llvm.coro.begin(token %id, i8* null)
   ret i8* %hdl
 }
 
@@ -70,7 +71,8 @@ ehcleanup:
 ; no devirtualization here, since coro.begin info parameter is null
 define void @no_devirt_info_null() {
 entry:
-  %hdl = call i8* @llvm.coro.begin(i8* null, i32 0, i8* null, i8* null)
+  %id = call token @llvm.coro.id(i32 0, i8* null, i8* null)
+  %hdl = call i8* @llvm.coro.begin(token %id, i8* null)
 
 ; CHECK: call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 0)
   %0 = call i8* @llvm.coro.subfn.addr(i8* %hdl, i8 0)
@@ -105,6 +107,7 @@ entry:
   ret void
 }
 
-
-declare i8* @llvm.coro.begin(i8*, i32, i8*, i8*)
+declare token @llvm.coro.id(i32, i8*, i8*)
+declare i8* @llvm.coro.begin(token, i8*)
+declare i8* @llvm.coro.frame()
 declare i8* @llvm.coro.subfn.addr(i8*, i8)

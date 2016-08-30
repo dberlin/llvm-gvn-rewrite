@@ -197,7 +197,7 @@ namespace {
 
     MachineFunctionProperties getRequiredProperties() const override {
       return MachineFunctionProperties().set(
-          MachineFunctionProperties::Property::AllVRegsAllocated);
+          MachineFunctionProperties::Property::NoVRegs);
     }
 
     const char *getPassName() const override {
@@ -582,7 +582,7 @@ bool ARMConstantIslands::BBHasFallthrough(MachineBasicBlock *MBB) {
     return false;
 
   MachineBasicBlock *NextBB = &*std::next(MBBI);
-  if (std::find(MBB->succ_begin(), MBB->succ_end(), NextBB) == MBB->succ_end())
+  if (!MBB->isSuccessor(NextBB))
     return false;
 
   // Try to analyze the end of the block. A potential fallthrough may already
@@ -684,7 +684,7 @@ initializeFunctionInfo(const std::vector<MachineInstr*> &CPEMIs) {
         case ARM::Bcc:
           isCond = true;
           UOpc = ARM::B;
-          // Fallthrough
+          LLVM_FALLTHROUGH;
         case ARM::B:
           Bits = 24;
           Scale = 4;
@@ -1432,7 +1432,7 @@ bool ARMConstantIslands::handleConstantPoolUser(unsigned CPUserIndex,
     // it.  Check for this so it will be removed from the WaterList.
     // Also remove any entry from NewWaterList.
     MachineBasicBlock *WaterBB = &*--NewMBB->getIterator();
-    IP = std::find(WaterList.begin(), WaterList.end(), WaterBB);
+    IP = find(WaterList, WaterBB);
     if (IP != WaterList.end())
       NewWaterList.erase(WaterBB);
 
@@ -2056,9 +2056,8 @@ bool ARMConstantIslands::optimizeThumb2JumpTables() {
         // record the TBB or TBH use.
         int CPEntryIdx = JumpTableEntryIndices[JTI];
         auto &CPEs = CPEntries[CPEntryIdx];
-        auto Entry = std::find_if(CPEs.begin(), CPEs.end(), [&](CPEntry &E) {
-          return E.CPEMI == User.CPEMI;
-        });
+        auto Entry =
+            find_if(CPEs, [&](CPEntry &E) { return E.CPEMI == User.CPEMI; });
         ++Entry->RefCount;
         CPUsers.emplace_back(CPUser(NewJTMI, User.CPEMI, 4, false, false));
       }

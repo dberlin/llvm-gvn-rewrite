@@ -83,7 +83,7 @@ static bool isOnlyUsedInEqualityComparison(Value *V, Value *With) {
 }
 
 static bool callHasFloatingPointArgument(const CallInst *CI) {
-  return std::any_of(CI->op_begin(), CI->op_end(), [](const Use &OI) {
+  return any_of(CI->operands(), [](const Use &OI) {
     return OI->getType()->isFloatingPointTy();
   });
 }
@@ -1052,9 +1052,11 @@ Value *LibCallSimplifier::optimizePow(CallInst *CI, IRBuilder<> &B) {
     if (CI->hasUnsafeAlgebra()) {
       IRBuilder<>::FastMathFlagGuard Guard(B);
       B.setFastMathFlags(CI->getFastMathFlags());
-      Value *Sqrt = Intrinsic::getDeclaration(CI->getModule(), Intrinsic::sqrt,
-                                              Op1->getType());
-      return B.CreateCall(Sqrt, Op1, "sqrt");
+
+      // Unlike other math intrinsics, sqrt has differerent semantics
+      // from the libc function. See LangRef for details.
+      return emitUnaryFloatFnCall(Op1, TLI->getName(LibFunc::sqrt), B,
+                                  Callee->getAttributes());
     }
 
     // Expand pow(x, 0.5) to (x == -infinity ? +infinity : fabs(sqrt(x))).

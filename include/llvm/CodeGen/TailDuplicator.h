@@ -33,7 +33,9 @@ class TailDuplicator {
   const MachineBranchProbabilityInfo *MBPI;
   const MachineModuleInfo *MMI;
   MachineRegisterInfo *MRI;
+  MachineFunction *MF;
   bool PreRegAlloc;
+  unsigned TailDupSize;
 
   // A list of virtual registers for which to update SSA form.
   SmallVector<unsigned, 16> SSAUpdateVRs;
@@ -45,16 +47,17 @@ class TailDuplicator {
   DenseMap<unsigned, AvailableValsTy> SSAUpdateVals;
 
 public:
-  void initMF(MachineFunction &MF, const MachineModuleInfo *MMI,
-              const MachineBranchProbabilityInfo *MBPI);
-  bool tailDuplicateBlocks(MachineFunction &MF);
+  /// Prepare to run on a specific machine function.
+  /// @param TailDupSize - Maxmimum size of blocks to tail-duplicate.
+  void initMF(MachineFunction &MF,
+              const MachineBranchProbabilityInfo *MBPI,
+              unsigned TailDupSize = 0);
+  bool tailDuplicateBlocks();
   static bool isSimpleBB(MachineBasicBlock *TailBB);
-  bool shouldTailDuplicate(const MachineFunction &MF, bool IsSimple,
-                           MachineBasicBlock &TailBB);
+  bool shouldTailDuplicate(bool IsSimple, MachineBasicBlock &TailBB);
   /// Returns true if TailBB can successfully be duplicated into PredBB
   bool canTailDuplicate(MachineBasicBlock *TailBB, MachineBasicBlock *PredBB);
-  bool tailDuplicateAndUpdate(MachineFunction &MF, bool IsSimple,
-                              MachineBasicBlock *MBB);
+  bool tailDuplicateAndUpdate(bool IsSimple, MachineBasicBlock *MBB);
 
 private:
   typedef TargetInstrInfo::RegSubRegPair RegSubRegPair;
@@ -67,7 +70,7 @@ private:
                   SmallVectorImpl<std::pair<unsigned, RegSubRegPair>> &Copies,
                   const DenseSet<unsigned> &UsedByPhi, bool Remove);
   void duplicateInstruction(MachineInstr *MI, MachineBasicBlock *TailBB,
-                            MachineBasicBlock *PredBB, MachineFunction &MF,
+                            MachineBasicBlock *PredBB,
                             DenseMap<unsigned, RegSubRegPair> &LocalVRMap,
                             const DenseSet<unsigned> &UsedByPhi);
   void updateSuccessorsPHIs(MachineBasicBlock *FromBB, bool isDead,
@@ -78,8 +81,7 @@ private:
                          SmallVectorImpl<MachineBasicBlock *> &TDBBs,
                          const DenseSet<unsigned> &RegsUsedByPhi,
                          SmallVectorImpl<MachineInstr *> &Copies);
-  bool tailDuplicate(MachineFunction &MF, bool IsSimple,
-                     MachineBasicBlock *TailBB,
+  bool tailDuplicate(bool IsSimple, MachineBasicBlock *TailBB,
                      SmallVectorImpl<MachineBasicBlock *> &TDBBs,
                      SmallVectorImpl<MachineInstr *> &Copies);
   void appendCopies(MachineBasicBlock *MBB,

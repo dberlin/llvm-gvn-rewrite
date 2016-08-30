@@ -82,8 +82,13 @@ static cl::opt<int> MinVectorRegSizeOption(
     "slp-min-reg-size", cl::init(128), cl::Hidden,
     cl::desc("Attempt to vectorize for this register size in bits"));
 
-// FIXME: Set this via cl::opt to allow overriding.
-static const unsigned RecursionMaxDepth = 12;
+static cl::opt<unsigned> RecursionMaxDepth(
+    "slp-recursion-max-depth", cl::init(12), cl::Hidden,
+    cl::desc("Limit the recursion depth when building a vectorizable tree"));
+
+static cl::opt<unsigned> MinTreeSize(
+    "slp-min-tree-size", cl::init(3), cl::Hidden,
+    cl::desc("Only vectorize small trees if they are fully vectorizable"));
 
 // Limit the number of alias checks. The limit is chosen so that
 // it has no negative effect on the llvm benchmarks.
@@ -387,6 +392,10 @@ public:
   ///
   /// \returns number of elements in vector if isomorphism exists, 0 otherwise.
   unsigned canMapToVector(Type *T, const DataLayout &DL) const;
+
+  /// \returns True if the VectorizableTree is both tiny and not fully
+  /// vectorizable. We do not vectorize such trees.
+  bool isTreeTinyAndNotFullyVectorizable();
 
 private:
   struct TreeEntry;
@@ -953,8 +962,7 @@ void BoUpSLP::buildTree(ArrayRef<Value *> Roots,
         }
 
         // Ignore users in the user ignore list.
-        if (std::find(UserIgnoreList.begin(), UserIgnoreList.end(), UserInst) !=
-            UserIgnoreList.end())
+        if (is_contained(UserIgnoreList, UserInst))
           continue;
 
         DEBUG(dbgs() << "SLP: Need to extract:" << *U << " from lane " <<
@@ -1803,6 +1811,27 @@ bool BoUpSLP::isFullyVectorizableTinyTree() {
   return true;
 }
 
+bool BoUpSLP::isTreeTinyAndNotFullyVectorizable() {
+
+  // We can vectorize the tree if its size is greater than or equal to the
+  // minimum size specified by the MinTreeSize command line option.
+  if (VectorizableTree.size() >= MinTreeSize)
+    return false;
+
+  // If we have a tiny tree (a tree whose size is less than MinTreeSize), we
+  // can vectorize it if we can prove it fully vectorizable.
+  if (isFullyVectorizableTinyTree())
+    return false;
+
+  assert(VectorizableTree.empty()
+             ? ExternalUses.empty()
+             : true && "We shouldn't have any external users");
+
+  // Otherwise, we can't vectorize the tree. It is both tiny and not fully
+  // vectorizable.
+  return true;
+}
+
 int BoUpSLP::getSpillCost() {
   // Walk from the bottom of the tree to the top, tracking which values are
   // live. When we see a call instruction that is not part of our tree,
@@ -1869,14 +1898,6 @@ int BoUpSLP::getTreeCost() {
   int Cost = 0;
   DEBUG(dbgs() << "SLP: Calculating cost for tree of size " <<
         VectorizableTree.size() << ".\n");
-
-  // We only vectorize tiny trees if it is fully vectorizable.
-  if (VectorizableTree.size() < 3 && !isFullyVectorizableTinyTree()) {
-    if (VectorizableTree.empty()) {
-      assert(!ExternalUses.size() && "We should not have any external users");
-    }
-    return INT_MAX;
-  }
 
   unsigned BundleWidth = VectorizableTree[0].Scalars.size();
 
@@ -2153,11 +2174,61 @@ void BoUpSLP::reorderInputsAccordingToOpcode(ArrayRef<Value *> VL,
 }
 
 void BoUpSLP::setInsertPointAfterBundle(ArrayRef<Value *> VL) {
-  Instruction *VL0 = cast<Instruction>(VL[0]);
-  BasicBlock::iterator NextInst(VL0);
-  ++NextInst;
-  Builder.SetInsertPoint(VL0->getParent(), NextInst);
-  Builder.SetCurrentDebugLocation(VL0->getDebugLoc());
+
+  // Get the basic block this bundle is in. All instructions in the bundle
+  // should be in this block.
+  auto *Front = cast<Instruction>(VL.front());
+  auto *BB = Front->getParent();
+  assert(all_of(make_range(VL.begin(), VL.end()), [&](Value *V) -> bool {
+    return cast<Instruction>(V)->getParent() == BB;
+  }));
+
+  // The last instruction in the bundle in program order.
+  Instruction *LastInst = nullptr;
+
+  // Find the last instruction. The common case should be that BB has been
+  // scheduled, and the last instruction is VL.back(). So we start with
+  // VL.back() and iterate over schedule data until we reach the end of the
+  // bundle. The end of the bundle is marked by null ScheduleData.
+  if (BlocksSchedules.count(BB)) {
+    auto *Bundle = BlocksSchedules[BB]->getScheduleData(VL.back());
+    if (Bundle && Bundle->isPartOfBundle())
+      for (; Bundle; Bundle = Bundle->NextInBundle)
+        LastInst = Bundle->Inst;
+  }
+
+  // LastInst can still be null at this point if there's either not an entry
+  // for BB in BlocksSchedules or there's no ScheduleData available for
+  // VL.back(). This can be the case if buildTree_rec aborts for various
+  // reasons (e.g., the maximum recursion depth is reached, the maximum region
+  // size is reached, etc.). ScheduleData is initialized in the scheduling
+  // "dry-run".
+  //
+  // If this happens, we can still find the last instruction by brute force. We
+  // iterate forwards from Front (inclusive) until we either see all
+  // instructions in the bundle or reach the end of the block. If Front is the
+  // last instruction in program order, LastInst will be set to Front, and we
+  // will visit all the remaining instructions in the block.
+  //
+  // One of the reasons we exit early from buildTree_rec is to place an upper
+  // bound on compile-time. Thus, taking an additional compile-time hit here is
+  // not ideal. However, this should be exceedingly rare since it requires that
+  // we both exit early from buildTree_rec and that the bundle be out-of-order
+  // (causing us to iterate all the way to the end of the block).
+  if (!LastInst) {
+    SmallPtrSet<Value *, 16> Bundle(VL.begin(), VL.end());
+    for (auto &I : make_range(BasicBlock::iterator(Front), BB->end())) {
+      if (Bundle.erase(&I))
+        LastInst = &I;
+      if (Bundle.empty())
+        break;
+    }
+  }
+
+  // Set the insertion point after the last instruction in the bundle. Set the
+  // debug location to Front.
+  Builder.SetInsertPoint(BB, next(BasicBlock::iterator(LastInst)));
+  Builder.SetCurrentDebugLocation(Front->getDebugLoc());
 }
 
 Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
@@ -2235,7 +2306,9 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
 
   if (E->NeedToGather) {
     setInsertPointAfterBundle(E->Scalars);
-    return Gather(E->Scalars, VecTy);
+    auto *V = Gather(E->Scalars, VecTy);
+    E->VectorizedValue = V;
+    return V;
   }
 
   unsigned Opcode = getSameOpcode(E->Scalars);
@@ -2282,7 +2355,10 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
         E->VectorizedValue = V;
         return V;
       }
-      return Gather(E->Scalars, VecTy);
+      setInsertPointAfterBundle(E->Scalars);
+      auto *V = Gather(E->Scalars, VecTy);
+      E->VectorizedValue = V;
+      return V;
     }
     case Instruction::ExtractValue: {
       if (canReuseExtract(E->Scalars, Instruction::ExtractValue)) {
@@ -2294,7 +2370,10 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
         E->VectorizedValue = V;
         return propagateMetadata(V, E->Scalars);
       }
-      return Gather(E->Scalars, VecTy);
+      setInsertPointAfterBundle(E->Scalars);
+      auto *V = Gather(E->Scalars, VecTy);
+      E->VectorizedValue = V;
+      return V;
     }
     case Instruction::ZExt:
     case Instruction::SExt:
@@ -2650,8 +2729,7 @@ Value *BoUpSLP::vectorizeTree() {
 
     // Skip users that we already RAUW. This happens when one instruction
     // has multiple uses of the same value.
-    if (std::find(Scalar->user_begin(), Scalar->user_end(), User) ==
-        Scalar->user_end())
+    if (!is_contained(Scalar->users(), User))
       continue;
     assert(ScalarToTreeEntry.count(Scalar) && "Invalid scalar");
 
@@ -2725,8 +2803,7 @@ Value *BoUpSLP::vectorizeTree() {
 
           assert((ScalarToTreeEntry.count(U) ||
                   // It is legal to replace users in the ignorelist by undef.
-                  (std::find(UserIgnoreList.begin(), UserIgnoreList.end(), U) !=
-                   UserIgnoreList.end())) &&
+                  is_contained(UserIgnoreList, U)) &&
                  "Replacing out-of-tree value with undef");
         }
 #endif
@@ -2819,7 +2896,7 @@ void BoUpSLP::optimizeGatherSequence() {
         }
       }
       if (In) {
-        assert(std::find(Visited.begin(), Visited.end(), In) == Visited.end());
+        assert(!is_contained(Visited, In));
         Visited.push_back(In);
       }
     }
@@ -3638,6 +3715,9 @@ bool SLPVectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain,
     ArrayRef<Value *> Operands = Chain.slice(i, VF);
 
     R.buildTree(Operands);
+    if (R.isTreeTinyAndNotFullyVectorizable())
+      continue;
+
     R.computeMinimumValueSizes();
 
     int Cost = R.getTreeCost();
@@ -3838,6 +3918,9 @@ bool SLPVectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
       Value *ReorderedOps[] = { Ops[1], Ops[0] };
       R.buildTree(ReorderedOps, None);
     }
+    if (R.isTreeTinyAndNotFullyVectorizable())
+      continue;
+
     R.computeMinimumValueSizes();
     int Cost = R.getTreeCost();
 
@@ -4000,8 +4083,7 @@ public:
 
   /// \brief Try to find a reduction tree.
   bool matchAssociativeReduction(PHINode *Phi, BinaryOperator *B) {
-    assert((!Phi ||
-            std::find(Phi->op_begin(), Phi->op_end(), B) != Phi->op_end()) &&
+    assert((!Phi || is_contained(Phi->operands(), B)) &&
            "Thi phi needs to use the binary operator");
 
     // We could have a initial reductions that is not an add.
@@ -4115,7 +4197,10 @@ public:
       if (V.shouldReorder()) {
         SmallVector<Value *, 8> Reversed(VL.rbegin(), VL.rend());
         V.buildTree(Reversed, ReductionOps);
-      }      
+      }
+      if (V.isTreeTinyAndNotFullyVectorizable())
+        continue;
+
       V.computeMinimumValueSizes();
 
       // Estimate cost.

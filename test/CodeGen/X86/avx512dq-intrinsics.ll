@@ -490,21 +490,13 @@ define i8 @test_int_x86_avx512_mask_fpclass_sd(<2 x double> %x0, i8 %x1) {
 ; CHECK-NEXT:    andl $1, %edi
 ; CHECK-NEXT:    kmovw %edi, %k1
 ; CHECK-NEXT:    vfpclasssd $2, %xmm0, %k0 {%k1}
-; CHECK-NEXT:    kmovw %k0, %eax
-; CHECK-NEXT:    testb %al, %al
-; CHECK-NEXT:    je LBB28_2
-; CHECK-NEXT:  ## BB#1:
-; CHECK-NEXT:    movb $-1, %al
-; CHECK-NEXT:  LBB28_2:
-; CHECK-NEXT:    vfpclasssd $4, %xmm0, %k0
 ; CHECK-NEXT:    kmovw %k0, %ecx
-; CHECK-NEXT:    testb %cl, %cl
-; CHECK-NEXT:    je LBB28_4
-; CHECK-NEXT:  ## BB#3:
-; CHECK-NEXT:    movb $-1, %cl
-; CHECK-NEXT:  LBB28_4:
+; CHECK-NEXT:    andl $1, %ecx
+; CHECK-NEXT:    vfpclasssd $4, %xmm0, %k0
+; CHECK-NEXT:    kmovw %k0, %eax
+; CHECK-NEXT:    andl $1, %eax
 ; CHECK-NEXT:    addb %cl, %al
-; CHECK-NEXT:    ## kill: %AL<def> %AL<kill> %AX<kill>
+; CHECK-NEXT:    ## kill: %AL<def> %AL<kill> %EAX<kill>
 ; CHECK-NEXT:    retq
   %res = call i8 @llvm.x86.avx512.mask.fpclass.sd(<2 x double> %x0, i32 2, i8 %x1)
   %res1 = call i8 @llvm.x86.avx512.mask.fpclass.sd(<2 x double> %x0, i32 4, i8 -1)
@@ -520,21 +512,13 @@ define i8 @test_int_x86_avx512_mask_fpclass_ss(<4 x float> %x0, i8 %x1) {
 ; CHECK-NEXT:    andl $1, %edi
 ; CHECK-NEXT:    kmovw %edi, %k1
 ; CHECK-NEXT:    vfpclassss $4, %xmm0, %k0 {%k1}
-; CHECK-NEXT:    kmovw %k0, %eax
-; CHECK-NEXT:    testb %al, %al
-; CHECK-NEXT:    je LBB29_2
-; CHECK-NEXT:  ## BB#1:
-; CHECK-NEXT:    movb $-1, %al
-; CHECK-NEXT:  LBB29_2:
-; CHECK-NEXT:    vfpclassss $4, %xmm0, %k0
 ; CHECK-NEXT:    kmovw %k0, %ecx
-; CHECK-NEXT:    testb %cl, %cl
-; CHECK-NEXT:    je LBB29_4
-; CHECK-NEXT:  ## BB#3:
-; CHECK-NEXT:    movb $-1, %cl
-; CHECK-NEXT:  LBB29_4:
+; CHECK-NEXT:    andl $1, %ecx
+; CHECK-NEXT:    vfpclassss $4, %xmm0, %k0
+; CHECK-NEXT:    kmovw %k0, %eax
+; CHECK-NEXT:    andl $1, %eax
 ; CHECK-NEXT:    addb %cl, %al
-; CHECK-NEXT:    ## kill: %AL<def> %AL<kill> %AX<kill>
+; CHECK-NEXT:    ## kill: %AL<def> %AL<kill> %EAX<kill>
 ; CHECK-NEXT:    retq
   %res = call i8 @llvm.x86.avx512.mask.fpclass.ss(<4 x float> %x0, i32 4, i8 %x1)
   %res1 = call i8 @llvm.x86.avx512.mask.fpclass.ss(<4 x float> %x0, i32 4, i8 -1)

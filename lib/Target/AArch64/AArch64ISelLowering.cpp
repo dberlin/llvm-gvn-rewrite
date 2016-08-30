@@ -1179,7 +1179,8 @@ static void changeVectorFPCCToAArch64CC(ISD::CondCode CC,
     changeFPCCToAArch64CC(CC, CondCode, CondCode2);
     break;
   case ISD::SETUO:
-    Invert = true; // Fallthrough
+    Invert = true;
+    LLVM_FALLTHROUGH;
   case ISD::SETO:
     CondCode = AArch64CC::MI;
     CondCode2 = AArch64CC::GE;
@@ -2432,6 +2433,12 @@ CCAssignFn *AArch64TargetLowering::CCAssignFnForCall(CallingConv::ID CC,
       return CC_AArch64_AAPCS;
     return IsVarArg ? CC_AArch64_DarwinPCS_VarArg : CC_AArch64_DarwinPCS;
   }
+}
+
+CCAssignFn *
+AArch64TargetLowering::CCAssignFnForReturn(CallingConv::ID CC) const {
+  return CC == CallingConv::WebKit_JS ? RetCC_AArch64_WebKit_JS
+                                      : RetCC_AArch64_AAPCS;
 }
 
 SDValue AArch64TargetLowering::LowerFormalArguments(
@@ -4970,7 +4977,7 @@ SDValue AArch64TargetLowering::ReconstructShuffle(SDValue Op,
 
     // Add this element source to the list if it's not already there.
     SDValue SourceVec = V.getOperand(0);
-    auto Source = std::find(Sources.begin(), Sources.end(), SourceVec);
+    auto Source = find(Sources, SourceVec);
     if (Source == Sources.end())
       Source = Sources.insert(Sources.end(), ShuffleSourceInfo(SourceVec));
 
@@ -5086,7 +5093,7 @@ SDValue AArch64TargetLowering::ReconstructShuffle(SDValue Op,
     if (Entry.isUndef())
       continue;
 
-    auto Src = std::find(Sources.begin(), Sources.end(), Entry.getOperand(0));
+    auto Src = find(Sources, Entry.getOperand(0));
     int EltNo = cast<ConstantSDNode>(Entry.getOperand(1))->getSExtValue();
 
     // EXTRACT_VECTOR_ELT performs an implicit any_ext; BUILD_VECTOR an implicit
@@ -5156,8 +5163,7 @@ static bool isSingletonEXTMask(ArrayRef<int> M, EVT VT, unsigned &Imm) {
 static bool isEXTMask(ArrayRef<int> M, EVT VT, bool &ReverseEXT,
                       unsigned &Imm) {
   // Look for the first non-undef element.
-  const int *FirstRealElt = std::find_if(M.begin(), M.end(),
-      [](int Elt) {return Elt >= 0;});
+  const int *FirstRealElt = find_if(M, [](int Elt) { return Elt >= 0; });
 
   // Benefit form APInt to handle overflow when calculating expected element.
   unsigned NumElts = VT.getVectorNumElements();
@@ -6715,8 +6721,8 @@ static SDValue EmitVectorComparison(SDValue LHS, SDValue RHS,
     case AArch64CC::LT:
       if (!NoNans)
         return SDValue();
-    // If we ignore NaNs then we can use to the MI implementation.
-    // Fallthrough.
+      // If we ignore NaNs then we can use to the MI implementation.
+      LLVM_FALLTHROUGH;
     case AArch64CC::MI:
       if (IsZero)
         return DAG.getNode(AArch64ISD::FCMLTz, dl, VT, LHS);
@@ -7051,7 +7057,7 @@ bool AArch64TargetLowering::isExtFreeImpl(const Instruction *Ext) const {
       // trunc(sext ty1 to ty2) to ty1.
       if (Instr->getType() == Ext->getOperand(0)->getType())
         continue;
-    // FALL THROUGH.
+      LLVM_FALLTHROUGH;
     default:
       return false;
     }

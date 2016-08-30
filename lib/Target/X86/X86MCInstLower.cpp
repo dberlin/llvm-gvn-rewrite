@@ -979,8 +979,7 @@ void X86AsmPrinter::LowerPATCHPOINT(const MachineInstr &MI,
   PatchPointOpers opers(&MI);
   unsigned ScratchIdx = opers.getNextScratchIdx();
   unsigned EncodedBytes = 0;
-  const MachineOperand &CalleeMO =
-    opers.getMetaOper(PatchPointOpers::TargetPos);
+  const MachineOperand &CalleeMO = opers.getCallTarget();
 
   // Check for null target. If target is non-null (i.e. is non-zero or is
   // symbolic) then emit a call.
@@ -1016,7 +1015,7 @@ void X86AsmPrinter::LowerPATCHPOINT(const MachineInstr &MI,
   }
 
   // Emit padding.
-  unsigned NumBytes = opers.getMetaOper(PatchPointOpers::NBytesPos).getImm();
+  unsigned NumBytes = opers.getNumPatchBytes();
   assert(NumBytes >= EncodedBytes &&
          "Patchpoint can't request size less than the length of a call.");
 
@@ -1109,7 +1108,19 @@ void X86AsmPrinter::EmitXRayTable() {
       Section = OutContext.getELFSection("xray_instr_map", ELF::SHT_PROGBITS,
                                          ELF::SHF_ALLOC);
     }
+
+    // Before we switch over, we force a reference to a label inside the
+    // xray_instr_map section. Since EmitXRayTable() is always called just
+    // before the function's end, we assume that this is happening after the
+    // last return instruction.
+    //
+    // We then align the reference to 16 byte boundaries, which we determined
+    // experimentally to be beneficial to avoid causing decoder stalls.
+    MCSymbol *Tmp = OutContext.createTempSymbol("xray_synthetic_", true);
+    OutStreamer->EmitCodeAlignment(16);
+    OutStreamer->EmitSymbolValue(Tmp, 8, false);
     OutStreamer->SwitchSection(Section);
+    OutStreamer->EmitLabel(Tmp);
     for (const auto &Sled : Sleds) {
       OutStreamer->EmitSymbolValue(Sled.Sled, 8);
       OutStreamer->EmitSymbolValue(CurrentFnSym, 8);

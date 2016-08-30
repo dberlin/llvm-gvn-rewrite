@@ -25,7 +25,7 @@ foreach (VARNAME ${variables_to_filter})
 endforeach()
 
 # Enable the coverage instrumentation (it is disabled for the Fuzzer lib).
-set(CMAKE_CXX_FLAGS "${LIBFUZZER_FLAGS_BASE} -fsanitize-coverage=edge,indirect-calls")
+set(CMAKE_CXX_FLAGS "${LIBFUZZER_FLAGS_BASE} -fsanitize-coverage=edge,indirect-calls -g")
 
 # add_libfuzzer_test(<name>
 #   SOURCES source0.cpp [source1.cpp ...]
@@ -81,12 +81,16 @@ set(Tests
   OneHugeAllocTest
   OutOfMemoryTest
   RepeatedMemcmp
+  RepeatedBytesTest
   SimpleCmpTest
   SimpleDictionaryTest
   SimpleFnAdapterTest
   SimpleHashTest
   SimpleTest
   SimpleThreadedTest
+  SingleMemcmpTest
+  SingleStrcmpTest
+  SingleStrncmpTest
   SpamyTest
   StrcmpTest
   StrncmpTest

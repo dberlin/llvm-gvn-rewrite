@@ -81,19 +81,7 @@ template<> struct FoldingSetTrait<SDVTListNode> : DefaultFoldingSetTrait<SDVTLis
   }
 };
 
-template<> struct ilist_traits<SDNode> : public ilist_default_traits<SDNode> {
-private:
-  mutable ilist_half_node<SDNode> Sentinel;
-public:
-  SDNode *createSentinel() const {
-    return static_cast<SDNode*>(&Sentinel);
-  }
-  static void destroySentinel(SDNode *) {}
-
-  SDNode *provideInitialHead() const { return createSentinel(); }
-  SDNode *ensureHead(SDNode*) const { return createSentinel(); }
-  static void noteHead(SDNode*, SDNode*) {}
-
+template <> struct ilist_traits<SDNode> : public ilist_default_traits<SDNode> {
   static void deleteNode(SDNode *) {
     llvm_unreachable("ilist_traits<SDNode> shouldn't see a deleteNode call!");
   }
@@ -282,6 +270,22 @@ private:
   SDNodeT *newSDNode(ArgTypes &&... Args) {
     return new (NodeAllocator.template Allocate<SDNodeT>())
         SDNodeT(std::forward<ArgTypes>(Args)...);
+  }
+
+  /// Build a synthetic SDNodeT with the given args and extract its subclass
+  /// data as an integer (e.g. for use in a folding set).
+  ///
+  /// The args to this function are the same as the args to SDNodeT's
+  /// constructor, except the second arg (assumed to be a const DebugLoc&) is
+  /// omitted.
+  template <typename SDNodeT, typename... ArgTypes>
+  static uint16_t getSyntheticNodeSubclassData(unsigned IROrder,
+                                               ArgTypes &&... Args) {
+    // The compiler can reduce this expression to a constant iff we pass an
+    // empty DebugLoc.  Thankfully, the debug location doesn't have any bearing
+    // on the subclass data.
+    return SDNodeT(IROrder, DebugLoc(), std::forward<ArgTypes>(Args)...)
+        .getRawSubclassData();
   }
 
   void createOperands(SDNode *Node, ArrayRef<SDValue> Vals) {
@@ -1424,12 +1428,12 @@ private:
 };
 
 template <> struct GraphTraits<SelectionDAG*> : public GraphTraits<SDNode*> {
-  typedef SelectionDAG::allnodes_iterator nodes_iterator;
+  typedef pointer_iterator<SelectionDAG::allnodes_iterator> nodes_iterator;
   static nodes_iterator nodes_begin(SelectionDAG *G) {
-    return G->allnodes_begin();
+    return nodes_iterator(G->allnodes_begin());
   }
   static nodes_iterator nodes_end(SelectionDAG *G) {
-    return G->allnodes_end();
+    return nodes_iterator(G->allnodes_end());
   }
 };
 

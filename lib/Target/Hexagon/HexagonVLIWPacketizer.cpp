@@ -22,7 +22,6 @@
 #include "HexagonVLIWPacketizer.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/CodeGen/MachineDominators.h"
-#include "llvm/CodeGen/MachineFunctionAnalysis.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
@@ -81,7 +80,7 @@ namespace {
     bool runOnMachineFunction(MachineFunction &Fn) override;
     MachineFunctionProperties getRequiredProperties() const override {
       return MachineFunctionProperties().set(
-          MachineFunctionProperties::Property::AllVRegsAllocated);
+          MachineFunctionProperties::Property::NoVRegs);
     }
 
   private:
@@ -283,11 +282,18 @@ bool HexagonPacketizerList::isCallDependent(const MachineInstr &MI,
 
   // Assumes that the first operand of the CALLr is the function address.
   if (HII->isIndirectCall(MI) && (DepType == SDep::Data)) {
-    MachineOperand MO = MI.getOperand(0);
+    const MachineOperand MO = MI.getOperand(0);
     if (MO.isReg() && MO.isUse() && (MO.getReg() == DepReg))
       return true;
   }
 
+  if (HII->isJumpR(MI)) {
+    const MachineOperand &MO = HII->isPredicated(MI) ? MI.getOperand(1)
+                                                     : MI.getOperand(0);
+    assert(MO.isReg() && MO.isUse());
+    if (MO.getReg() == DepReg)
+      return true;
+  }
   return false;
 }
 
@@ -323,7 +329,6 @@ static bool doesModifyCalleeSavedReg(const MachineInstr &MI,
   return false;
 }
 
-// TODO: MI->isIndirectBranch() and IsRegisterJump(MI)
 // Returns true if an instruction can be promoted to .new predicate or
 // new-value store.
 bool HexagonPacketizerList::isNewifiable(const MachineInstr &MI,
@@ -333,7 +338,8 @@ bool HexagonPacketizerList::isNewifiable(const MachineInstr &MI,
   if (NewRC == &Hexagon::PredRegsRegClass)
     if (HII->isV60VectorInstruction(MI) && MI.mayStore())
       return false;
-  return HII->isCondInst(MI) || MI.isReturn() || HII->mayBeNewStore(MI);
+  return HII->isCondInst(MI) || HII->isJumpR(MI) || MI.isReturn() ||
+         HII->mayBeNewStore(MI);
 }
 
 // Promote an instructiont to its .cur form.
@@ -798,10 +804,8 @@ bool HexagonPacketizerList::canPromoteToDotNew(const MachineInstr &MI,
     return false;
 
   // predicate .new
-  // bug 5670: until that is fixed
-  // TODO: MI->isIndirectBranch() and IsRegisterJump(MI)
   if (RC == &Hexagon::PredRegsRegClass)
-    if (HII->isCondInst(MI) || MI.isReturn())
+    if (HII->isCondInst(MI) || HII->isJumpR(MI) || MI.isReturn())
       return HII->predCanBeUsedAsDotNew(PI, DepReg);
 
   if (RC != &Hexagon::PredRegsRegClass && !HII->mayBeNewStore(MI))
@@ -1033,6 +1037,24 @@ static bool cannotCoexistAsymm(const MachineInstr &MI, const MachineInstr &MJ,
   if (MI.isInlineAsm())
     return MJ.isInlineAsm() || MJ.isBranch() || MJ.isBarrier() ||
            MJ.isCall() || MJ.isTerminator();
+
+  switch (MI.getOpcode()) {
+  case (Hexagon::S2_storew_locked):
+  case (Hexagon::S4_stored_locked):
+  case (Hexagon::L2_loadw_locked):
+  case (Hexagon::L4_loadd_locked):
+  case (Hexagon::Y4_l2fetch): {
+    // These instructions can only be grouped with ALU32 or non-floating-point
+    // XTYPE instructions.  Since there is no convenient way of identifying fp
+    // XTYPE instructions, only allow grouping with ALU32 for now.
+    unsigned TJ = HII.getType(MJ);
+    if (TJ != HexagonII::TypeALU32)
+      return true;
+    break;
+  }
+  default:
+    break;
+  }
 
   // "False" really means that the quick check failed to determine if
   // I and J cannot coexist.
@@ -1278,12 +1300,6 @@ bool HexagonPacketizerList::isLegalToPacketizeTogether(SUnit *SUI, SUnit *SUJ) {
     // dealloc return unless we have dependencies on the explicit uses
     // of the registers used by jumpr (like r31) or dealloc return
     // (like r29 or r30).
-    //
-    // TODO: Currently, jumpr is handling only return of r31. So, the
-    // following logic (specificaly isCallDependent) is working fine.
-    // We need to enable jumpr for register other than r31 and then,
-    // we need to rework the last part, where it handles indirect call
-    // of that (isCallDependent) function. Bug 6216 is opened for this.
     unsigned DepReg = 0;
     const TargetRegisterClass *RC = nullptr;
     if (DepType == SDep::Data) {
@@ -1291,7 +1307,7 @@ bool HexagonPacketizerList::isLegalToPacketizeTogether(SUnit *SUI, SUnit *SUJ) {
       RC = HRI->getMinimalPhysRegClass(DepReg);
     }
 
-    if (I.isCall() || I.isReturn() || HII->isTailCall(I)) {
+    if (I.isCall() || HII->isJumpR(I) || I.isReturn() || HII->isTailCall(I)) {
       if (!isRegDependence(DepType))
         continue;
       if (!isCallDependent(I, DepType, SUJ->Succs[i].getReg()))
@@ -1338,7 +1354,7 @@ bool HexagonPacketizerList::isLegalToPacketizeTogether(SUnit *SUI, SUnit *SUJ) {
       // However, there is no dependence edge between (1)->(3). This results
       // in all 3 instructions going in the same packet. We ignore dependce
       // only once to avoid this situation.
-      auto Itr = std::find(IgnoreDepMIs.begin(), IgnoreDepMIs.end(), &J);
+      auto Itr = find(IgnoreDepMIs, &J);
       if (Itr != IgnoreDepMIs.end()) {
         Dependence = true;
         return false;

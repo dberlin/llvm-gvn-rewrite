@@ -41,22 +41,11 @@ typedef unsigned LaneBitmask;
 template <>
 struct ilist_traits<MachineInstr> : public ilist_default_traits<MachineInstr> {
 private:
-  mutable ilist_half_node<MachineInstr> Sentinel;
-
   // this is only set by the MachineBasicBlock owning the LiveList
   friend class MachineBasicBlock;
   MachineBasicBlock* Parent;
 
 public:
-  MachineInstr *createSentinel() const {
-    return static_cast<MachineInstr*>(&Sentinel);
-  }
-  void destroySentinel(MachineInstr *) const {}
-
-  MachineInstr *provideInitialHead() const { return createSentinel(); }
-  MachineInstr *ensureHead(MachineInstr*) const { return createSentinel(); }
-  static void noteHead(MachineInstr*, MachineInstr*) {}
-
   void addNodeToList(MachineInstr* N);
   void removeNodeFromList(MachineInstr* N);
   void transferNodesFromList(ilist_traits &SrcTraits,
@@ -739,31 +728,25 @@ struct MBB2NumberFunctor :
 //
 
 template <> struct GraphTraits<MachineBasicBlock *> {
-  typedef MachineBasicBlock NodeType;
   typedef MachineBasicBlock *NodeRef;
   typedef MachineBasicBlock::succ_iterator ChildIteratorType;
 
-  static NodeType *getEntryNode(MachineBasicBlock *BB) { return BB; }
-  static inline ChildIteratorType child_begin(NodeType *N) {
+  static NodeRef getEntryNode(MachineBasicBlock *BB) { return BB; }
+  static inline ChildIteratorType child_begin(NodeRef N) {
     return N->succ_begin();
   }
-  static inline ChildIteratorType child_end(NodeType *N) {
-    return N->succ_end();
-  }
+  static inline ChildIteratorType child_end(NodeRef N) { return N->succ_end(); }
 };
 
 template <> struct GraphTraits<const MachineBasicBlock *> {
-  typedef const MachineBasicBlock NodeType;
   typedef const MachineBasicBlock *NodeRef;
   typedef MachineBasicBlock::const_succ_iterator ChildIteratorType;
 
-  static NodeType *getEntryNode(const MachineBasicBlock *BB) { return BB; }
-  static inline ChildIteratorType child_begin(NodeType *N) {
+  static NodeRef getEntryNode(const MachineBasicBlock *BB) { return BB; }
+  static inline ChildIteratorType child_begin(NodeRef N) {
     return N->succ_begin();
   }
-  static inline ChildIteratorType child_end(NodeType *N) {
-    return N->succ_end();
-  }
+  static inline ChildIteratorType child_end(NodeRef N) { return N->succ_end(); }
 };
 
 // Provide specializations of GraphTraits to be able to treat a
@@ -773,33 +756,27 @@ template <> struct GraphTraits<const MachineBasicBlock *> {
 // instead of the successor edges.
 //
 template <> struct GraphTraits<Inverse<MachineBasicBlock*> > {
-  typedef MachineBasicBlock NodeType;
   typedef MachineBasicBlock *NodeRef;
   typedef MachineBasicBlock::pred_iterator ChildIteratorType;
-  static NodeType *getEntryNode(Inverse<MachineBasicBlock *> G) {
+  static NodeRef getEntryNode(Inverse<MachineBasicBlock *> G) {
     return G.Graph;
   }
-  static inline ChildIteratorType child_begin(NodeType *N) {
+  static inline ChildIteratorType child_begin(NodeRef N) {
     return N->pred_begin();
   }
-  static inline ChildIteratorType child_end(NodeType *N) {
-    return N->pred_end();
-  }
+  static inline ChildIteratorType child_end(NodeRef N) { return N->pred_end(); }
 };
 
 template <> struct GraphTraits<Inverse<const MachineBasicBlock*> > {
-  typedef const MachineBasicBlock NodeType;
   typedef const MachineBasicBlock *NodeRef;
   typedef MachineBasicBlock::const_pred_iterator ChildIteratorType;
-  static NodeType *getEntryNode(Inverse<const MachineBasicBlock*> G) {
+  static NodeRef getEntryNode(Inverse<const MachineBasicBlock *> G) {
     return G.Graph;
   }
-  static inline ChildIteratorType child_begin(NodeType *N) {
+  static inline ChildIteratorType child_begin(NodeRef N) {
     return N->pred_begin();
   }
-  static inline ChildIteratorType child_end(NodeType *N) {
-    return N->pred_end();
-  }
+  static inline ChildIteratorType child_end(NodeRef N) { return N->pred_end(); }
 };
 
 

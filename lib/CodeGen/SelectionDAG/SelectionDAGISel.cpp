@@ -3388,7 +3388,7 @@ void SelectionDAGISel::SelectCodeCommon(SDNode *NodeToMatch,
         SelectionDAG::DAGNodeDeletedListener NDL(*CurDAG, [&](SDNode *N,
                                                               SDNode *E) {
           auto &Chain = ChainNodesMatched;
-          assert((!E || llvm::find(Chain, N) == Chain.end()) &&
+          assert((!E || !is_contained(Chain, N)) &&
                  "Chain node replaced during MorphNode");
           Chain.erase(std::remove(Chain.begin(), Chain.end(), N), Chain.end());
         });
@@ -3579,7 +3579,7 @@ void SelectionDAGISel::CannotYetSelect(SDNode *N) {
     unsigned iid =
       cast<ConstantSDNode>(N->getOperand(HasInputChain))->getZExtValue();
     if (iid < Intrinsic::num_intrinsics)
-      Msg << "intrinsic %" << Intrinsic::getName((Intrinsic::ID)iid);
+      Msg << "intrinsic %" << Intrinsic::getName((Intrinsic::ID)iid, None);
     else if (const TargetIntrinsicInfo *TII = TM.getIntrinsicInfo())
       Msg << "target intrinsic %" << TII->getName(iid);
     else

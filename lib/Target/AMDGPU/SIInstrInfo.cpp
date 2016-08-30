@@ -904,12 +904,10 @@ bool SIInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
   }
 
   case AMDGPU::SI_PC_ADD_REL_OFFSET: {
-    const SIRegisterInfo *TRI
-      = static_cast<const SIRegisterInfo *>(ST.getRegisterInfo());
     MachineFunction &MF = *MBB.getParent();
     unsigned Reg = MI.getOperand(0).getReg();
-    unsigned RegLo = TRI->getSubReg(Reg, AMDGPU::sub0);
-    unsigned RegHi = TRI->getSubReg(Reg, AMDGPU::sub1);
+    unsigned RegLo = RI.getSubReg(Reg, AMDGPU::sub0);
+    unsigned RegHi = RI.getSubReg(Reg, AMDGPU::sub1);
 
     // Create a bundle so these instructions won't be re-ordered by the
     // post-RA scheduler.
@@ -1517,6 +1515,24 @@ bool SIInstrInfo::isLiteralConstant(const MachineOperand &MO,
   return MO.isImm() && !isInlineConstant(MO, OpSize);
 }
 
+bool SIInstrInfo::isLiteralConstantLike(const MachineOperand &MO,
+                                        unsigned OpSize) const {
+  switch (MO.getType()) {
+  case MachineOperand::MO_Register:
+    return false;
+  case MachineOperand::MO_Immediate:
+    return !isInlineConstant(MO, OpSize);
+  case MachineOperand::MO_FrameIndex:
+  case MachineOperand::MO_MachineBasicBlock:
+  case MachineOperand::MO_ExternalSymbol:
+  case MachineOperand::MO_GlobalAddress:
+  case MachineOperand::MO_MCSymbol:
+    return true;
+  default:
+    llvm_unreachable("unexpected operand type");
+  }
+}
+
 static bool compareMachineOp(const MachineOperand &Op0,
                              const MachineOperand &Op1) {
   if (Op0.getType() != Op1.getType())
@@ -1705,7 +1721,7 @@ bool SIInstrInfo::verifyInstruction(const MachineInstr &MI,
         ErrInfo = "Expected immediate, but got non-immediate";
         return false;
       }
-      // Fall-through
+      LLVM_FALLTHROUGH;
     default:
       continue;
     }
@@ -3160,14 +3176,14 @@ unsigned SIInstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
     if (Src0Idx == -1)
       return 4; // No operands.
 
-    if (isLiteralConstant(MI.getOperand(Src0Idx), getOpSize(MI, Src0Idx)))
+    if (isLiteralConstantLike(MI.getOperand(Src0Idx), getOpSize(MI, Src0Idx)))
       return 8;
 
     int Src1Idx = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::src1);
     if (Src1Idx == -1)
       return 4;
 
-    if (isLiteralConstant(MI.getOperand(Src1Idx), getOpSize(MI, Src1Idx)))
+    if (isLiteralConstantLike(MI.getOperand(Src1Idx), getOpSize(MI, Src1Idx)))
       return 8;
 
     return 4;

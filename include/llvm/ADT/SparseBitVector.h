@@ -55,8 +55,6 @@ private:
   // Index of Element in terms of where first bit starts.
   unsigned ElementIndex;
   BitWord Bits[BITWORDS_PER_ELEMENT];
-  // Needed for sentinels
-  friend struct ilist_sentinel_traits<SparseBitVectorElement>;
   SparseBitVectorElement() {
     ElementIndex = ~0U;
     memset(&Bits[0], 0, sizeof (BitWord) * BITWORDS_PER_ELEMENT);
@@ -242,22 +240,6 @@ public:
     }
     BecameZero = allzero;
   }
-};
-
-template <unsigned ElementSize>
-struct ilist_traits<SparseBitVectorElement<ElementSize> >
-  : public ilist_default_traits<SparseBitVectorElement<ElementSize> > {
-  typedef SparseBitVectorElement<ElementSize> Element;
-
-  Element *createSentinel() const { return static_cast<Element *>(&Sentinel); }
-  static void destroySentinel(Element *) {}
-
-  Element *provideInitialHead() const { return createSentinel(); }
-  Element *ensureHead(Element *) const { return createSentinel(); }
-  static void noteHead(Element *, Element *) {}
-
-private:
-  mutable ilist_half_node<Element> Sentinel;
 };
 
 template <unsigned ElementSize = 128>

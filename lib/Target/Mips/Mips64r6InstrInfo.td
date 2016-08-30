@@ -90,12 +90,13 @@ class BEQZC64_DESC : CMP_CBR_EQNE_Z_DESC_BASE<"beqzc", brtarget21, GPR64Opnd>;
 class BNEZC64_DESC : CMP_CBR_EQNE_Z_DESC_BASE<"bnezc", brtarget21, GPR64Opnd>;
 
 class JIALC64_DESC : JMP_IDX_COMPACT_DESC_BASE<"jialc", calloffset16,
-                                             GPR64Opnd> {
+                                               GPR64Opnd, II_JIALC> {
   bit isCall = 1;
   list<Register> Defs = [RA];
 }
 
-class JIC64_DESC : JMP_IDX_COMPACT_DESC_BASE<"jic", jmpoffset16, GPR64Opnd> {
+class JIC64_DESC : JMP_IDX_COMPACT_DESC_BASE<"jic", jmpoffset16, GPR64Opnd,
+                                             II_JIC> {
   bit isBarrier = 1;
   bit isTerminator = 1;
   list<Register> Defs = [AT];
@@ -164,10 +165,6 @@ let DecoderNamespace = "Mips32r6_64r6_BranchZero" in {
 def BLTZC64 : BLTZC_ENC, BLTZC64_DESC, ISA_MIPS64R6, GPR_64;
 def BGEZC64 : BGEZC_ENC, BGEZC64_DESC, ISA_MIPS64R6, GPR_64;
 }
-
-def TAILCALL64_R6 : TailCall<J>, ISA_MIPS64R6;
-def TAILCALLREG64_R6 : TailCallReg<GPR64Opnd, JR64>, GPR_64,
-                       ISA_MIPS64R6;
 
 //===----------------------------------------------------------------------===//
 //

@@ -309,8 +309,10 @@ useful to use C style (``/* */``) comments however:
 #. When writing a source file that is used by a tool that only accepts C style
    comments.
 
-To comment out a large block of code, use ``#if 0`` and ``#endif``. These nest
-properly and are better behaved in general than C style comments.
+Commenting out large blocks of code is discouraged, but if you really have to do
+this (for documentation purposes or as a suggestion for debug printing), use
+``#if 0`` and ``#endif``. These nest properly and are better behaved in general
+than C style comments.
 
 Doxygen Use in Documentation Comments
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -451,7 +453,7 @@ listed.  We prefer these ``#include``\s to be listed in this order:
 
 #. Main Module Header
 #. Local/Private Headers
-#. ``llvm/...``
+#. LLVM project/subproject headers (``clang/...``, ``lldb/...``, ``llvm/...``, etc)
 #. System ``#include``\s
 
 and each category should be sorted lexicographically by the full path.
@@ -463,6 +465,16 @@ header file first in the ``.cpp`` files that implement the interfaces, we ensure
 that the header does not have any hidden dependencies which are not explicitly
 ``#include``\d in the header, but should be. It is also a form of documentation
 in the ``.cpp`` file to indicate where the interfaces it implements are defined.
+
+LLVM project and subproject headers should be grouped from most specific to least
+specific, for the same reasons described above.  For example, LLDB depends on
+both clang and LLVM, and clang depends on LLVM.  So an LLDB source file should
+include ``lldb`` headers first, followed by ``clang`` headers, followed by
+``llvm`` headers, to reduce the possibility (for example) of an LLDB header
+accidentally picking up a missing include due to the previous inclusion of that
+header in the main source file or some earlier header file.  clang should
+similarly include its own headers before including llvm headers.  This rule
+applies to all LLVM subprojects.
 
 .. _fit into 80 columns:
 

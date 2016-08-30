@@ -57,7 +57,7 @@ namespace {
 
     MachineFunctionProperties getRequiredProperties() const override {
       return MachineFunctionProperties().set(
-          MachineFunctionProperties::Property::AllVRegsAllocated);
+          MachineFunctionProperties::Property::NoVRegs);
     }
 
     static char ID;
@@ -116,8 +116,8 @@ bool HexagonCP::interpretAsCopy(const MachineInstr *MI, EqualityMap &EM) {
       const MachineOperand &A = MI->getOperand(2);
       if (!A.isImm() || A.getImm() != 0)
         return false;
+      LLVM_FALLTHROUGH;
     }
-    // Fall through.
     case Hexagon::A2_tfr: {
       const MachineOperand &DstOp = MI->getOperand(0);
       const MachineOperand &SrcOp = MI->getOperand(1);
@@ -245,7 +245,7 @@ bool HexagonDCE::rewrite(NodeAddr<InstrNode*> IA, SetVector<NodeId> &Remove) {
     if (&DA.Addr->getOp() != &Op)
       continue;
     Defs = DFG.getRelatedRefs(IA, DA);
-    if (!std::all_of(Defs.begin(), Defs.end(), IsDead))
+    if (!all_of(Defs, IsDead))
       return false;
     break;
   }

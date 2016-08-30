@@ -437,11 +437,15 @@ static MachineInstr *foldPatchpoint(MachineFunction &MF, MachineInstr &MI,
                                     const TargetInstrInfo &TII) {
   unsigned StartIdx = 0;
   switch (MI.getOpcode()) {
-  case TargetOpcode::STACKMAP:
-    StartIdx = 2; // Skip ID, nShadowBytes.
+  case TargetOpcode::STACKMAP: {
+    // StackMapLiveValues are foldable
+    StackMapOpers opers(&MI);
+    StartIdx = opers.getVarIdx();
     break;
+  }
   case TargetOpcode::PATCHPOINT: {
-    // For PatchPoint, the call args are not foldable.
+    // For PatchPoint, the call args are not foldable (even if reported in the
+    // stackmap e.g. via anyregcc).
     PatchPointOpers opers(&MI);
     StartIdx = opers.getVarIdx();
     break;
@@ -467,7 +471,7 @@ static MachineInstr *foldPatchpoint(MachineFunction &MF, MachineInstr &MI,
 
   for (unsigned i = StartIdx; i < MI.getNumOperands(); ++i) {
     MachineOperand &MO = MI.getOperand(i);
-    if (std::find(Ops.begin(), Ops.end(), i) != Ops.end()) {
+    if (is_contained(Ops, i)) {
       unsigned SpillSize;
       unsigned SpillOffset;
       // Compute the spill slot size and offset.

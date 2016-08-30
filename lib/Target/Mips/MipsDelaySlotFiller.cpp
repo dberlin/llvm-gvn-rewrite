@@ -213,7 +213,7 @@ namespace {
 
     MachineFunctionProperties getRequiredProperties() const override {
       return MachineFunctionProperties().set(
-          MachineFunctionProperties::Property::AllVRegsAllocated);
+          MachineFunctionProperties::Property::NoVRegs);
     }
 
     void getAnalysisUsage(AnalysisUsage &AU) const override {
@@ -560,7 +560,7 @@ static int getEquivalentCallShort(int Opcode) {
     return Mips::JALRS16_MM;
   case Mips::TAILCALL_MM:
     llvm_unreachable("Attempting to shorten the TAILCALL_MM pseudo!");
-  case Mips::TAILCALLREG_MM:
+  case Mips::TAILCALLREG:
     return Mips::JR16_MM;
   default:
     llvm_unreachable("Unexpected call instruction for microMIPS.");

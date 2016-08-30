@@ -28,6 +28,7 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -272,8 +273,9 @@ bool llvm::UnrollLoop(Loop *L, unsigned Count, unsigned TripCount, bool Force,
   // now we just recompute LCSSA for the outer loop, but it should be possible
   // to fix it in-place.
   bool NeedToFixLCSSA = PreserveLCSSA && CompletelyUnroll &&
-      std::any_of(ExitBlocks.begin(), ExitBlocks.end(),
-                  [&](BasicBlock *BB) { return isa<PHINode>(BB->begin()); });
+                        any_of(ExitBlocks, [](const BasicBlock *BB) {
+                          return isa<PHINode>(BB->begin());
+                        });
 
   // We assume a run-time trip count if the compiler cannot
   // figure out the loop trip count and the unroll-runtime
@@ -485,9 +487,14 @@ bool llvm::UnrollLoop(Loop *L, unsigned Count, unsigned TripCount, bool Force,
     }
 
     // Remap all instructions in the most recent iteration
-    for (BasicBlock *NewBlock : NewBlocks)
-      for (Instruction &I : *NewBlock)
+    for (BasicBlock *NewBlock : NewBlocks) {
+      for (Instruction &I : *NewBlock) {
         ::remapInstruction(&I, LastValueMap);
+        if (auto *II = dyn_cast<IntrinsicInst>(&I))
+          if (II->getIntrinsicID() == Intrinsic::assume)
+            AC->registerAssumption(II);
+      }
+    }
   }
 
   // Loop over the PHI nodes in the original block, setting incoming values.
@@ -599,10 +606,6 @@ bool llvm::UnrollLoop(Loop *L, unsigned Count, unsigned TripCount, bool Force,
       }
     }
   }
-
-  // FIXME: We could register any cloned assumptions instead of clearing the
-  // whole function's cache.
-  AC->clear();
 
   // FIXME: We only preserve DT info for complete unrolling now. Incrementally
   // updating domtree after partial loop unrolling should also be easy.

@@ -1324,7 +1324,7 @@ void DAGCombiner::Run(CombineLevel AtLevel) {
       continue;
 
     assert(N->getOpcode() != ISD::DELETED_NODE &&
-           RV.getNode()->getOpcode() != ISD::DELETED_NODE &&
+           RV.getOpcode() != ISD::DELETED_NODE &&
            "Node was deleted but visit returned new node!");
 
     DEBUG(dbgs() << " ... into: ";
@@ -1571,8 +1571,7 @@ SDValue DAGCombiner::visitTokenFactor(SDNode *N) {
         break;
 
       case ISD::TokenFactor:
-        if (Op.hasOneUse() &&
-            std::find(TFs.begin(), TFs.end(), Op.getNode()) == TFs.end()) {
+        if (Op.hasOneUse() && !is_contained(TFs, Op.getNode())) {
           // Queue up for processing.
           TFs.push_back(Op.getNode());
           // Clean up in case the token factor is removed.
@@ -1580,7 +1579,7 @@ SDValue DAGCombiner::visitTokenFactor(SDNode *N) {
           Changed = true;
           break;
         }
-        // Fall thru
+        LLVM_FALLTHROUGH;
 
       default:
         // Only add if it isn't already in the list.
@@ -10734,7 +10733,7 @@ bool DAGCombiner::SliceUpLoad(SDNode *N) {
        LSIt != LSItEnd; ++LSIt) {
     SDValue SliceInst = LSIt->loadSlice();
     CombineTo(LSIt->Inst, SliceInst, true);
-    if (SliceInst.getNode()->getOpcode() != ISD::LOAD)
+    if (SliceInst.getOpcode() != ISD::LOAD)
       SliceInst = SliceInst.getOperand(0);
     assert(SliceInst->getOpcode() == ISD::LOAD &&
            "It takes more than a zext to get to the loaded slice!!");
@@ -11611,10 +11610,9 @@ bool DAGCombiner::MergeConsecutiveStores(StoreSDNode* St) {
 
     // Check if this store interferes with any of the loads that we found.
     // If we find a load that alias with this store. Stop the sequence.
-    if (std::any_of(AliasLoadNodes.begin(), AliasLoadNodes.end(),
-                    [&](LSBaseSDNode* Ldn) {
-                      return isAlias(Ldn, StoreNodes[i].MemNode);
-                    }))
+    if (any_of(AliasLoadNodes, [&](LSBaseSDNode *Ldn) {
+          return isAlias(Ldn, StoreNodes[i].MemNode);
+        }))
       break;
 
     // Mark this node as useful.
@@ -13802,9 +13800,19 @@ SDValue DAGCombiner::visitSCALAR_TO_VECTOR(SDNode *N) {
 }
 
 SDValue DAGCombiner::visitINSERT_SUBVECTOR(SDNode *N) {
+  EVT VT = N->getValueType(0);
   SDValue N0 = N->getOperand(0);
   SDValue N1 = N->getOperand(1);
   SDValue N2 = N->getOperand(2);
+
+  // Combine INSERT_SUBVECTORs where we are inserting to the same index.
+  // INSERT_SUBVECTOR( INSERT_SUBVECTOR( Vec, SubOld, Idx ), SubNew, Idx )
+  // --> INSERT_SUBVECTOR( Vec, SubNew, Idx )
+  if (N0.getOpcode() == ISD::INSERT_SUBVECTOR &&
+      N0.getOperand(1).getValueType() == N1.getValueType() &&
+      N0.getOperand(2) == N2)
+    return DAG.getNode(ISD::INSERT_SUBVECTOR, SDLoc(N), VT, N0.getOperand(0),
+                       N1, N2);
 
   if (N0.getValueType() != N1.getValueType())
     return SDValue();
@@ -13814,7 +13822,6 @@ SDValue DAGCombiner::visitINSERT_SUBVECTOR(SDNode *N) {
   if (N0.getOpcode() == ISD::CONCAT_VECTORS && N0->getNumOperands() == 2 &&
       N2.getOpcode() == ISD::Constant) {
     APInt InsIdx = cast<ConstantSDNode>(N2)->getAPIntValue();
-    EVT VT = N->getValueType(0);
 
     // Lower half: fold (insert_subvector (concat_vectors X, Y), Z) ->
     // (concat_vectors Z, Y)

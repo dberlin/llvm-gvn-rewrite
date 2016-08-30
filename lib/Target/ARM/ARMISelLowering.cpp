@@ -1857,7 +1857,7 @@ ARMTargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     auto *BB = CLI.CS->getParent();
     bool PreferIndirect =
         Subtarget->isThumb() && MF.getFunction()->optForMinSize() &&
-        std::count_if(GV->user_begin(), GV->user_end(), [&BB](const User *U) {
+        count_if(GV->users(), [&BB](const User *U) {
           return isa<Instruction>(U) && cast<Instruction>(U)->getParent() == BB;
         }) > 2;
 
@@ -4906,22 +4906,22 @@ static SDValue LowerVSETCC(SDValue Op, SelectionDAG &DAG) {
     switch (SetCCOpcode) {
     default: llvm_unreachable("Illegal FP comparison");
     case ISD::SETUNE:
-    case ISD::SETNE:  Invert = true; // Fallthrough
+    case ISD::SETNE:  Invert = true; LLVM_FALLTHROUGH;
     case ISD::SETOEQ:
     case ISD::SETEQ:  Opc = ARMISD::VCEQ; break;
     case ISD::SETOLT:
-    case ISD::SETLT: Swap = true; // Fallthrough
+    case ISD::SETLT: Swap = true; LLVM_FALLTHROUGH;
     case ISD::SETOGT:
     case ISD::SETGT:  Opc = ARMISD::VCGT; break;
     case ISD::SETOLE:
-    case ISD::SETLE:  Swap = true; // Fallthrough
+    case ISD::SETLE:  Swap = true; LLVM_FALLTHROUGH;
     case ISD::SETOGE:
     case ISD::SETGE: Opc = ARMISD::VCGE; break;
-    case ISD::SETUGE: Swap = true; // Fallthrough
+    case ISD::SETUGE: Swap = true; LLVM_FALLTHROUGH;
     case ISD::SETULE: Invert = true; Opc = ARMISD::VCGT; break;
-    case ISD::SETUGT: Swap = true; // Fallthrough
+    case ISD::SETUGT: Swap = true; LLVM_FALLTHROUGH;
     case ISD::SETULT: Invert = true; Opc = ARMISD::VCGE; break;
-    case ISD::SETUEQ: Invert = true; // Fallthrough
+    case ISD::SETUEQ: Invert = true; LLVM_FALLTHROUGH;
     case ISD::SETONE:
       // Expand this to (OLT | OGT).
       TmpOp0 = Op0;
@@ -4930,7 +4930,9 @@ static SDValue LowerVSETCC(SDValue Op, SelectionDAG &DAG) {
       Op0 = DAG.getNode(ARMISD::VCGT, dl, CmpVT, TmpOp1, TmpOp0);
       Op1 = DAG.getNode(ARMISD::VCGT, dl, CmpVT, TmpOp0, TmpOp1);
       break;
-    case ISD::SETUO: Invert = true; // Fallthrough
+    case ISD::SETUO:
+      Invert = true;
+      LLVM_FALLTHROUGH;
     case ISD::SETO:
       // Expand this to (OLT | OGE).
       TmpOp0 = Op0;
@@ -5915,7 +5917,7 @@ SDValue ARMTargetLowering::ReconstructShuffle(SDValue Op,
 
     // Add this element source to the list if it's not already there.
     SDValue SourceVec = V.getOperand(0);
-    auto Source = std::find(Sources.begin(), Sources.end(), SourceVec);
+    auto Source = find(Sources, SourceVec);
     if (Source == Sources.end())
       Source = Sources.insert(Sources.end(), ShuffleSourceInfo(SourceVec));
 
@@ -6031,7 +6033,7 @@ SDValue ARMTargetLowering::ReconstructShuffle(SDValue Op,
     if (Entry.isUndef())
       continue;
 
-    auto Src = std::find(Sources.begin(), Sources.end(), Entry.getOperand(0));
+    auto Src = find(Sources, Entry.getOperand(0));
     int EltNo = cast<ConstantSDNode>(Entry.getOperand(1))->getSExtValue();
 
     // EXTRACT_VECTOR_ELT performs an implicit any_ext; BUILD_VECTOR an implicit
@@ -6328,7 +6330,7 @@ static SDValue LowerVECTOR_SHUFFLE(SDValue Op, SelectionDAG &DAG) {
       EVT SubVT = SubV1.getValueType();
 
       // We expect these to have been canonicalized to -1.
-      assert(std::all_of(ShuffleMask.begin(), ShuffleMask.end(), [&](int i) {
+      assert(all_of(ShuffleMask, [&](int i) {
         return i < (int)VT.getVectorNumElements();
       }) && "Unexpected shuffle index into UNDEF operand!");
 
@@ -8657,7 +8659,7 @@ static bool isConditionalZeroOrAllOnes(SDNode *N, bool AllOnes,
     // (zext cc) can never be the all ones value.
     if (AllOnes)
       return false;
-    // Fall through.
+    LLVM_FALLTHROUGH;
   case ISD::SIGN_EXTEND: {
     SDLoc dl(N);
     EVT VT = N->getValueType(0);
@@ -11407,7 +11409,7 @@ bool ARMTargetLowering::isLegalAddressingMode(const DataLayout &DL,
   case 1:
     if (Subtarget->isThumb1Only())
       return false;
-    // FALL THROUGH.
+    LLVM_FALLTHROUGH;
   default:
     // ARM doesn't support any R+R*scale+imm addr modes.
     if (AM.BaseOffs)

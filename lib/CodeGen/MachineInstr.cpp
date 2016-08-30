@@ -93,6 +93,8 @@ void MachineOperand::substPhysReg(unsigned Reg, const TargetRegisterInfo &TRI) {
     // Note that getSubReg() may return 0 if the sub-register doesn't exist.
     // That won't happen in legal code.
     setSubReg(0);
+    if (isDef())
+      setIsUndef(false);
   }
   setReg(Reg);
 }
@@ -260,6 +262,8 @@ bool MachineOperand::isIdenticalTo(const MachineOperand &Other) const {
     return getMetadata() == Other.getMetadata();
   case MachineOperand::MO_IntrinsicID:
     return getIntrinsicID() == Other.getIntrinsicID();
+  case MachineOperand::MO_Predicate:
+    return getPredicate() == Other.getPredicate();
   }
   llvm_unreachable("Invalid machine operand type");
 }
@@ -306,6 +310,8 @@ hash_code llvm::hash_value(const MachineOperand &MO) {
     return hash_combine(MO.getType(), MO.getTargetFlags(), MO.getCFIIndex());
   case MachineOperand::MO_IntrinsicID:
     return hash_combine(MO.getType(), MO.getTargetFlags(), MO.getIntrinsicID());
+  case MachineOperand::MO_Predicate:
+    return hash_combine(MO.getType(), MO.getTargetFlags(), MO.getPredicate());
   }
   llvm_unreachable("Invalid machine operand type");
 }
@@ -464,15 +470,19 @@ void MachineOperand::print(raw_ostream &OS, ModuleSlotTracker &MST,
   case MachineOperand::MO_IntrinsicID: {
     Intrinsic::ID ID = getIntrinsicID();
     if (ID < Intrinsic::num_intrinsics)
-      OS << "<intrinsic:@" << Intrinsic::getName(ID) << ')';
+      OS << "<intrinsic:@" << Intrinsic::getName(ID, None) << ')';
     else if (IntrinsicInfo)
       OS << "<intrinsic:@" << IntrinsicInfo->getName(ID) << ')';
     else
       OS << "<intrinsic:" << ID << '>';
     break;
   }
+  case MachineOperand::MO_Predicate: {
+    auto Pred = static_cast<CmpInst::Predicate>(getPredicate());
+    OS << '<' << (CmpInst::isIntPredicate(Pred) ? "intpred" : "floatpred")
+       << CmpInst::getPredicateName(Pred) << '>';
   }
-
+  }
   if (unsigned TF = getTargetFlags())
     OS << "[TF=" << TF << ']';
 }
@@ -2181,8 +2191,8 @@ void MachineInstr::setPhysRegsDeadExcept(ArrayRef<unsigned> UsedRegs,
     unsigned Reg = MO.getReg();
     if (!TargetRegisterInfo::isPhysicalRegister(Reg)) continue;
     // If there are no uses, including partial uses, the def is dead.
-    if (std::none_of(UsedRegs.begin(), UsedRegs.end(),
-                     [&](unsigned Use) { return TRI.regsOverlap(Use, Reg); }))
+    if (none_of(UsedRegs,
+                [&](unsigned Use) { return TRI.regsOverlap(Use, Reg); }))
       MO.setIsDead();
   }
 

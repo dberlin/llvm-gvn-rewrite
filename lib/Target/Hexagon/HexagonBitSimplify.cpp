@@ -1351,10 +1351,10 @@ bool ConstGeneration::isTfrConst(const MachineInstr &MI) {
     case Hexagon::A4_combineii:
     case Hexagon::A2_tfrsi:
     case Hexagon::A2_tfrpi:
-    case Hexagon::TFR_PdTrue:
-    case Hexagon::TFR_PdFalse:
-    case Hexagon::CONST32_Int_Real:
-    case Hexagon::CONST64_Int_Real:
+    case Hexagon::PS_true:
+    case Hexagon::PS_false:
+    case Hexagon::CONST32:
+    case Hexagon::CONST64:
       return true;
   }
   return false;
@@ -1389,7 +1389,7 @@ unsigned ConstGeneration::genTfrConst(const TargetRegisterClass *RC, int64_t C,
       return Reg;
     }
 
-    BuildMI(B, At, DL, HII.get(Hexagon::CONST64_Int_Real), Reg)
+    BuildMI(B, At, DL, HII.get(Hexagon::CONST64), Reg)
         .addImm(C);
     return Reg;
   }
@@ -1397,9 +1397,9 @@ unsigned ConstGeneration::genTfrConst(const TargetRegisterClass *RC, int64_t C,
   if (RC == &Hexagon::PredRegsRegClass) {
     unsigned Opc;
     if (C == 0)
-      Opc = Hexagon::TFR_PdFalse;
+      Opc = Hexagon::PS_false;
     else if ((C & 0xFF) == 0xFF)
-      Opc = Hexagon::TFR_PdTrue;
+      Opc = Hexagon::PS_true;
     else
       return 0;
     BuildMI(B, At, DL, HII.get(Opc), Reg);
@@ -2173,7 +2173,7 @@ bool BitSimplification::simplifyTstbit(MachineInstr *MI,
     }
   } else if (V.is(0) || V.is(1)) {
     unsigned NewR = MRI.createVirtualRegister(&Hexagon::PredRegsRegClass);
-    unsigned NewOpc = V.is(0) ? Hexagon::TFR_PdFalse : Hexagon::TFR_PdTrue;
+    unsigned NewOpc = V.is(0) ? Hexagon::PS_false : Hexagon::PS_true;
     BuildMI(B, At, DL, HII.get(NewOpc), NewR);
     HBS::replaceReg(RD.Reg, NewR, MRI);
     return true;
@@ -2665,7 +2665,7 @@ bool HexagonLoopRescheduling::processLoop(LoopCand &C) {
           if (UseI->getOperand(Idx+1).getMBB() != C.LB)
             BadUse = true;
         } else {
-          auto F = std::find(ShufIns.begin(), ShufIns.end(), UseI);
+          auto F = find(ShufIns, UseI);
           if (F == ShufIns.end())
             BadUse = true;
         }
@@ -2731,7 +2731,7 @@ bool HexagonLoopRescheduling::processLoop(LoopCand &C) {
     auto LoopInpEq = [G] (const PhiInfo &P) -> bool {
       return G.Out.Reg == P.LR.Reg;
     };
-    if (std::find_if(Phis.begin(), Phis.end(), LoopInpEq) == Phis.end())
+    if (find_if(Phis, LoopInpEq) == Phis.end())
       continue;
 
     G.Inp.Reg = Inputs.find_first();
@@ -2756,7 +2756,7 @@ bool HexagonLoopRescheduling::processLoop(LoopCand &C) {
     auto LoopInpEq = [G] (const PhiInfo &P) -> bool {
       return G.Out.Reg == P.LR.Reg;
     };
-    auto F = std::find_if(Phis.begin(), Phis.end(), LoopInpEq);
+    auto F = find_if(Phis, LoopInpEq);
     if (F == Phis.end())
       continue;
     unsigned PrehR = 0;

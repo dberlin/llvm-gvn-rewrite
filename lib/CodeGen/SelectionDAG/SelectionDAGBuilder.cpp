@@ -1020,8 +1020,7 @@ void SelectionDAGBuilder::resolveDanglingDebugInfo(const Value *V,
     if (Val.getNode()) {
       if (!EmitFuncArgumentDbgValue(V, Variable, Expr, dl, Offset, false,
                                     Val)) {
-        SDV = DAG.getDbgValue(Variable, Expr, Val.getNode(), Val.getResNo(),
-                              false, Offset, dl, DbgSDNodeOrder);
+        SDV = getDbgValue(Val, Variable, Expr, Offset, dl, DbgSDNodeOrder);
         DAG.AddDbgValue(SDV, Val.getNode(), false);
       }
     } else
@@ -2483,7 +2482,7 @@ static bool isVectorReductionOp(const User *I) {
     if (const FPMathOperator *FPOp = dyn_cast<const FPMathOperator>(Inst))
       if (FPOp->getFastMathFlags().unsafeAlgebra())
         break;
-    // Fall through.
+    LLVM_FALLTHROUGH;
   default:
     return false;
   }
@@ -2730,7 +2729,7 @@ void SelectionDAGBuilder::visitFCmp(const User &I) {
 // Check if the condition of the select has one use or two users that are both
 // selects with the same condition.
 static bool hasOnlySelectUsers(const Value *Cond) {
-  return std::all_of(Cond->user_begin(), Cond->user_end(), [](const Value *V) {
+  return all_of(Cond->users(), [](const Value *V) {
     return isa<SelectInst>(V);
   });
 }
@@ -2997,6 +2996,7 @@ void SelectionDAGBuilder::visitExtractElement(const User &I) {
 void SelectionDAGBuilder::visitShuffleVector(const User &I) {
   SDValue Src1 = getValue(I.getOperand(0));
   SDValue Src2 = getValue(I.getOperand(1));
+  SDLoc DL = getCurSDLoc();
 
   SmallVector<int, 8> Mask;
   ShuffleVectorInst::getShuffleMask(cast<Constant>(I.getOperand(2)), Mask);
@@ -3008,7 +3008,7 @@ void SelectionDAGBuilder::visitShuffleVector(const User &I) {
   unsigned SrcNumElts = SrcVT.getVectorNumElements();
 
   if (SrcNumElts == MaskNumElts) {
-    setValue(&I, DAG.getVectorShuffle(VT, getCurSDLoc(), Src1, Src2, Mask));
+    setValue(&I, DAG.getVectorShuffle(VT, DL, Src1, Src2, Mask));
     return;
   }
 
@@ -3051,8 +3051,7 @@ void SelectionDAGBuilder::visitShuffleVector(const User &I) {
         else
           ConcatOps.push_back(Src2);
       }
-      setValue(&I, DAG.getNode(ISD::CONCAT_VECTORS, getCurSDLoc(),
-                               VT, ConcatOps));
+      setValue(&I, DAG.getNode(ISD::CONCAT_VECTORS, DL, VT, ConcatOps));
       return;
     }
 
@@ -3065,11 +3064,9 @@ void SelectionDAGBuilder::visitShuffleVector(const User &I) {
     MOps2[0] = Src2;
 
     Src1 = Src1.isUndef() ? DAG.getUNDEF(VT)
-                          : DAG.getNode(ISD::CONCAT_VECTORS,
-                                        getCurSDLoc(), VT, MOps1);
+                          : DAG.getNode(ISD::CONCAT_VECTORS, DL, VT, MOps1);
     Src2 = Src2.isUndef() ? DAG.getUNDEF(VT)
-                          : DAG.getNode(ISD::CONCAT_VECTORS,
-                                        getCurSDLoc(), VT, MOps2);
+                          : DAG.getNode(ISD::CONCAT_VECTORS, DL, VT, MOps2);
 
     // Readjust mask for new input vector length.
     SmallVector<int, 8> MappedOps;
@@ -3080,8 +3077,7 @@ void SelectionDAGBuilder::visitShuffleVector(const User &I) {
       MappedOps.push_back(Idx);
     }
 
-    setValue(&I, DAG.getVectorShuffle(VT, getCurSDLoc(), Src1, Src2,
-                                      MappedOps));
+    setValue(&I, DAG.getVectorShuffle(VT, DL, Src1, Src2, MappedOps));
     return;
   }
 
@@ -3140,10 +3136,9 @@ void SelectionDAGBuilder::visitShuffleVector(const User &I) {
         if (RangeUse[Input] == 0)
           Src = DAG.getUNDEF(VT);
         else {
-          SDLoc dl = getCurSDLoc();
           Src = DAG.getNode(
-              ISD::EXTRACT_SUBVECTOR, dl, VT, Src,
-              DAG.getConstant(StartIdx[Input], dl,
+              ISD::EXTRACT_SUBVECTOR, DL, VT, Src,
+              DAG.getConstant(StartIdx[Input], DL,
                               TLI.getVectorIdxTy(DAG.getDataLayout())));
         }
       }
@@ -3161,8 +3156,7 @@ void SelectionDAGBuilder::visitShuffleVector(const User &I) {
         MappedOps.push_back(Idx);
       }
 
-      setValue(&I, DAG.getVectorShuffle(VT, getCurSDLoc(), Src1, Src2,
-                                        MappedOps));
+      setValue(&I, DAG.getVectorShuffle(VT, DL, Src1, Src2, MappedOps));
       return;
     }
   }
@@ -3172,7 +3166,6 @@ void SelectionDAGBuilder::visitShuffleVector(const User &I) {
   // to insert and build vector.
   EVT EltVT = VT.getVectorElementType();
   EVT IdxVT = TLI.getVectorIdxTy(DAG.getDataLayout());
-  SDLoc dl = getCurSDLoc();
   SmallVector<SDValue,8> Ops;
   for (unsigned i = 0; i != MaskNumElts; ++i) {
     int Idx = Mask[i];
@@ -3184,14 +3177,14 @@ void SelectionDAGBuilder::visitShuffleVector(const User &I) {
       SDValue &Src = Idx < (int)SrcNumElts ? Src1 : Src2;
       if (Idx >= (int)SrcNumElts) Idx -= SrcNumElts;
 
-      Res = DAG.getNode(ISD::EXTRACT_VECTOR_ELT, dl,
-                        EltVT, Src, DAG.getConstant(Idx, dl, IdxVT));
+      Res = DAG.getNode(ISD::EXTRACT_VECTOR_ELT, DL,
+                        EltVT, Src, DAG.getConstant(Idx, DL, IdxVT));
     }
 
     Ops.push_back(Res);
   }
 
-  setValue(&I, DAG.getNode(ISD::BUILD_VECTOR, dl, VT, Ops));
+  setValue(&I, DAG.getNode(ISD::BUILD_VECTOR, DL, VT, Ops));
 }
 
 void SelectionDAGBuilder::visitInsertValue(const InsertValueInst &I) {
@@ -3330,8 +3323,9 @@ void SelectionDAGBuilder::visitGetElementPtr(const User &I) {
         if (CI->isZero())
           continue;
         APInt Offs = ElementSize * CI->getValue().sextOrTrunc(PtrSize);
+        LLVMContext &Context = *DAG.getContext();
         SDValue OffsVal = VectorWidth ?
-          DAG.getConstant(Offs, dl, MVT::getVectorVT(PtrTy, VectorWidth)) :
+          DAG.getConstant(Offs, dl, EVT::getVectorVT(Context, PtrTy, VectorWidth)) :
           DAG.getConstant(Offs, dl, PtrTy);
 
         // In an inbouds GEP with an offset that is nonnegative even when
@@ -4742,6 +4736,32 @@ bool SelectionDAGBuilder::EmitFuncArgumentDbgValue(
   return true;
 }
 
+/// Return the appropriate SDDbgValue based on N.
+SDDbgValue *SelectionDAGBuilder::getDbgValue(SDValue N,
+                                             DILocalVariable *Variable,
+                                             DIExpression *Expr, int64_t Offset,
+                                             DebugLoc dl,
+                                             unsigned DbgSDNodeOrder) {
+  SDDbgValue *SDV;
+  auto *FISDN = dyn_cast<FrameIndexSDNode>(N.getNode());
+  if (FISDN && Expr->startsWithDeref()) {
+    // Construct a FrameIndexDbgValue for FrameIndexSDNodes so we can describe
+    // stack slot locations as such instead of as indirectly addressed
+    // locations.
+    ArrayRef<uint64_t> TrailingElements(Expr->elements_begin() + 1,
+                                        Expr->elements_end());
+    DIExpression *DerefedDIExpr =
+        DIExpression::get(*DAG.getContext(), TrailingElements);
+    int FI = FISDN->getIndex();
+    SDV = DAG.getFrameIndexDbgValue(Variable, DerefedDIExpr, FI, 0, dl,
+                                    DbgSDNodeOrder);
+  } else {
+    SDV = DAG.getDbgValue(Variable, Expr, N.getNode(), N.getResNo(), false,
+                          Offset, dl, DbgSDNodeOrder);
+  }
+  return SDV;
+}
+
 // VisualStudio defines setjmp as _setjmp
 #if defined(_MSC_VER) && defined(setjmp) && \
                          !defined(setjmp_undefined_for_msvc)
@@ -4943,8 +4963,7 @@ SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I, unsigned Intrinsic) {
       if (N.getNode()) {
         if (!EmitFuncArgumentDbgValue(V, Variable, Expression, dl, Offset,
                                       false, N)) {
-          SDV = DAG.getDbgValue(Variable, Expression, N.getNode(), N.getResNo(),
-                                false, Offset, dl, SDNodeOrder);
+          SDV = getDbgValue(N, Variable, Expression, Offset, dl, SDNodeOrder);
           DAG.AddDbgValue(SDV, N.getNode(), false);
         }
       } else if (!V->use_empty() ) {

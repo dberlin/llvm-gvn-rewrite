@@ -98,6 +98,11 @@ public:
     return "SI Load / Store Optimizer";
   }
 
+  MachineFunctionProperties getRequiredProperties() const override {
+    return MachineFunctionProperties().set(
+      MachineFunctionProperties::Property::NoPHIs);
+  }
+
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesCFG();
     AU.addPreserved<SlotIndexes>();
@@ -158,10 +163,11 @@ MachineBasicBlock::iterator
 SILoadStoreOptimizer::findMatchingDSInst(MachineBasicBlock::iterator I,
                                          unsigned EltSize){
   MachineBasicBlock::iterator E = I->getParent()->end();
+  MachineBasicBlock &MBB = *I->getParent();
   MachineBasicBlock::iterator MBBI = I;
   ++MBBI;
 
-  if (MBBI->getOpcode() != I->getOpcode())
+  if (MBBI == MBB.end() || MBBI->getOpcode() != I->getOpcode())
     return E;
 
   // Don't merge volatiles.
@@ -423,8 +429,6 @@ bool SILoadStoreOptimizer::runOnMachineFunction(MachineFunction &MF) {
   LIS = &getAnalysis<LiveIntervals>();
 
   DEBUG(dbgs() << "Running SILoadStoreOptimizer\n");
-
-  assert(!MRI->isSSA());
 
   bool Modified = false;
 

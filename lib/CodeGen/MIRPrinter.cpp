@@ -174,9 +174,6 @@ void MIRPrinter::print(const MachineFunction &MF) {
   YamlMF.Name = MF.getName();
   YamlMF.Alignment = MF.getAlignment();
   YamlMF.ExposesReturnsTwice = MF.exposesReturnsTwice();
-  YamlMF.HasInlineAsm = MF.hasInlineAsm();
-  YamlMF.AllVRegsAllocated = MF.getProperties().hasProperty(
-      MachineFunctionProperties::Property::AllVRegsAllocated);
 
   YamlMF.Legalized = MF.getProperties().hasProperty(
       MachineFunctionProperties::Property::Legalized);
@@ -212,9 +209,7 @@ void MIRPrinter::print(const MachineFunction &MF) {
 void MIRPrinter::convert(yaml::MachineFunction &MF,
                          const MachineRegisterInfo &RegInfo,
                          const TargetRegisterInfo *TRI) {
-  MF.IsSSA = RegInfo.isSSA();
   MF.TracksRegLiveness = RegInfo.tracksLiveness();
-  MF.TracksSubRegLiveness = RegInfo.subRegLivenessEnabled();
 
   // Print the virtual register definitions.
   for (unsigned I = 0, E = RegInfo.getNumVirtRegs(); I < E; ++I) {
@@ -883,12 +878,18 @@ void MIPrinter::print(const MachineOperand &Op, const TargetRegisterInfo *TRI,
   case MachineOperand::MO_IntrinsicID: {
     Intrinsic::ID ID = Op.getIntrinsicID();
     if (ID < Intrinsic::num_intrinsics)
-      OS << "intrinsic(@" << Intrinsic::getName(ID) << ')';
+      OS << "intrinsic(@" << Intrinsic::getName(ID, None) << ')';
     else {
       const MachineFunction &MF = *Op.getParent()->getParent()->getParent();
       const TargetIntrinsicInfo *TII = MF.getTarget().getIntrinsicInfo();
       OS << "intrinsic(@" << TII->getName(ID) << ')';
     }
+    break;
+  }
+  case MachineOperand::MO_Predicate: {
+    auto Pred = static_cast<CmpInst::Predicate>(Op.getPredicate());
+    OS << (CmpInst::isIntPredicate(Pred) ? "int" : "float") << "pred("
+       << CmpInst::getPredicateName(Pred) << ')';
     break;
   }
   }

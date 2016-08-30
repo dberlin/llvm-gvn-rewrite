@@ -823,7 +823,7 @@ void HexagonDAGToDAGISel::SelectZeroExtend(SDNode *N) {
       Bit <<= ES;
     }
     SDValue Ones = CurDAG->getTargetConstant(MV, dl, MVT::i64);
-    SDNode *OnesReg = CurDAG->getMachineNode(Hexagon::CONST64_Int_Real, dl,
+    SDNode *OnesReg = CurDAG->getMachineNode(Hexagon::CONST64, dl,
                                              MVT::i64, Ones);
     if (ExVT.getSizeInBits() == 32) {
       SDNode *And = CurDAG->getMachineNode(Hexagon::A2_andp, dl, MVT::i64,
@@ -918,19 +918,15 @@ void HexagonDAGToDAGISel::SelectIntrinsicWOChain(SDNode *N) {
 void HexagonDAGToDAGISel::SelectConstantFP(SDNode *N) {
   SDLoc dl(N);
   ConstantFPSDNode *CN = dyn_cast<ConstantFPSDNode>(N);
-  const APFloat &APF = CN->getValueAPF();
+  APInt A = CN->getValueAPF().bitcastToAPInt();
   if (N->getValueType(0) == MVT::f32) {
-    ReplaceNode(
-        N, CurDAG->getMachineNode(Hexagon::TFRI_f, dl, MVT::f32,
-                                  CurDAG->getTargetConstantFP(
-                                      APF.convertToFloat(), dl, MVT::f32)));
+    SDValue V = CurDAG->getTargetConstant(A.getZExtValue(), dl, MVT::i32);
+    ReplaceNode(N, CurDAG->getMachineNode(Hexagon::A2_tfrsi, dl, MVT::f32, V));
     return;
   }
   if (N->getValueType(0) == MVT::f64) {
-    ReplaceNode(
-        N, CurDAG->getMachineNode(Hexagon::CONST64_Float_Real, dl, MVT::f64,
-                                  CurDAG->getTargetConstantFP(
-                                      APF.convertToDouble(), dl, MVT::f64)));
+    SDValue V = CurDAG->getTargetConstant(A.getZExtValue(), dl, MVT::i64);
+    ReplaceNode(N, CurDAG->getMachineNode(Hexagon::CONST64, dl, MVT::f64, V));
     return;
   }
 
@@ -938,22 +934,16 @@ void HexagonDAGToDAGISel::SelectConstantFP(SDNode *N) {
 }
 
 //
-// Map predicate true (encoded as -1 in LLVM) to a XOR.
+// Map boolean values.
 //
 void HexagonDAGToDAGISel::SelectConstant(SDNode *N) {
-  SDLoc dl(N);
   if (N->getValueType(0) == MVT::i1) {
-    SDNode* Result = 0;
-    int32_t Val = cast<ConstantSDNode>(N)->getSExtValue();
-    if (Val == -1) {
-      Result = CurDAG->getMachineNode(Hexagon::TFR_PdTrue, dl, MVT::i1);
-    } else if (Val == 0) {
-      Result = CurDAG->getMachineNode(Hexagon::TFR_PdFalse, dl, MVT::i1);
-    }
-    if (Result) {
-      ReplaceNode(N, Result);
-      return;
-    }
+    assert(!(cast<ConstantSDNode>(N)->getZExtValue() >> 1));
+    unsigned Opc = (cast<ConstantSDNode>(N)->getSExtValue() != 0)
+                      ? Hexagon::PS_true
+                      : Hexagon::PS_false;
+    ReplaceNode(N, CurDAG->getMachineNode(Opc, SDLoc(N), MVT::i1));
+    return;
   }
 
   SelectCode(N);
@@ -1015,8 +1005,8 @@ void HexagonDAGToDAGISel::SelectBitOp(SDNode *N) {
     if (N->getOperand(1).getOpcode() == ISD::Constant)
       Val = cast<ConstantSDNode>((N)->getOperand(1))->getSExtValue();
     else {
-     SelectCode(N);
-     return;
+      SelectCode(N);
+      return;
     }
   }
 
@@ -1145,19 +1135,19 @@ void HexagonDAGToDAGISel::SelectFrameIndex(SDNode *N) {
   SDValue Zero = CurDAG->getTargetConstant(0, DL, MVT::i32);
   SDNode *R = nullptr;
 
-  // Use TFR_FI when:
+  // Use PS_fi when:
   // - the object is fixed, or
   // - there are no objects with higher-than-default alignment, or
   // - there are no dynamically allocated objects.
-  // Otherwise, use TFR_FIA.
+  // Otherwise, use PS_fia.
   if (FX < 0 || MaxA <= StkA || !MFI.hasVarSizedObjects()) {
-    R = CurDAG->getMachineNode(Hexagon::TFR_FI, DL, MVT::i32, FI, Zero);
+    R = CurDAG->getMachineNode(Hexagon::PS_fi, DL, MVT::i32, FI, Zero);
   } else {
     auto &HMFI = *MF->getInfo<HexagonMachineFunctionInfo>();
     unsigned AR = HMFI.getStackAlignBaseVReg();
     SDValue CH = CurDAG->getEntryNode();
     SDValue Ops[] = { CurDAG->getCopyFromReg(CH, DL, AR, MVT::i32), FI, Zero };
-    R = CurDAG->getMachineNode(Hexagon::TFR_FIA, DL, MVT::i32, Ops);
+    R = CurDAG->getMachineNode(Hexagon::PS_fia, DL, MVT::i32, Ops);
   }
 
   ReplaceNode(N, R);
@@ -1392,7 +1382,7 @@ void HexagonDAGToDAGISel::EmitFunctionEntryCode() {
   MachineBasicBlock *EntryBB = &MF->front();
   unsigned AR = FuncInfo->CreateReg(MVT::i32);
   unsigned MaxA = MFI.getMaxAlignment();
-  BuildMI(EntryBB, DebugLoc(), HII->get(Hexagon::ALIGNA), AR)
+  BuildMI(EntryBB, DebugLoc(), HII->get(Hexagon::PS_aligna), AR)
       .addImm(MaxA);
   MF->getInfo<HexagonMachineFunctionInfo>()->setStackAlignBaseVReg(AR);
 }

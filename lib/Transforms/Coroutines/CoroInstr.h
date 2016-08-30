@@ -11,7 +11,7 @@
 // allows you to do things like:
 //
 //     if (auto *SF = dyn_cast<CoroSubFnInst>(Inst))
-//        ... SF->getFrame() ... SF->getAlloc() ...
+//        ... SF->getFrame() ... 
 //
 // All intrinsic function calls are instances of the call instruction, so these
 // are all subclasses of the CallInst class.  Note that none of these classes
@@ -62,18 +62,23 @@ public:
   }
 };
 
-/// This class represents the llvm.coro.begin instruction.
-class LLVM_LIBRARY_VISIBILITY CoroBeginInst : public IntrinsicInst {
-  enum { MemArg, AlignArg, PromiseArg, InfoArg };
-
+/// This represents the llvm.coro.alloc instruction.
+class LLVM_LIBRARY_VISIBILITY CoroAllocInst : public IntrinsicInst {
 public:
-  Constant *getRawInfo() const {
-    return cast<Constant>(getArgOperand(InfoArg)->stripPointerCasts());
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::coro_alloc;
   }
+  static inline bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
 
-  void setInfo(Constant *C) { setArgOperand(InfoArg, C); }
-
-  // Info argument of coro.begin is
+/// This represents the llvm.coro.alloc instruction.
+class LLVM_LIBRARY_VISIBILITY CoroIdInst : public IntrinsicInst {
+  enum { AlignArg, PromiseArg, InfoArg };
+public:
+  // Info argument of coro.id is
   //   fresh out of the frontend: null ;
   //   outlined                 : {Init, Return, Susp1, Susp2, ...} ;
   //   postsplit                : [resume, destroy, cleanup] ;
@@ -107,10 +112,128 @@ public:
     Result.Resumers = cast<ConstantArray>(Initializer);
     return Result;
   }
+  Constant *getRawInfo() const {
+    return cast<Constant>(getArgOperand(InfoArg)->stripPointerCasts());
+  }
+
+  void setInfo(Constant *C) { setArgOperand(InfoArg, C); }
+
+
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::coro_id;
+  }
+  static inline bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This represents the llvm.coro.frame instruction.
+class LLVM_LIBRARY_VISIBILITY CoroFrameInst : public IntrinsicInst {
+public:
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::coro_frame;
+  }
+  static inline bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This represents the llvm.coro.free instruction.
+class LLVM_LIBRARY_VISIBILITY CoroFreeInst : public IntrinsicInst {
+public:
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::coro_free;
+  }
+  static inline bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This class represents the llvm.coro.begin instruction.
+class LLVM_LIBRARY_VISIBILITY CoroBeginInst : public IntrinsicInst {
+  enum { IdArg, MemArg };
+
+public:
+  CoroIdInst *getId() const {
+    return cast<CoroIdInst>(getArgOperand(IdArg));
+  }
+
+  Value *getMem() const { return getArgOperand(MemArg); }
 
   // Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const IntrinsicInst *I) {
     return I->getIntrinsicID() == Intrinsic::coro_begin;
+  }
+  static inline bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This represents the llvm.coro.save instruction.
+class LLVM_LIBRARY_VISIBILITY CoroSaveInst : public IntrinsicInst {
+public:
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::coro_save;
+  }
+  static inline bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This represents the llvm.coro.suspend instruction.
+class LLVM_LIBRARY_VISIBILITY CoroSuspendInst : public IntrinsicInst {
+  enum { SaveArg, FinalArg };
+
+public:
+  CoroSaveInst *getCoroSave() const {
+    Value *Arg = getArgOperand(SaveArg);
+    if (auto *SI = dyn_cast<CoroSaveInst>(Arg))
+      return SI;
+    assert(isa<ConstantTokenNone>(Arg));
+    return nullptr;
+  }
+  bool isFinal() const {
+    return cast<Constant>(getArgOperand(FinalArg))->isOneValue();
+  }
+
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::coro_suspend;
+  }
+  static inline bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This represents the llvm.coro.size instruction.
+class LLVM_LIBRARY_VISIBILITY CoroSizeInst : public IntrinsicInst {
+public:
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::coro_size;
+  }
+  static inline bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
+/// This represents the llvm.coro.end instruction.
+class LLVM_LIBRARY_VISIBILITY CoroEndInst : public IntrinsicInst {
+  enum { FrameArg, UnwindArg };
+
+public:
+  bool isFallthrough() const { return !isUnwind(); }
+  bool isUnwind() const {
+    return cast<Constant>(getArgOperand(UnwindArg))->isOneValue();
+  }
+
+  // Methods to support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::coro_end;
   }
   static inline bool classof(const Value *V) {
     return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
