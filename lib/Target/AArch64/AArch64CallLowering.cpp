@@ -70,19 +70,22 @@ bool AArch64CallLowering::handleAssignments(MachineIRBuilder &MIRBuilder,
   for (unsigned i = 0; i != NumArgs; ++i, ++CurVT) {
     bool Res = AssignFn(i, *CurVT, *CurVT, CCValAssign::Full, ISD::ArgFlagsTy(),
                         CCInfo);
-    assert(!Res && "Call operand has unhandled type");
-    (void)Res;
+    if (Res)
+      return false;
   }
   assert(ArgLocs.size() == ArgTypes.size() &&
          "We have a different number of location and args?!");
   for (unsigned i = 0, e = ArgLocs.size(); i != e; ++i) {
     CCValAssign &VA = ArgLocs[i];
 
-    assert(VA.isRegLoc() && "Not yet implemented");
+    // FIXME: Support non-register argument.
+    if (!VA.isRegLoc())
+      return false;
 
     switch (VA.getLocInfo()) {
     default:
-      llvm_unreachable("Unknown loc info!");
+      //  Unknown loc info!
+      return false;
     case CCValAssign::Full:
       break;
     case CCValAssign::BCvt:
@@ -94,8 +97,8 @@ bool AArch64CallLowering::handleAssignments(MachineIRBuilder &MIRBuilder,
     case CCValAssign::SExt:
     case CCValAssign::ZExt:
       // Zero/Sign extend the register.
-      assert(0 && "Not yet implemented");
-      break;
+      // FIXME: Not yet implemented
+      return false;
     }
 
     // Everything checks out, tell the caller where we've decided this
@@ -128,18 +131,13 @@ bool AArch64CallLowering::lowerFormalArguments(
 }
 
 bool AArch64CallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
-                                    const CallInst &CI, unsigned CalleeReg,
-                                    unsigned ResReg,
+                                    const MachineOperand &Callee,
+                                    ArrayRef<MVT> ResTys,
+                                    ArrayRef<unsigned> ResRegs,
+                                    ArrayRef<MVT> ArgTys,
                                     ArrayRef<unsigned> ArgRegs) const {
   MachineFunction &MF = MIRBuilder.getMF();
   const Function &F = *MF.getFunction();
-
-  // First step is to marshall all the function's parameters into the correct
-  // physregs and memory locations. Gather the sequence of argument types that
-  // we'll pass to the assigner function.
-  SmallVector<MVT, 8> ArgTys;
-  for (auto &Arg : CI.arg_operands())
-    ArgTys.push_back(MVT::getVT(Arg->getType()));
 
   // Find out which ABI gets to decide where things go.
   const AArch64TargetLowering &TLI = *getTLI<AArch64TargetLowering>();
@@ -157,12 +155,8 @@ bool AArch64CallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
       });
 
   // Now we can build the actual call instruction.
-  MachineInstrBuilder MIB;
-  if (CalleeReg)
-    MIB = MIRBuilder.buildInstr(AArch64::BLR).addUse(CalleeReg);
-  else
-    MIB = MIRBuilder.buildInstr(AArch64::BL)
-              .addGlobalAddress(CI.getCalledFunction());
+  auto MIB = MIRBuilder.buildInstr(Callee.isReg() ? AArch64::BLR : AArch64::BL);
+  MIB.addOperand(Callee);
 
   // Tell the call which registers are clobbered.
   auto TRI = MF.getSubtarget().getRegisterInfo();
@@ -175,9 +169,9 @@ bool AArch64CallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
   // symmetry with the arugments, the physical register must be an
   // implicit-define of the call instruction.
   CCAssignFn *RetAssignFn = TLI.CCAssignFnForReturn(F.getCallingConv());
-  if (!CI.getType()->isVoidTy())
+  if (!ResRegs.empty())
     handleAssignments(
-        MIRBuilder, RetAssignFn, MVT::getVT(CI.getType()), ResReg,
+        MIRBuilder, RetAssignFn, ResTys, ResRegs,
         [&](MachineIRBuilder &MIRBuilder, unsigned ValReg, unsigned PhysReg) {
           MIRBuilder.buildCopy(ValReg, PhysReg);
           MIB.addDef(PhysReg, RegState::Implicit);

@@ -13,6 +13,7 @@
 
 using namespace llvm;
 using llvm::MachineLegalizer::LegalizeAction::Legal;
+using llvm::MachineLegalizer::LegalizeAction::Lower;
 using llvm::MachineLegalizer::LegalizeAction::NarrowScalar;
 using llvm::MachineLegalizer::LegalizeAction::WidenScalar;
 using llvm::MachineLegalizer::LegalizeAction::FewerElements;
@@ -20,12 +21,14 @@ using llvm::MachineLegalizer::LegalizeAction::MoreElements;
 using llvm::MachineLegalizer::LegalizeAction::Libcall;
 using llvm::MachineLegalizer::LegalizeAction::Custom;
 using llvm::MachineLegalizer::LegalizeAction::Unsupported;
+using llvm::MachineLegalizer::LegalizeAction::NotFound;
 
 // Define a couple of pretty printers to help debugging when things go wrong.
 namespace llvm {
 std::ostream &
 operator<<(std::ostream &OS, const llvm::MachineLegalizer::LegalizeAction Act) {
   switch (Act) {
+  case Lower: OS << "Lower"; break;
   case Legal: OS << "Legal"; break;
   case NarrowScalar: OS << "NarrowScalar"; break;
   case WidenScalar:  OS << "WidenScalar"; break;
@@ -34,6 +37,7 @@ operator<<(std::ostream &OS, const llvm::MachineLegalizer::LegalizeAction Act) {
   case Libcall: OS << "Libcall"; break;
   case Custom: OS << "Custom"; break;
   case Unsupported: OS << "Unsupported"; break;
+  case NotFound: OS << "NotFound";
   }
   return OS;
 }

@@ -14,10 +14,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/GlobalISel/MachineLegalizeHelper.h"
+#include "llvm/CodeGen/GlobalISel/CallLowering.h"
 #include "llvm/CodeGen/GlobalISel/MachineLegalizer.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetLowering.h"
 #include "llvm/Target/TargetSubtargetInfo.h"
 
 #include <sstream>
@@ -38,10 +40,14 @@ MachineLegalizeHelper::legalizeInstrStep(MachineInstr &MI,
   switch (std::get<0>(Action)) {
   case MachineLegalizer::Legal:
     return AlreadyLegal;
+  case MachineLegalizer::Libcall:
+    return libcall(MI);
   case MachineLegalizer::NarrowScalar:
     return narrowScalar(MI, std::get<1>(Action), std::get<2>(Action));
   case MachineLegalizer::WidenScalar:
     return widenScalar(MI, std::get<1>(Action), std::get<2>(Action));
+  case MachineLegalizer::Lower:
+    return lower(MI, std::get<1>(Action), std::get<2>(Action));
   case MachineLegalizer::FewerElements:
     return fewerElementsVector(MI, std::get<1>(Action), std::get<2>(Action));
   default:
@@ -52,21 +58,23 @@ MachineLegalizeHelper::legalizeInstrStep(MachineInstr &MI,
 MachineLegalizeHelper::LegalizeResult
 MachineLegalizeHelper::legalizeInstr(MachineInstr &MI,
                                      const MachineLegalizer &Legalizer) {
-  std::queue<MachineInstr *> WorkList;
-  MIRBuilder.recordInsertions([&](MachineInstr *MI) { WorkList.push(MI); });
-  WorkList.push(&MI);
+  SmallVector<MachineInstr *, 4> WorkList;
+  MIRBuilder.recordInsertions(
+      [&](MachineInstr *MI) { WorkList.push_back(MI); });
+  WorkList.push_back(&MI);
 
   bool Changed = false;
   LegalizeResult Res;
+  unsigned Idx = 0;
   do {
-    Res = legalizeInstrStep(*WorkList.front(), Legalizer);
+    Res = legalizeInstrStep(*WorkList[Idx], Legalizer);
     if (Res == UnableToLegalize) {
       MIRBuilder.stopRecordingInsertions();
       return UnableToLegalize;
     }
     Changed |= Res == Legalized;
-    WorkList.pop();
-  } while (!WorkList.empty());
+    ++Idx;
+  } while (Idx < WorkList.size());
 
   MIRBuilder.stopRecordingInsertions();
 
@@ -88,9 +96,35 @@ void MachineLegalizeHelper::extractParts(unsigned Reg, LLT Ty, int NumParts,
 }
 
 MachineLegalizeHelper::LegalizeResult
+MachineLegalizeHelper::libcall(MachineInstr &MI) {
+  unsigned Size = MI.getType().getSizeInBits();
+  MIRBuilder.setInstr(MI);
+
+  switch (MI.getOpcode()) {
+  default:
+    return UnableToLegalize;
+  case TargetOpcode::G_FREM: {
+    MVT Ty = MVT::getFloatingPointVT(MI.getType().getSizeInBits());
+    auto &CLI = *MIRBuilder.getMF().getSubtarget().getCallLowering();
+    auto &TLI = *MIRBuilder.getMF().getSubtarget().getTargetLowering();
+    const char *Name =
+        TLI.getLibcallName(Size == 64 ? RTLIB::REM_F64 : RTLIB::REM_F32);
+
+    CLI.lowerCall(MIRBuilder, MachineOperand::CreateES(Name), Ty,
+                  MI.getOperand(0).getReg(), {Ty, Ty},
+                  {MI.getOperand(1).getReg(), MI.getOperand(2).getReg()});
+    MI.eraseFromParent();
+    return Legalized;
+  }
+  }
+}
+
+MachineLegalizeHelper::LegalizeResult
 MachineLegalizeHelper::narrowScalar(MachineInstr &MI, unsigned TypeIdx,
                                     LLT NarrowTy) {
-  assert(TypeIdx == 0 && "don't know how to handle secondary types yet");
+  // FIXME: Don't know how to handle secondary types yet.
+  if (TypeIdx != 0)
+    return UnableToLegalize;
   switch (MI.getOpcode()) {
   default:
     return UnableToLegalize;
@@ -161,6 +195,33 @@ MachineLegalizeHelper::widenScalar(MachineInstr &MI, unsigned TypeIdx,
     MI.eraseFromParent();
     return Legalized;
   }
+  case TargetOpcode::G_SDIV:
+  case TargetOpcode::G_UDIV: {
+    unsigned ExtOp = MI.getOpcode() == TargetOpcode::G_SDIV
+                          ? TargetOpcode::G_SEXT
+                          : TargetOpcode::G_ZEXT;
+
+    unsigned LHSExt = MRI.createGenericVirtualRegister(WideSize);
+    MIRBuilder.buildInstr(ExtOp, {WideTy, MI.getType()})
+        .addDef(LHSExt)
+        .addUse(MI.getOperand(1).getReg());
+
+    unsigned RHSExt = MRI.createGenericVirtualRegister(WideSize);
+    MIRBuilder.buildInstr(ExtOp, {WideTy, MI.getType()})
+        .addDef(RHSExt)
+        .addUse(MI.getOperand(2).getReg());
+
+    unsigned ResExt = MRI.createGenericVirtualRegister(WideSize);
+    MIRBuilder.buildInstr(MI.getOpcode(), WideTy)
+        .addDef(ResExt)
+        .addUse(LHSExt)
+        .addUse(RHSExt);
+
+    MIRBuilder.buildTrunc({MI.getType(), WideTy}, MI.getOperand(0).getReg(),
+                          ResExt);
+    MI.eraseFromParent();
+    return Legalized;
+  }
   case TargetOpcode::G_LOAD: {
     assert(alignTo(Ty.getSizeInBits(), 8) == WideSize &&
            "illegal to increase number of bytes loaded");
@@ -205,38 +266,55 @@ MachineLegalizeHelper::widenScalar(MachineInstr &MI, unsigned TypeIdx,
     return Legalized;
   }
   case TargetOpcode::G_ICMP: {
-    if (TypeIdx == 0) {
-      unsigned TstExt = MRI.createGenericVirtualRegister(WideSize);
-      MIRBuilder.buildICmp(
-          {WideTy, MI.getType(1)},
-          static_cast<CmpInst::Predicate>(MI.getOperand(1).getPredicate()),
-          TstExt, MI.getOperand(2).getReg(), MI.getOperand(3).getReg());
-      MIRBuilder.buildTrunc({Ty, WideTy}, MI.getOperand(0).getReg(), TstExt);
-      MI.eraseFromParent();
-      return Legalized;
+    assert(TypeIdx == 1 && "unable to legalize predicate");
+    bool IsSigned = CmpInst::isSigned(
+        static_cast<CmpInst::Predicate>(MI.getOperand(1).getPredicate()));
+    unsigned Op0Ext = MRI.createGenericVirtualRegister(WideSize);
+    unsigned Op1Ext = MRI.createGenericVirtualRegister(WideSize);
+    if (IsSigned) {
+      MIRBuilder.buildSExt({WideTy, MI.getType(1)}, Op0Ext,
+                           MI.getOperand(2).getReg());
+      MIRBuilder.buildSExt({WideTy, MI.getType(1)}, Op1Ext,
+                           MI.getOperand(3).getReg());
     } else {
-      bool IsSigned = CmpInst::isSigned(
-          static_cast<CmpInst::Predicate>(MI.getOperand(1).getPredicate()));
-      unsigned Op0Ext = MRI.createGenericVirtualRegister(WideSize);
-      unsigned Op1Ext = MRI.createGenericVirtualRegister(WideSize);
-      if (IsSigned) {
-        MIRBuilder.buildSExt({WideTy, MI.getType(1)}, Op0Ext,
-                             MI.getOperand(2).getReg());
-        MIRBuilder.buildSExt({WideTy, MI.getType(1)}, Op1Ext,
-                             MI.getOperand(3).getReg());
-      } else {
-        MIRBuilder.buildZExt({WideTy, MI.getType(1)}, Op0Ext,
-                             MI.getOperand(2).getReg());
-        MIRBuilder.buildZExt({WideTy, MI.getType(1)}, Op1Ext,
-                             MI.getOperand(3).getReg());
-      }
-      MIRBuilder.buildICmp(
-          {MI.getType(0), WideTy},
-          static_cast<CmpInst::Predicate>(MI.getOperand(1).getPredicate()),
-          MI.getOperand(0).getReg(), Op0Ext, Op1Ext);
-      MI.eraseFromParent();
-      return Legalized;
+      MIRBuilder.buildZExt({WideTy, MI.getType(1)}, Op0Ext,
+                           MI.getOperand(2).getReg());
+      MIRBuilder.buildZExt({WideTy, MI.getType(1)}, Op1Ext,
+                           MI.getOperand(3).getReg());
     }
+    MIRBuilder.buildICmp(
+        {MI.getType(0), WideTy},
+        static_cast<CmpInst::Predicate>(MI.getOperand(1).getPredicate()),
+        MI.getOperand(0).getReg(), Op0Ext, Op1Ext);
+    MI.eraseFromParent();
+    return Legalized;
+  }
+  }
+}
+
+MachineLegalizeHelper::LegalizeResult
+MachineLegalizeHelper::lower(MachineInstr &MI, unsigned TypeIdx, LLT Ty) {
+  using namespace TargetOpcode;
+  unsigned Size = Ty.getSizeInBits();
+  MIRBuilder.setInstr(MI);
+
+  switch(MI.getOpcode()) {
+  default:
+    return UnableToLegalize;
+  case TargetOpcode::G_SREM:
+  case TargetOpcode::G_UREM: {
+    unsigned QuotReg = MRI.createGenericVirtualRegister(Size);
+    MIRBuilder.buildInstr(MI.getOpcode() == G_SREM ? G_SDIV : G_UDIV, Ty)
+        .addDef(QuotReg)
+        .addUse(MI.getOperand(1).getReg())
+        .addUse(MI.getOperand(2).getReg());
+
+    unsigned ProdReg = MRI.createGenericVirtualRegister(Size);
+    MIRBuilder.buildMul(Ty, ProdReg, QuotReg, MI.getOperand(2).getReg());
+    MIRBuilder.buildSub(Ty, MI.getOperand(0).getReg(),
+                        MI.getOperand(1).getReg(), ProdReg);
+    MI.eraseFromParent();
+    return Legalized;
   }
   }
 }
@@ -244,7 +322,9 @@ MachineLegalizeHelper::widenScalar(MachineInstr &MI, unsigned TypeIdx,
 MachineLegalizeHelper::LegalizeResult
 MachineLegalizeHelper::fewerElementsVector(MachineInstr &MI, unsigned TypeIdx,
                                            LLT NarrowTy) {
-  assert(TypeIdx == 0 && "don't know how to handle secondary types yet");
+  // FIXME: Don't know how to handle secondary types yet.
+  if (TypeIdx != 0)
+    return UnableToLegalize;
   switch (MI.getOpcode()) {
   default:
     return UnableToLegalize;

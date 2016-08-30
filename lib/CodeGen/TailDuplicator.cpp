@@ -40,10 +40,18 @@ STATISTIC(NumTailDupRemoved,
 STATISTIC(NumDeadBlocks, "Number of dead blocks removed");
 STATISTIC(NumAddedPHIs, "Number of phis added");
 
+namespace llvm {
+
 // Heuristic for tail duplication.
 static cl::opt<unsigned> TailDuplicateSize(
     "tail-dup-size",
     cl::desc("Maximum instructions to consider tail duplicating"), cl::init(2),
+    cl::Hidden);
+
+cl::opt<unsigned> TailDupIndirectBranchSize(
+    "tail-dup-indirect-size",
+    cl::desc("Maximum instructions to consider tail duplicating blocks that "
+             "end with indirect branches."), cl::init(20),
     cl::Hidden);
 
 static cl::opt<bool>
@@ -53,8 +61,6 @@ static cl::opt<bool>
 
 static cl::opt<unsigned> TailDupLimit("tail-dup-limit", cl::init(~0U),
                                       cl::Hidden);
-
-namespace llvm {
 
 void TailDuplicator::initMF(MachineFunction &MFin,
                             const MachineBranchProbabilityInfo *MBPIin,
@@ -119,8 +125,13 @@ static void VerifyPHIs(MachineFunction &MF, bool CheckExtra) {
 }
 
 /// Tail duplicate the block and cleanup.
-bool TailDuplicator::tailDuplicateAndUpdate(bool IsSimple,
-                                            MachineBasicBlock *MBB) {
+/// \p IsSimple - return value of isSimpleBB
+/// \p MBB - block to be duplicated
+/// \p DuplicatedPreds - if non-null, \p DuplicatedPreds will contain a list of
+///     all Preds that received a copy of \p MBB.
+bool TailDuplicator::tailDuplicateAndUpdate(
+    bool IsSimple, MachineBasicBlock *MBB,
+    SmallVectorImpl<MachineBasicBlock*> *DuplicatedPreds) {
   // Save the successors list.
   SmallSetVector<MachineBasicBlock *, 8> Succs(MBB->succ_begin(),
                                                MBB->succ_end());
@@ -215,6 +226,9 @@ bool TailDuplicator::tailDuplicateAndUpdate(bool IsSimple,
 
   if (NewPHIs.size())
     NumAddedPHIs += NewPHIs.size();
+
+  if (DuplicatedPreds)
+    *DuplicatedPreds = std::move(TDBBs);
 
   return true;
 }
@@ -542,7 +556,7 @@ bool TailDuplicator::shouldTailDuplicate(bool IsSimple,
     HasIndirectbr = TailBB.back().isIndirectBranch();
 
   if (HasIndirectbr && PreRegAlloc)
-    MaxDuplicateCount = 20;
+    MaxDuplicateCount = TailDupIndirectBranchSize;
 
   // Check the instructions in the block to determine whether tail-duplication
   // is invalid or unlikely to be profitable.

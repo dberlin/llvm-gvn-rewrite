@@ -48,14 +48,19 @@ class TargetRegisterClass;
 struct MachinePointerInfo;
 struct WinEHFuncInfo;
 
-template <>
-struct ilist_traits<MachineBasicBlock>
-    : public ilist_default_traits<MachineBasicBlock> {
+template <> struct ilist_alloc_traits<MachineBasicBlock> {
+  void deleteNode(MachineBasicBlock *MBB);
+  // Disallow createNode...
+};
+
+template <> struct ilist_callback_traits<MachineBasicBlock> {
   void addNodeToList(MachineBasicBlock* MBB);
   void removeNodeFromList(MachineBasicBlock* MBB);
-  void deleteNode(MachineBasicBlock *MBB);
-private:
-  void createNode(const MachineBasicBlock &);
+
+  template <class Iterator>
+  void transferNodesFromList(ilist_callback_traits &OldList, Iterator, Iterator) {
+    llvm_unreachable("Never transfer between lists");
+  }
 };
 
 /// MachineFunctionInfo - This class can be derived from and used by targets to
@@ -119,6 +124,7 @@ public:
     NoPHIs,
     TracksLiveness,
     NoVRegs,
+    FailedISel,
     Legalized,
     RegBankSelected,
     Selected,
@@ -132,15 +138,20 @@ public:
     Properties.set(static_cast<unsigned>(P));
     return *this;
   }
-  MachineFunctionProperties &clear(Property P) {
+  MachineFunctionProperties &reset(Property P) {
     Properties.reset(static_cast<unsigned>(P));
+    return *this;
+  }
+  /// Reset all the properties.
+  MachineFunctionProperties &reset() {
+    Properties.reset();
     return *this;
   }
   MachineFunctionProperties &set(const MachineFunctionProperties &MFP) {
     Properties |= MFP.Properties;
     return *this;
   }
-  MachineFunctionProperties &clear(const MachineFunctionProperties &MFP) {
+  MachineFunctionProperties &reset(const MachineFunctionProperties &MFP) {
     Properties.reset(MFP.Properties);
     return *this;
   }
@@ -233,10 +244,27 @@ class MachineFunction {
 
   MachineFunction(const MachineFunction &) = delete;
   void operator=(const MachineFunction&) = delete;
+
+  /// Clear all the members of this MachineFunction, but the ones used
+  /// to initialize again the MachineFunction.
+  /// More specifically, this deallocates all the dynamically allocated
+  /// objects and get rid of all the XXXInfo data structure, but keep
+  /// unchanged the references to Fn, Target, MMI, and FunctionNumber.
+  void clear();
+  /// Allocate and initialize the different members.
+  /// In particular, the XXXInfo data structure.
+  /// \pre Fn, Target, MMI, and FunctionNumber are properly set.
+  void init();
 public:
   MachineFunction(const Function *Fn, const TargetMachine &TM,
                   unsigned FunctionNum, MachineModuleInfo &MMI);
   ~MachineFunction();
+
+  /// Reset the instance as if it was just created.
+  void reset() {
+    clear();
+    init();
+  }
 
   MachineModuleInfo &getMMI() const { return MMI; }
   MCContext &getContext() const { return Ctx; }
@@ -422,8 +450,8 @@ public:
   // Provide accessors for the MachineBasicBlock list...
   typedef BasicBlockListType::iterator iterator;
   typedef BasicBlockListType::const_iterator const_iterator;
-  typedef std::reverse_iterator<const_iterator> const_reverse_iterator;
-  typedef std::reverse_iterator<iterator>             reverse_iterator;
+  typedef BasicBlockListType::const_reverse_iterator const_reverse_iterator;
+  typedef BasicBlockListType::reverse_iterator reverse_iterator;
 
   /// Support for MachineBasicBlock::getNextNode().
   static BasicBlockListType MachineFunction::*

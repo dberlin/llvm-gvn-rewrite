@@ -4695,7 +4695,9 @@ PPCTargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   ImmutableCallSite *CS                 = CLI.CS;
 
   if (isTailCall) {
-    if (Subtarget.isSVR4ABI() && Subtarget.isPPC64())
+    if (Subtarget.useLongCalls() && !(CS && CS->isMustTailCall()))
+      isTailCall = false;
+    else if (Subtarget.isSVR4ABI() && Subtarget.isPPC64())
       isTailCall =
         IsEligibleForTailCallOptimization_64SVR4(Callee, CallConv, CS,
                                                  isVarArg, Outs, Ins, DAG);
@@ -4724,6 +4726,13 @@ PPCTargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   if (!isTailCall && CS && CS->isMustTailCall())
     report_fatal_error("failed to perform tail call elimination on a call "
                        "site marked musttail");
+
+  // When long calls (i.e. indirect calls) are always used, calls are always
+  // made via function pointer. If we have a function name, first translate it
+  // into a pointer.
+  if (Subtarget.useLongCalls() && isa<GlobalAddressSDNode>(Callee) &&
+      !isTailCall)
+    Callee = LowerGlobalAddress(Callee, DAG);
 
   if (Subtarget.isSVR4ABI()) {
     if (Subtarget.isPPC64())
@@ -8387,7 +8396,9 @@ Instruction* PPCTargetLowering::emitTrailingFence(IRBuilder<> &Builder,
 MachineBasicBlock *
 PPCTargetLowering::EmitAtomicBinary(MachineInstr &MI, MachineBasicBlock *BB,
                                     unsigned AtomicSize,
-                                    unsigned BinOpcode) const {
+                                    unsigned BinOpcode,
+                                    unsigned CmpOpcode,
+                                    unsigned CmpPred) const {
   // This also handles ATOMIC_SWAP, indicated by BinOpcode==0.
   const TargetInstrInfo *TII = Subtarget.getInstrInfo();
 
@@ -8427,8 +8438,12 @@ PPCTargetLowering::EmitAtomicBinary(MachineInstr &MI, MachineBasicBlock *BB,
   DebugLoc dl = MI.getDebugLoc();
 
   MachineBasicBlock *loopMBB = F->CreateMachineBasicBlock(LLVM_BB);
+  MachineBasicBlock *loop2MBB =
+    CmpOpcode ? F->CreateMachineBasicBlock(LLVM_BB) : nullptr;
   MachineBasicBlock *exitMBB = F->CreateMachineBasicBlock(LLVM_BB);
   F->insert(It, loopMBB);
+  if (CmpOpcode)
+    F->insert(It, loop2MBB);
   F->insert(It, exitMBB);
   exitMBB->splice(exitMBB->begin(), BB,
                   std::next(MachineBasicBlock::iterator(MI)), BB->end());
@@ -8450,11 +8465,31 @@ PPCTargetLowering::EmitAtomicBinary(MachineInstr &MI, MachineBasicBlock *BB,
   //   st[wd]cx. r0, ptr
   //   bne- loopMBB
   //   fallthrough --> exitMBB
+
+  // For max/min...
+  //  loopMBB:
+  //   l[wd]arx dest, ptr
+  //   cmpl?[wd] incr, dest
+  //   bgt exitMBB
+  //  loop2MBB:
+  //   st[wd]cx. dest, ptr
+  //   bne- loopMBB
+  //   fallthrough --> exitMBB
+
   BB = loopMBB;
   BuildMI(BB, dl, TII->get(LoadMnemonic), dest)
     .addReg(ptrA).addReg(ptrB);
   if (BinOpcode)
     BuildMI(BB, dl, TII->get(BinOpcode), TmpReg).addReg(incr).addReg(dest);
+  if (CmpOpcode) {
+    BuildMI(BB, dl, TII->get(CmpOpcode), PPC::CR0)
+      .addReg(incr).addReg(dest);
+    BuildMI(BB, dl, TII->get(PPC::BCC))
+      .addImm(CmpPred).addReg(PPC::CR0).addMBB(exitMBB);
+    BB->addSuccessor(loop2MBB);
+    BB->addSuccessor(exitMBB);
+    BB = loop2MBB;
+  }
   BuildMI(BB, dl, TII->get(StoreMnemonic))
     .addReg(TmpReg).addReg(ptrA).addReg(ptrB);
   BuildMI(BB, dl, TII->get(PPC::BCC))
@@ -8472,10 +8507,13 @@ MachineBasicBlock *
 PPCTargetLowering::EmitPartwordAtomicBinary(MachineInstr &MI,
                                             MachineBasicBlock *BB,
                                             bool is8bit, // operation
-                                            unsigned BinOpcode) const {
+                                            unsigned BinOpcode,
+                                            unsigned CmpOpcode,
+                                            unsigned CmpPred) const {
   // If we support part-word atomic mnemonics, just use them
   if (Subtarget.hasPartwordAtomics())
-    return EmitAtomicBinary(MI, BB, is8bit ? 1 : 2, BinOpcode);
+    return EmitAtomicBinary(MI, BB, is8bit ? 1 : 2, BinOpcode,
+                            CmpOpcode, CmpPred);
 
   // This also handles ATOMIC_SWAP, indicated by BinOpcode==0.
   const TargetInstrInfo *TII = Subtarget.getInstrInfo();
@@ -8484,6 +8522,7 @@ PPCTargetLowering::EmitPartwordAtomicBinary(MachineInstr &MI,
   // registers without caring whether they're 32 or 64, but here we're
   // doing actual arithmetic on the addresses.
   bool is64bit = Subtarget.isPPC64();
+  bool isLittleEndian = Subtarget.isLittleEndian();
   unsigned ZeroReg = is64bit ? PPC::ZERO8 : PPC::ZERO;
 
   const BasicBlock *LLVM_BB = BB->getBasicBlock();
@@ -8497,8 +8536,12 @@ PPCTargetLowering::EmitPartwordAtomicBinary(MachineInstr &MI,
   DebugLoc dl = MI.getDebugLoc();
 
   MachineBasicBlock *loopMBB = F->CreateMachineBasicBlock(LLVM_BB);
+  MachineBasicBlock *loop2MBB =
+    CmpOpcode ? F->CreateMachineBasicBlock(LLVM_BB) : nullptr;
   MachineBasicBlock *exitMBB = F->CreateMachineBasicBlock(LLVM_BB);
   F->insert(It, loopMBB);
+  if (CmpOpcode)
+    F->insert(It, loop2MBB);
   F->insert(It, exitMBB);
   exitMBB->splice(exitMBB->begin(), BB,
                   std::next(MachineBasicBlock::iterator(MI)), BB->end());
@@ -8509,7 +8552,8 @@ PPCTargetLowering::EmitPartwordAtomicBinary(MachineInstr &MI,
                                           : &PPC::GPRCRegClass;
   unsigned PtrReg = RegInfo.createVirtualRegister(RC);
   unsigned Shift1Reg = RegInfo.createVirtualRegister(RC);
-  unsigned ShiftReg = RegInfo.createVirtualRegister(RC);
+  unsigned ShiftReg =
+    isLittleEndian ? Shift1Reg : RegInfo.createVirtualRegister(RC);
   unsigned Incr2Reg = RegInfo.createVirtualRegister(RC);
   unsigned MaskReg = RegInfo.createVirtualRegister(RC);
   unsigned Mask2Reg = RegInfo.createVirtualRegister(RC);
@@ -8554,8 +8598,9 @@ PPCTargetLowering::EmitPartwordAtomicBinary(MachineInstr &MI,
   }
   BuildMI(BB, dl, TII->get(PPC::RLWINM), Shift1Reg).addReg(Ptr1Reg)
       .addImm(3).addImm(27).addImm(is8bit ? 28 : 27);
-  BuildMI(BB, dl, TII->get(is64bit ? PPC::XORI8 : PPC::XORI), ShiftReg)
-      .addReg(Shift1Reg).addImm(is8bit ? 24 : 16);
+  if (!isLittleEndian)
+    BuildMI(BB, dl, TII->get(is64bit ? PPC::XORI8 : PPC::XORI), ShiftReg)
+        .addReg(Shift1Reg).addImm(is8bit ? 24 : 16);
   if (is64bit)
     BuildMI(BB, dl, TII->get(PPC::RLDICR), PtrReg)
       .addReg(Ptr1Reg).addImm(0).addImm(61);
@@ -8583,6 +8628,32 @@ PPCTargetLowering::EmitPartwordAtomicBinary(MachineInstr &MI,
     .addReg(TmpDestReg).addReg(MaskReg);
   BuildMI(BB, dl, TII->get(is64bit ? PPC::AND8 : PPC::AND), Tmp3Reg)
     .addReg(TmpReg).addReg(MaskReg);
+  if (CmpOpcode) {
+    // For unsigned comparisons, we can directly compare the shifted values.
+    // For signed comparisons we shift and sign extend.
+    unsigned SReg = RegInfo.createVirtualRegister(RC);
+    BuildMI(BB, dl, TII->get(is64bit ? PPC::AND8 : PPC::AND), SReg)
+      .addReg(TmpDestReg).addReg(MaskReg);
+    unsigned ValueReg = SReg;
+    unsigned CmpReg = Incr2Reg;
+    if (CmpOpcode == PPC::CMPW) {
+      ValueReg = RegInfo.createVirtualRegister(RC);
+      BuildMI(BB, dl, TII->get(PPC::SRW), ValueReg)
+        .addReg(SReg).addReg(ShiftReg);
+      unsigned ValueSReg = RegInfo.createVirtualRegister(RC);
+      BuildMI(BB, dl, TII->get(is8bit ? PPC::EXTSB : PPC::EXTSH), ValueSReg)
+        .addReg(ValueReg);
+      ValueReg = ValueSReg;
+      CmpReg = incr;
+    }
+    BuildMI(BB, dl, TII->get(CmpOpcode), PPC::CR0)
+      .addReg(CmpReg).addReg(ValueReg);
+    BuildMI(BB, dl, TII->get(PPC::BCC))
+      .addImm(CmpPred).addReg(PPC::CR0).addMBB(exitMBB);
+    BB->addSuccessor(loop2MBB);
+    BB->addSuccessor(exitMBB);
+    BB = loop2MBB;
+  }
   BuildMI(BB, dl, TII->get(is64bit ? PPC::OR8 : PPC::OR), Tmp4Reg)
     .addReg(Tmp3Reg).addReg(Tmp2Reg);
   BuildMI(BB, dl, TII->get(PPC::STWCX))
@@ -9089,6 +9160,42 @@ PPCTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
   else if (MI.getOpcode() == PPC::ATOMIC_LOAD_SUB_I64)
     BB = EmitAtomicBinary(MI, BB, 8, PPC::SUBF8);
 
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_MIN_I8)
+    BB = EmitPartwordAtomicBinary(MI, BB, true, 0, PPC::CMPW, PPC::PRED_GE);
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_MIN_I16)
+    BB = EmitPartwordAtomicBinary(MI, BB, false, 0, PPC::CMPW, PPC::PRED_GE);
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_MIN_I32)
+    BB = EmitAtomicBinary(MI, BB, 4, 0, PPC::CMPW, PPC::PRED_GE);
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_MIN_I64)
+    BB = EmitAtomicBinary(MI, BB, 8, 0, PPC::CMPD, PPC::PRED_GE);
+
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_MAX_I8)
+    BB = EmitPartwordAtomicBinary(MI, BB, true, 0, PPC::CMPW, PPC::PRED_LE);
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_MAX_I16)
+    BB = EmitPartwordAtomicBinary(MI, BB, false, 0, PPC::CMPW, PPC::PRED_LE);
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_MAX_I32)
+    BB = EmitAtomicBinary(MI, BB, 4, 0, PPC::CMPW, PPC::PRED_LE);
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_MAX_I64)
+    BB = EmitAtomicBinary(MI, BB, 8, 0, PPC::CMPD, PPC::PRED_LE);
+
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_UMIN_I8)
+    BB = EmitPartwordAtomicBinary(MI, BB, true, 0, PPC::CMPLW, PPC::PRED_GE);
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_UMIN_I16)
+    BB = EmitPartwordAtomicBinary(MI, BB, false, 0, PPC::CMPLW, PPC::PRED_GE);
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_UMIN_I32)
+    BB = EmitAtomicBinary(MI, BB, 4, 0, PPC::CMPLW, PPC::PRED_GE);
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_UMIN_I64)
+    BB = EmitAtomicBinary(MI, BB, 8, 0, PPC::CMPLD, PPC::PRED_GE);
+
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_UMAX_I8)
+    BB = EmitPartwordAtomicBinary(MI, BB, true, 0, PPC::CMPLW, PPC::PRED_LE);
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_UMAX_I16)
+    BB = EmitPartwordAtomicBinary(MI, BB, false, 0, PPC::CMPLW, PPC::PRED_LE);
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_UMAX_I32)
+    BB = EmitAtomicBinary(MI, BB, 4, 0, PPC::CMPLW, PPC::PRED_LE);
+  else if (MI.getOpcode() == PPC::ATOMIC_LOAD_UMAX_I64)
+    BB = EmitAtomicBinary(MI, BB, 8, 0, PPC::CMPLD, PPC::PRED_LE);
+
   else if (MI.getOpcode() == PPC::ATOMIC_SWAP_I8)
     BB = EmitPartwordAtomicBinary(MI, BB, true, 0);
   else if (MI.getOpcode() == PPC::ATOMIC_SWAP_I16)
@@ -9198,6 +9305,7 @@ PPCTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     // since we're actually doing arithmetic on them.  Other registers
     // can be 32-bit.
     bool is64bit = Subtarget.isPPC64();
+    bool isLittleEndian = Subtarget.isLittleEndian();
     bool is8bit = MI.getOpcode() == PPC::ATOMIC_CMP_SWAP_I8;
 
     unsigned dest = MI.getOperand(0).getReg();
@@ -9224,7 +9332,8 @@ PPCTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
                                             : &PPC::GPRCRegClass;
     unsigned PtrReg = RegInfo.createVirtualRegister(RC);
     unsigned Shift1Reg = RegInfo.createVirtualRegister(RC);
-    unsigned ShiftReg = RegInfo.createVirtualRegister(RC);
+    unsigned ShiftReg =
+      isLittleEndian ? Shift1Reg : RegInfo.createVirtualRegister(RC);
     unsigned NewVal2Reg = RegInfo.createVirtualRegister(RC);
     unsigned NewVal3Reg = RegInfo.createVirtualRegister(RC);
     unsigned OldVal2Reg = RegInfo.createVirtualRegister(RC);
@@ -9279,8 +9388,9 @@ PPCTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     }
     BuildMI(BB, dl, TII->get(PPC::RLWINM), Shift1Reg).addReg(Ptr1Reg)
         .addImm(3).addImm(27).addImm(is8bit ? 28 : 27);
-    BuildMI(BB, dl, TII->get(is64bit ? PPC::XORI8 : PPC::XORI), ShiftReg)
-        .addReg(Shift1Reg).addImm(is8bit ? 24 : 16);
+    if (!isLittleEndian)
+      BuildMI(BB, dl, TII->get(is64bit ? PPC::XORI8 : PPC::XORI), ShiftReg)
+          .addReg(Shift1Reg).addImm(is8bit ? 24 : 16);
     if (is64bit)
       BuildMI(BB, dl, TII->get(PPC::RLDICR), PtrReg)
         .addReg(Ptr1Reg).addImm(0).addImm(61);
