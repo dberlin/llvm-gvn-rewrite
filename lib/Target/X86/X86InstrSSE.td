@@ -2239,17 +2239,14 @@ let Predicates = [HasSSE2] in {
 // Provide other assembly rr and rm forms to address this explicitly.
 def VCVTPD2PSrr : VPDI<0x5A, MRMSrcReg, (outs VR128:$dst), (ins VR128:$src),
                        "cvtpd2ps\t{$src, $dst|$dst, $src}",
-                       [(set VR128:$dst, (int_x86_sse2_cvtpd2ps VR128:$src))],
-                       IIC_SSE_CVT_PD_RR>, VEX, Sched<[WriteCvtF2F]>;
+                       [], IIC_SSE_CVT_PD_RR>, VEX, Sched<[WriteCvtF2F]>;
 
 // XMM only
 def : InstAlias<"vcvtpd2psx\t{$src, $dst|$dst, $src}",
                 (VCVTPD2PSrr VR128:$dst, VR128:$src), 0>;
 def VCVTPD2PSXrm : VPDI<0x5A, MRMSrcMem, (outs VR128:$dst), (ins f128mem:$src),
                         "cvtpd2psx\t{$src, $dst|$dst, $src}",
-                        [(set VR128:$dst,
-                          (int_x86_sse2_cvtpd2ps (loadv2f64 addr:$src)))],
-                        IIC_SSE_CVT_PD_RM>, VEX, Sched<[WriteCvtF2FLd]>;
+                        [], IIC_SSE_CVT_PD_RM>, VEX, Sched<[WriteCvtF2FLd]>;
 
 // YMM only
 def VCVTPD2PSYrr : VPDI<0x5A, MRMSrcReg, (outs VR128:$dst), (ins VR256:$src),
@@ -2267,14 +2264,10 @@ def : InstAlias<"vcvtpd2ps\t{$src, $dst|$dst, $src}",
 
 def CVTPD2PSrr : PDI<0x5A, MRMSrcReg, (outs VR128:$dst), (ins VR128:$src),
                      "cvtpd2ps\t{$src, $dst|$dst, $src}",
-                     [(set VR128:$dst, (int_x86_sse2_cvtpd2ps VR128:$src))],
-                     IIC_SSE_CVT_PD_RR>, Sched<[WriteCvtF2F]>;
+                     [], IIC_SSE_CVT_PD_RR>, Sched<[WriteCvtF2F]>;
 def CVTPD2PSrm : PDI<0x5A, MRMSrcMem, (outs VR128:$dst), (ins f128mem:$src),
                      "cvtpd2ps\t{$src, $dst|$dst, $src}",
-                     [(set VR128:$dst,
-                       (int_x86_sse2_cvtpd2ps (memopv2f64 addr:$src)))],
-                     IIC_SSE_CVT_PD_RM>, Sched<[WriteCvtF2FLd]>;
-
+                     [], IIC_SSE_CVT_PD_RM>, Sched<[WriteCvtF2FLd]>;
 
 // AVX 256-bit register conversion intrinsics
 // FIXME: Migrate SSE conversion intrinsics matching to use patterns as below
@@ -2288,6 +2281,9 @@ let Predicates = [HasAVX] in {
 
 let Predicates = [HasAVX, NoVLX] in {
   // Match fpround and fpextend for 128/256-bit conversions
+  def : Pat<(v4f32 (bitconvert (X86vzmovl (v2f64 (bitconvert
+                               (v4f32 (X86vfpround (v2f64 VR128:$src)))))))),
+            (VCVTPD2PSrr VR128:$src)>;
   def : Pat<(v4f32 (X86vfpround (v2f64 VR128:$src))),
             (VCVTPD2PSrr VR128:$src)>;
   def : Pat<(v4f32 (X86vfpround (loadv2f64 addr:$src))),
@@ -2307,6 +2303,9 @@ let Predicates = [HasAVX, NoVLX] in {
 
 let Predicates = [UseSSE2] in {
   // Match fpround and fpextend for 128 conversions
+  def : Pat<(v4f32 (bitconvert (X86vzmovl (v2f64 (bitconvert
+                               (v4f32 (X86vfpround (v2f64 VR128:$src)))))))),
+            (CVTPD2PSrr VR128:$src)>;
   def : Pat<(v4f32 (X86vfpround (v2f64 VR128:$src))),
             (CVTPD2PSrr VR128:$src)>;
   def : Pat<(v4f32 (X86vfpround (memopv2f64 addr:$src))),

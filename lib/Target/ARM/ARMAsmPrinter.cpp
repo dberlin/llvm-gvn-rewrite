@@ -614,6 +614,17 @@ static ARMBuildAttrs::CPUArch getArchForCPU(StringRef CPU,
     return ARMBuildAttrs::v4;
 }
 
+// Returns true if all functions have the same function attribute value
+static bool haveAllFunctionsAttribute(const Module &M, StringRef Attr,
+                                      StringRef Value) {
+  for (auto &F : M)
+    if (F.getFnAttribute(Attr).getValueAsString() != Value)
+      return false;
+
+  return true;
+}
+
+
 void ARMAsmPrinter::emitAttributes() {
   MCTargetStreamer &TS = *OutStreamer->getTargetStreamer();
   ARMTargetStreamer &ATS = static_cast<ARMTargetStreamer &>(TS);
@@ -750,17 +761,21 @@ void ARMAsmPrinter::emitAttributes() {
                       ARMBuildAttrs::AddressDirect);
   }
 
-  // Signal various FP modes.
-  if (!TM.Options.UnsafeFPMath) {
+  // Set FP Denormals.
+  if (haveAllFunctionsAttribute(*MMI->getModule(), "denormal-fp-math",
+                                "preserve-sign") ||
+      TM.Options.FPDenormalType == FPDenormal::PreserveSign)
+    ATS.emitAttribute(ARMBuildAttrs::ABI_FP_denormal,
+                      ARMBuildAttrs::PreserveFPSign);
+  else if (haveAllFunctionsAttribute(*MMI->getModule(), "denormal-fp-math",
+                                     "positive-zero") ||
+           TM.Options.FPDenormalType == FPDenormal::PositiveZero)
+    ATS.emitAttribute(ARMBuildAttrs::ABI_FP_denormal,
+                      ARMBuildAttrs::PositiveZero);
+  else if (!TM.Options.UnsafeFPMath)
     ATS.emitAttribute(ARMBuildAttrs::ABI_FP_denormal,
                       ARMBuildAttrs::IEEEDenormals);
-    ATS.emitAttribute(ARMBuildAttrs::ABI_FP_exceptions, ARMBuildAttrs::Allowed);
-
-    // If the user has permitted this code to choose the IEEE 754
-    // rounding at run-time, emit the rounding attribute.
-    if (TM.Options.HonorSignDependentRoundingFPMathOption)
-      ATS.emitAttribute(ARMBuildAttrs::ABI_FP_rounding, ARMBuildAttrs::Allowed);
-  } else {
+  else {
     if (!STI.hasVFP2()) {
       // When the target doesn't have an FPU (by design or
       // intention), the assumptions made on the software support
@@ -784,6 +799,20 @@ void ARMAsmPrinter::emitAttributes() {
     // LLVM has chosen to flush this to positive zero (most likely for
     // GCC compatibility), so that's the chosen value here (the
     // absence of its emission implies zero).
+  }
+
+  // Set FP exceptions and rounding
+  if (haveAllFunctionsAttribute(*MMI->getModule(), "no-trapping-math", "true") ||
+      TM.Options.NoTrappingFPMath)
+    ATS.emitAttribute(ARMBuildAttrs::ABI_FP_exceptions,
+                      ARMBuildAttrs::Not_Allowed);
+  else if (!TM.Options.UnsafeFPMath) {
+    ATS.emitAttribute(ARMBuildAttrs::ABI_FP_exceptions, ARMBuildAttrs::Allowed);
+
+    // If the user has permitted this code to choose the IEEE 754
+    // rounding at run-time, emit the rounding attribute.
+    if (TM.Options.HonorSignDependentRoundingFPMathOption)
+      ATS.emitAttribute(ARMBuildAttrs::ABI_FP_rounding, ARMBuildAttrs::Allowed);
   }
 
   // TM.Options.NoInfsFPMath && TM.Options.NoNaNsFPMath is the

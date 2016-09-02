@@ -1654,6 +1654,7 @@ defm VPCMPGTQ : avx512_icmp_packed_rmb_vl<0x37, "vpcmpgtq", X86pcmpgtm,
                       avx512vl_i64_info, HasAVX512>,
                 T8PD, VEX_W, EVEX_CD8<64, CD8VF>;
 
+let Predicates = [HasAVX512, NoVLX] in {
 def : Pat<(v8i1 (X86pcmpgtm (v8i32 VR256X:$src1), (v8i32 VR256X:$src2))),
             (COPY_TO_REGCLASS (VPCMPGTDZrr
             (v16i32 (SUBREG_TO_REG (i32 0), VR256X:$src1, sub_ymm)),
@@ -1663,6 +1664,7 @@ def : Pat<(v8i1 (X86pcmpeqm (v8i32 VR256X:$src1), (v8i32 VR256X:$src2))),
             (COPY_TO_REGCLASS (VPCMPEQDZrr
             (v16i32 (SUBREG_TO_REG (i32 0), VR256X:$src1, sub_ymm)),
             (v16i32 (SUBREG_TO_REG (i32 0), VR256X:$src2, sub_ymm))), VK8)>;
+}
 
 multiclass avx512_icmp_cc<bits<8> opc, string Suffix, SDNode OpNode,
                           X86VectorVTInfo _> {
@@ -4234,6 +4236,73 @@ defm VOR   : avx512_fp_binop_p<0x56, "vor", X86for, HasDQI,
                                SSE_ALU_ITINS_P, 1>;
 defm VXOR  : avx512_fp_binop_p<0x57, "vxor", X86fxor, HasDQI,
                                SSE_ALU_ITINS_P, 1>;
+
+// Patterns catch floating point selects with bitcasted integer logic ops.
+multiclass avx512_fp_logical_lowering<string InstrStr, SDNode OpNode,
+                                      X86VectorVTInfo _, Predicate prd> {
+let Predicates = [prd] in {
+  // Masked register-register logical operations.
+  def : Pat<(_.VT (vselect _.KRCWM:$mask,
+                   (bitconvert (_.i64VT (OpNode _.RC:$src1, _.RC:$src2))),
+                   _.RC:$src0)),
+            (!cast<Instruction>(InstrStr#rrk) _.RC:$src0, _.KRCWM:$mask,
+             _.RC:$src1, _.RC:$src2)>;
+  def : Pat<(_.VT (vselect _.KRCWM:$mask,
+                   (bitconvert (_.i64VT (OpNode _.RC:$src1, _.RC:$src2))),
+                   _.ImmAllZerosV)),
+            (!cast<Instruction>(InstrStr#rrkz) _.KRCWM:$mask, _.RC:$src1,
+             _.RC:$src2)>;
+  // Masked register-memory logical operations.
+  def : Pat<(_.VT (vselect _.KRCWM:$mask,
+                   (bitconvert (_.i64VT (OpNode _.RC:$src1,
+                                         (load addr:$src2)))),
+                   _.RC:$src0)),
+            (!cast<Instruction>(InstrStr#rmk) _.RC:$src0, _.KRCWM:$mask,
+             _.RC:$src1, addr:$src2)>;
+  def : Pat<(_.VT (vselect _.KRCWM:$mask,
+                   (bitconvert (_.i64VT (OpNode _.RC:$src1, (load addr:$src2)))),
+                   _.ImmAllZerosV)),
+            (!cast<Instruction>(InstrStr#rmkz) _.KRCWM:$mask, _.RC:$src1,
+             addr:$src2)>;
+  // Register-broadcast logical operations.
+  def : Pat<(_.i64VT (OpNode _.RC:$src1,
+                      (bitconvert (_.VT (X86VBroadcast
+                                         (_.ScalarLdFrag addr:$src2)))))),
+            (!cast<Instruction>(InstrStr#rmb) _.RC:$src1, addr:$src2)>;
+  def : Pat<(_.VT (vselect _.KRCWM:$mask,
+                   (bitconvert
+                    (_.i64VT (OpNode _.RC:$src1,
+                              (bitconvert (_.VT
+                                           (X86VBroadcast
+                                            (_.ScalarLdFrag addr:$src2))))))),
+                   _.RC:$src0)),
+            (!cast<Instruction>(InstrStr#rmbk) _.RC:$src0, _.KRCWM:$mask,
+             _.RC:$src1, addr:$src2)>;
+  def : Pat<(_.VT (vselect _.KRCWM:$mask,
+                   (bitconvert
+                    (_.i64VT (OpNode _.RC:$src1,
+                              (bitconvert (_.VT
+                                           (X86VBroadcast
+                                            (_.ScalarLdFrag addr:$src2))))))),
+                   _.ImmAllZerosV)),
+            (!cast<Instruction>(InstrStr#rmbkz)  _.KRCWM:$mask,
+             _.RC:$src1, addr:$src2)>;
+}
+}
+
+multiclass avx512_fp_logical_lowering_sizes<string InstrStr, SDNode OpNode> {
+  defm : avx512_fp_logical_lowering<InstrStr#DZ128, OpNode, v4f32x_info, HasVLX>;
+  defm : avx512_fp_logical_lowering<InstrStr#QZ128, OpNode, v2f64x_info, HasVLX>;
+  defm : avx512_fp_logical_lowering<InstrStr#DZ256, OpNode, v8f32x_info, HasVLX>;
+  defm : avx512_fp_logical_lowering<InstrStr#QZ256, OpNode, v4f64x_info, HasVLX>;
+  defm : avx512_fp_logical_lowering<InstrStr#DZ, OpNode, v16f32_info, HasAVX512>;
+  defm : avx512_fp_logical_lowering<InstrStr#QZ, OpNode, v8f64_info, HasAVX512>;
+}
+
+defm : avx512_fp_logical_lowering_sizes<"VPAND", and>;
+defm : avx512_fp_logical_lowering_sizes<"VPOR", or>;
+defm : avx512_fp_logical_lowering_sizes<"VPXOR", xor>;
+defm : avx512_fp_logical_lowering_sizes<"VPANDN", X86andnp>;
 
 multiclass avx512_fp_scalef_p<bits<8> opc, string OpcodeStr, SDNode OpNode,
                             X86VectorVTInfo _> {

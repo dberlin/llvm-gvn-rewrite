@@ -3685,8 +3685,7 @@ static bool hasValueBeenRAUWed(ArrayRef<Value *> VL, ArrayRef<WeakVH> VH,
   return !std::equal(VL.begin(), VL.end(), VH.begin());
 }
 
-bool SLPVectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain,
-                                            int CostThreshold, BoUpSLP &R,
+bool SLPVectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
                                             unsigned VecRegSize) {
   unsigned ChainLen = Chain.size();
   DEBUG(dbgs() << "SLP: Analyzing a store chain of length " << ChainLen
@@ -3723,7 +3722,7 @@ bool SLPVectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain,
     int Cost = R.getTreeCost();
 
     DEBUG(dbgs() << "SLP: Found cost=" << Cost << " for VF=" << VF << "\n");
-    if (Cost < CostThreshold) {
+    if (Cost < -SLPCostThreshold) {
       DEBUG(dbgs() << "SLP: Decided to vectorize cost=" << Cost << "\n");
       R.vectorizeTree();
 
@@ -3737,7 +3736,7 @@ bool SLPVectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain,
 }
 
 bool SLPVectorizerPass::vectorizeStores(ArrayRef<StoreInst *> Stores,
-                                        int costThreshold, BoUpSLP &R) {
+                                        BoUpSLP &R) {
   SetVector<StoreInst *> Heads, Tails;
   SmallDenseMap<StoreInst *, StoreInst *> ConsecutiveChain;
 
@@ -3792,8 +3791,9 @@ bool SLPVectorizerPass::vectorizeStores(ArrayRef<StoreInst *> Stores,
 
     // FIXME: Is division-by-2 the correct step? Should we assert that the
     // register size is a power-of-2?
-    for (unsigned Size = R.getMaxVecRegSize(); Size >= R.getMinVecRegSize(); Size /= 2) {
-      if (vectorizeStoreChain(Operands, costThreshold, R, Size)) {
+    for (unsigned Size = R.getMaxVecRegSize(); Size >= R.getMinVecRegSize();
+         Size /= 2) {
+      if (vectorizeStoreChain(Operands, R, Size)) {
         // Mark the vectorized stores so that we don't vectorize them again.
         VectorizedStores.insert(Operands.begin(), Operands.end());
         Changed = true;
@@ -3851,11 +3851,12 @@ bool SLPVectorizerPass::tryToVectorizePair(Value *A, Value *B, BoUpSLP &R) {
 
 bool SLPVectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
                                            ArrayRef<Value *> BuildVector,
-                                           bool allowReorder) {
+                                           bool AllowReorder) {
   if (VL.size() < 2)
     return false;
 
-  DEBUG(dbgs() << "SLP: Vectorizing a list of length = " << VL.size() << ".\n");
+  DEBUG(dbgs() << "SLP: Trying to vectorize a list of length = " << VL.size()
+               << ".\n");
 
   // Check that all of the parts are scalar instructions of the same type.
   Instruction *I0 = dyn_cast<Instruction>(VL[0]);
@@ -3908,7 +3909,7 @@ bool SLPVectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
 
     R.buildTree(Ops, BuildVectorSlice);
     // TODO: check if we can allow reordering for more cases.
-    if (allowReorder && R.shouldReorder()) {
+    if (AllowReorder && R.shouldReorder()) {
       // Conceptually, there is nothing actually preventing us from trying to
       // reorder a larger list. In fact, we do exactly this when vectorizing
       // reductions. However, at this point, we only expect to get here from
@@ -4750,8 +4751,7 @@ bool SLPVectorizerPass::vectorizeStoreChains(BoUpSLP &R) {
     //       may cause a significant compile-time increase.
     for (unsigned CI = 0, CE = it->second.size(); CI < CE; CI+=16) {
       unsigned Len = std::min<unsigned>(CE - CI, 16);
-      Changed |= vectorizeStores(makeArrayRef(&it->second[CI], Len),
-                                 -SLPCostThreshold, R);
+      Changed |= vectorizeStores(makeArrayRef(&it->second[CI], Len), R);
     }
   }
   return Changed;

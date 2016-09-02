@@ -45,6 +45,7 @@ void llvm::initializeScalarOpts(PassRegistry &Registry) {
   initializeGVNLegacyPassPass(Registry);
   initializeNewGVNPass(Registry);
   initializeEarlyCSELegacyPassPass(Registry);
+  initializeEarlyCSEMemSSALegacyPassPass(Registry);
   initializeGVNHoistLegacyPassPass(Registry);
   initializeFlattenCFGPassPass(Registry);
   initializeInductiveRangeCheckEliminationPass(Registry);
@@ -239,7 +240,11 @@ void LLVMAddCorrelatedValuePropagationPass(LLVMPassManagerRef PM) {
 }
 
 void LLVMAddEarlyCSEPass(LLVMPassManagerRef PM) {
-  unwrap(PM)->add(createEarlyCSEPass());
+  unwrap(PM)->add(createEarlyCSEPass(false/*=UseMemorySSA*/));
+}
+
+void LLVMAddEarlyCSEMemSSAPass(LLVMPassManagerRef PM) {
+  unwrap(PM)->add(createEarlyCSEPass(true/*=UseMemorySSA*/));
 }
 
 void LLVMAddGVNHoistLegacyPass(LLVMPassManagerRef PM) {
