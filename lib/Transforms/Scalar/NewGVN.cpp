@@ -283,7 +283,8 @@ private:
   std::pair<Value *, bool> lookupOperandLeader(Value *, const User *,
                                                const T &) const;
   void performCongruenceFinding(Value *, const Expression *);
-  // Predicate and reachability handling
+
+  // Reachability handling
   void updateReachableEdge(BasicBlock *, BasicBlock *);
   void processOutgoingEdges(TerminatorInst *, BasicBlock *);
   bool isOnlyReachableViaThisEdge(const BasicBlockEdge &);
