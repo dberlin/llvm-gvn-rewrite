@@ -477,12 +477,12 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::CVTSD2SIrr,      X86::CVTSD2SIrm,          0 },
     { X86::CVTSS2SI64rr,    X86::CVTSS2SI64rm,        0 },
     { X86::CVTSS2SIrr,      X86::CVTSS2SIrm,          0 },
-    { X86::CVTDQ2PDrr,      X86::CVTDQ2PDrm,          TB_ALIGN_16 },
+    { X86::CVTDQ2PDrr,      X86::CVTDQ2PDrm,          0 },
     { X86::CVTDQ2PSrr,      X86::CVTDQ2PSrm,          TB_ALIGN_16 },
     { X86::CVTPD2DQrr,      X86::CVTPD2DQrm,          TB_ALIGN_16 },
     { X86::CVTPD2PSrr,      X86::CVTPD2PSrm,          TB_ALIGN_16 },
     { X86::CVTPS2DQrr,      X86::CVTPS2DQrm,          TB_ALIGN_16 },
-    { X86::CVTPS2PDrr,      X86::CVTPS2PDrm,          TB_ALIGN_16 },
+    { X86::CVTPS2PDrr,      X86::CVTPS2PDrm,          0 },
     { X86::CVTTPD2DQrr,     X86::CVTTPD2DQrm,         TB_ALIGN_16 },
     { X86::CVTTPS2DQrr,     X86::CVTTPS2DQrm,         TB_ALIGN_16 },
     { X86::Int_CVTTSD2SI64rr,X86::Int_CVTTSD2SI64rm,  0 },
@@ -518,9 +518,9 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::MOVZX32rr16,     X86::MOVZX32rm16,         0 },
     { X86::MOVZX32_NOREXrr8, X86::MOVZX32_NOREXrm8,   0 },
     { X86::MOVZX32rr8,      X86::MOVZX32rm8,          0 },
-    { X86::PABSBrr128,      X86::PABSBrm128,          TB_ALIGN_16 },
-    { X86::PABSDrr128,      X86::PABSDrm128,          TB_ALIGN_16 },
-    { X86::PABSWrr128,      X86::PABSWrm128,          TB_ALIGN_16 },
+    { X86::PABSBrr,         X86::PABSBrm,             TB_ALIGN_16 },
+    { X86::PABSDrr,         X86::PABSDrm,             TB_ALIGN_16 },
+    { X86::PABSWrr,         X86::PABSWrm,             TB_ALIGN_16 },
     { X86::PCMPESTRIrr,     X86::PCMPESTRIrm,         TB_ALIGN_16 },
     { X86::PCMPESTRM128rr,  X86::PCMPESTRM128rm,      TB_ALIGN_16 },
     { X86::PCMPISTRIrr,     X86::PCMPISTRIrm,         TB_ALIGN_16 },
@@ -623,9 +623,9 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VMOVUPDrr,       X86::VMOVUPDrm,           0 },
     { X86::VMOVUPSrr,       X86::VMOVUPSrm,           0 },
     { X86::VMOVZPQILo2PQIrr,X86::VMOVZPQILo2PQIrm,    TB_ALIGN_16 },
-    { X86::VPABSBrr128,     X86::VPABSBrm128,         0 },
-    { X86::VPABSDrr128,     X86::VPABSDrm128,         0 },
-    { X86::VPABSWrr128,     X86::VPABSWrm128,         0 },
+    { X86::VPABSBrr,        X86::VPABSBrm,            0 },
+    { X86::VPABSDrr,        X86::VPABSDrm,            0 },
+    { X86::VPABSWrr,        X86::VPABSWrm,            0 },
     { X86::VPCMPESTRIrr,    X86::VPCMPESTRIrm,        0 },
     { X86::VPCMPESTRM128rr, X86::VPCMPESTRM128rm,     0 },
     { X86::VPCMPISTRIrr,    X86::VPCMPISTRIrm,        0 },
@@ -699,9 +699,9 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VBROADCASTSSrr,  X86::VBROADCASTSSrm,      TB_NO_REVERSE },
     { X86::VBROADCASTSSYrr, X86::VBROADCASTSSYrm,     TB_NO_REVERSE },
     { X86::VBROADCASTSDYrr, X86::VBROADCASTSDYrm,     TB_NO_REVERSE },
-    { X86::VPABSBrr256,     X86::VPABSBrm256,         0 },
-    { X86::VPABSDrr256,     X86::VPABSDrm256,         0 },
-    { X86::VPABSWrr256,     X86::VPABSWrm256,         0 },
+    { X86::VPABSBYrr,       X86::VPABSBYrm,           0 },
+    { X86::VPABSDYrr,       X86::VPABSDYrm,           0 },
+    { X86::VPABSWYrr,       X86::VPABSWYrm,           0 },
     { X86::VPBROADCASTBrr,  X86::VPBROADCASTBrm,      0 },
     { X86::VPBROADCASTBYrr, X86::VPBROADCASTBYrm,     0 },
     { X86::VPBROADCASTDrr,  X86::VPBROADCASTDrm,      0 },
@@ -1700,6 +1700,12 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VDIVSSZrr_Int,     X86::VDIVSSZrm_Int,       0 },
     { X86::VDIVSDZrr,         X86::VDIVSDZrm,           0 },
     { X86::VDIVSDZrr_Int,     X86::VDIVSDZrm_Int,       0 },
+    { X86::VCMPPDZrri,        X86::VCMPPDZrmi,          0 },
+    { X86::VCMPPSZrri,        X86::VCMPPSZrmi,          0 },
+    { X86::VCMPSDZrr,         X86::VCMPSDZrm,           0 },
+    { X86::VCMPSSZrr,         X86::VCMPSSZrm,           0 },
+    { X86::VCMPSDZrr_Int,     X86::VCMPSDZrm_Int,       0 },
+    { X86::VCMPSSZrr_Int,     X86::VCMPSSZrm_Int,       0 },
     { X86::VANDPDZrr,         X86::VANDPDZrm,           0 },
     { X86::VANDPSZrr,         X86::VANDPSZrm,           0 },
     { X86::VANDNPDZrr,        X86::VANDNPDZrm,          0 },
@@ -1826,6 +1832,10 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VMINPSZ256rr,      X86::VMINPSZ256rm,        0 },
     { X86::VMINCPSZ128rr,     X86::VMINCPSZ128rm,       0 },
     { X86::VMINCPSZ256rr,     X86::VMINCPSZ256rm,       0 },
+    { X86::VCMPPDZ128rri,     X86::VCMPPDZ128rmi,       0 },
+    { X86::VCMPPDZ256rri,     X86::VCMPPDZ256rmi,       0 },
+    { X86::VCMPPSZ128rri,     X86::VCMPPSZ128rmi,       0 },
+    { X86::VCMPPSZ256rri,     X86::VCMPPSZ256rmi,       0 },
 
     // AES foldable instructions
     { X86::AESDECLASTrr,      X86::AESDECLASTrm,        TB_ALIGN_16 },
@@ -3379,12 +3389,24 @@ MachineInstr *X86InstrInfo::commuteInstructionImpl(MachineInstr &MI, bool NewMI,
     return TargetInstrInfo::commuteInstructionImpl(WorkingMI, /*NewMI=*/false,
                                                    OpIdx1, OpIdx2);
   }
+  case X86::CMPSDrr:
+  case X86::CMPSSrr:
   case X86::CMPPDrri:
   case X86::CMPPSrri:
+  case X86::VCMPSDrr:
+  case X86::VCMPSSrr:
   case X86::VCMPPDrri:
   case X86::VCMPPSrri:
   case X86::VCMPPDYrri:
-  case X86::VCMPPSYrri: {
+  case X86::VCMPPSYrri:
+  case X86::VCMPSDZrr:
+  case X86::VCMPSSZrr:
+  case X86::VCMPPDZrri:
+  case X86::VCMPPSZrri:
+  case X86::VCMPPDZ128rri:
+  case X86::VCMPPSZ128rri:
+  case X86::VCMPPDZ256rri:
+  case X86::VCMPPSZ256rri: {
     // Float comparison can be safely commuted for
     // Ordered/Unordered/Equal/NotEqual tests
     unsigned Imm = MI.getOperand(3).getImm() & 0x7;
@@ -3627,12 +3649,24 @@ bool X86InstrInfo::findCommutedOpIndices(MachineInstr &MI, unsigned &SrcOpIdx1,
     return false;
 
   switch (MI.getOpcode()) {
+  case X86::CMPSDrr:
+  case X86::CMPSSrr:
   case X86::CMPPDrri:
   case X86::CMPPSrri:
+  case X86::VCMPSDrr:
+  case X86::VCMPSSrr:
   case X86::VCMPPDrri:
   case X86::VCMPPSrri:
   case X86::VCMPPDYrri:
-  case X86::VCMPPSYrri: {
+  case X86::VCMPPSYrri:
+  case X86::VCMPSDZrr:
+  case X86::VCMPSSZrr:
+  case X86::VCMPPDZrri:
+  case X86::VCMPPSZrri:
+  case X86::VCMPPDZ128rri:
+  case X86::VCMPPSZ128rri:
+  case X86::VCMPPDZ256rri:
+  case X86::VCMPPSZ256rri: {
     // Float comparison can be safely commuted for
     // Ordered/Unordered/Equal/NotEqual tests
     unsigned Imm = MI.getOperand(3).getImm() & 0x7;
@@ -6189,6 +6223,7 @@ static bool isNonFoldablePartialRegisterLoad(const MachineInstr &LoadMI,
     // instruction isn't scalar (SS).
     switch (UserOpc) {
     case X86::ADDSSrr_Int: case X86::VADDSSrr_Int: case X86::VADDSSZrr_Int:
+    case X86::Int_CMPSSrr: case X86::Int_VCMPSSrr: case X86::VCMPSSZrr_Int:
     case X86::DIVSSrr_Int: case X86::VDIVSSrr_Int: case X86::VDIVSSZrr_Int:
     case X86::MAXSSrr_Int: case X86::VMAXSSrr_Int: case X86::VMAXSSZrr_Int:
     case X86::MINSSrr_Int: case X86::VMINSSrr_Int: case X86::VMINSSZrr_Int:
@@ -6213,6 +6248,7 @@ static bool isNonFoldablePartialRegisterLoad(const MachineInstr &LoadMI,
     // instruction isn't scalar (SD).
     switch (UserOpc) {
     case X86::ADDSDrr_Int: case X86::VADDSDrr_Int: case X86::VADDSDZrr_Int:
+    case X86::Int_CMPSDrr: case X86::Int_VCMPSDrr: case X86::VCMPSDZrr_Int:
     case X86::DIVSDrr_Int: case X86::VDIVSDrr_Int: case X86::VDIVSDZrr_Int:
     case X86::MAXSDrr_Int: case X86::VMAXSDrr_Int: case X86::VMAXSDZrr_Int:
     case X86::MINSDrr_Int: case X86::VMINSDrr_Int: case X86::VMINSDZrr_Int:
@@ -7279,6 +7315,86 @@ static const uint16_t ReplaceableInstrsAVX512DQMasked[][4] = {
     X86::VPXORQZrrk,      X86::VPXORDZrrk      },
   { X86::VXORPSZrrkz,     X86::VXORPDZrrkz,
     X86::VPXORQZrrkz,     X86::VPXORDZrrkz     },
+  // Broadcast loads can be handled the same as masked operations to avoid
+  // changing element size.
+  { X86::VANDNPSZ128rmb,  X86::VANDNPDZ128rmb,
+    X86::VPANDNQZ128rmb,  X86::VPANDNDZ128rmb  },
+  { X86::VANDPSZ128rmb,   X86::VANDPDZ128rmb,
+    X86::VPANDQZ128rmb,   X86::VPANDDZ128rmb   },
+  { X86::VORPSZ128rmb,    X86::VORPDZ128rmb,
+    X86::VPORQZ128rmb,    X86::VPORDZ128rmb    },
+  { X86::VXORPSZ128rmb,   X86::VXORPDZ128rmb,
+    X86::VPXORQZ128rmb,   X86::VPXORDZ128rmb   },
+  { X86::VANDNPSZ256rmb,  X86::VANDNPDZ256rmb,
+    X86::VPANDNQZ256rmb,  X86::VPANDNDZ256rmb  },
+  { X86::VANDPSZ256rmb,   X86::VANDPDZ256rmb,
+    X86::VPANDQZ256rmb,   X86::VPANDDZ256rmb   },
+  { X86::VORPSZ256rmb,    X86::VORPDZ256rmb,
+    X86::VPORQZ256rmb,    X86::VPORDZ256rmb    },
+  { X86::VXORPSZ256rmb,   X86::VXORPDZ256rmb,
+    X86::VPXORQZ256rmb,   X86::VPXORDZ256rmb   },
+  { X86::VANDNPSZrmb,     X86::VANDNPDZrmb,
+    X86::VPANDNQZrmb,     X86::VPANDNDZrmb     },
+  { X86::VANDPSZrmb,      X86::VANDPDZrmb,
+    X86::VPANDQZrmb,      X86::VPANDDZrmb      },
+  { X86::VANDPSZrmb,      X86::VANDPDZrmb,
+    X86::VPANDQZrmb,      X86::VPANDDZrmb      },
+  { X86::VORPSZrmb,       X86::VORPDZrmb,
+    X86::VPORQZrmb,       X86::VPORDZrmb       },
+  { X86::VXORPSZrmb,      X86::VXORPDZrmb,
+    X86::VPXORQZrmb,      X86::VPXORDZrmb      },
+  { X86::VANDNPSZ128rmbk, X86::VANDNPDZ128rmbk,
+    X86::VPANDNQZ128rmbk, X86::VPANDNDZ128rmbk },
+  { X86::VANDPSZ128rmbk,  X86::VANDPDZ128rmbk,
+    X86::VPANDQZ128rmbk,  X86::VPANDDZ128rmbk  },
+  { X86::VORPSZ128rmbk,   X86::VORPDZ128rmbk,
+    X86::VPORQZ128rmbk,   X86::VPORDZ128rmbk   },
+  { X86::VXORPSZ128rmbk,  X86::VXORPDZ128rmbk,
+    X86::VPXORQZ128rmbk,  X86::VPXORDZ128rmbk  },
+  { X86::VANDNPSZ256rmbk, X86::VANDNPDZ256rmbk,
+    X86::VPANDNQZ256rmbk, X86::VPANDNDZ256rmbk },
+  { X86::VANDPSZ256rmbk,  X86::VANDPDZ256rmbk,
+    X86::VPANDQZ256rmbk,  X86::VPANDDZ256rmbk  },
+  { X86::VORPSZ256rmbk,   X86::VORPDZ256rmbk,
+    X86::VPORQZ256rmbk,   X86::VPORDZ256rmbk   },
+  { X86::VXORPSZ256rmbk,  X86::VXORPDZ256rmbk,
+    X86::VPXORQZ256rmbk,  X86::VPXORDZ256rmbk  },
+  { X86::VANDNPSZrmbk,    X86::VANDNPDZrmbk,
+    X86::VPANDNQZrmbk,    X86::VPANDNDZrmbk    },
+  { X86::VANDPSZrmbk,     X86::VANDPDZrmbk,
+    X86::VPANDQZrmbk,     X86::VPANDDZrmbk     },
+  { X86::VANDPSZrmbk,     X86::VANDPDZrmbk,
+    X86::VPANDQZrmbk,     X86::VPANDDZrmbk     },
+  { X86::VORPSZrmbk,      X86::VORPDZrmbk,
+    X86::VPORQZrmbk,      X86::VPORDZrmbk      },
+  { X86::VXORPSZrmbk,     X86::VXORPDZrmbk,
+    X86::VPXORQZrmbk,     X86::VPXORDZrmbk     },
+  { X86::VANDNPSZ128rmbkz,X86::VANDNPDZ128rmbkz,
+    X86::VPANDNQZ128rmbkz,X86::VPANDNDZ128rmbkz},
+  { X86::VANDPSZ128rmbkz, X86::VANDPDZ128rmbkz,
+    X86::VPANDQZ128rmbkz, X86::VPANDDZ128rmbkz },
+  { X86::VORPSZ128rmbkz,  X86::VORPDZ128rmbkz,
+    X86::VPORQZ128rmbkz,  X86::VPORDZ128rmbkz  },
+  { X86::VXORPSZ128rmbkz, X86::VXORPDZ128rmbkz,
+    X86::VPXORQZ128rmbkz, X86::VPXORDZ128rmbkz },
+  { X86::VANDNPSZ256rmbkz,X86::VANDNPDZ256rmbkz,
+    X86::VPANDNQZ256rmbkz,X86::VPANDNDZ256rmbkz},
+  { X86::VANDPSZ256rmbkz, X86::VANDPDZ256rmbkz,
+    X86::VPANDQZ256rmbkz, X86::VPANDDZ256rmbkz },
+  { X86::VORPSZ256rmbkz,  X86::VORPDZ256rmbkz,
+    X86::VPORQZ256rmbkz,  X86::VPORDZ256rmbkz  },
+  { X86::VXORPSZ256rmbkz, X86::VXORPDZ256rmbkz,
+    X86::VPXORQZ256rmbkz, X86::VPXORDZ256rmbkz },
+  { X86::VANDNPSZrmbkz,   X86::VANDNPDZrmbkz,
+    X86::VPANDNQZrmbkz,   X86::VPANDNDZrmbkz   },
+  { X86::VANDPSZrmbkz,    X86::VANDPDZrmbkz,
+    X86::VPANDQZrmbkz,    X86::VPANDDZrmbkz    },
+  { X86::VANDPSZrmbkz,    X86::VANDPDZrmbkz,
+    X86::VPANDQZrmbkz,    X86::VPANDDZrmbkz    },
+  { X86::VORPSZrmbkz,     X86::VORPDZrmbkz,
+    X86::VPORQZrmbkz,     X86::VPORDZrmbkz     },
+  { X86::VXORPSZrmbkz,    X86::VXORPDZrmbkz,
+    X86::VPXORQZrmbkz,    X86::VPXORDZrmbkz    },
 };
 
 // FIXME: Some shuffle and unpack instructions have equivalents in different
@@ -8023,6 +8139,29 @@ X86InstrInfo::getSerializableDirectMachineOperandTargetFlags() const {
       {MO_TLVP_PIC_BASE, "x86-tlvp-pic-base"},
       {MO_SECREL, "x86-secrel"}};
   return makeArrayRef(TargetFlags);
+}
+
+bool X86InstrInfo::isTailCall(const MachineInstr &Inst) const {
+  switch (Inst.getOpcode()) {
+    case X86::TCRETURNdi:
+    case X86::TCRETURNmi:
+    case X86::TCRETURNri:
+    case X86::TCRETURNdi64:
+    case X86::TCRETURNmi64:
+    case X86::TCRETURNri64:
+    case X86::TAILJMPd:
+    case X86::TAILJMPm:
+    case X86::TAILJMPr:
+    case X86::TAILJMPd64:
+    case X86::TAILJMPm64:
+    case X86::TAILJMPr64:
+    case X86::TAILJMPd64_REX:
+    case X86::TAILJMPm64_REX:
+    case X86::TAILJMPr64_REX:
+      return true;
+    default:
+      return false;
+  }
 }
 
 namespace {

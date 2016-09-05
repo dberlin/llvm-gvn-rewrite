@@ -579,6 +579,10 @@ private:
                                    const APInt *C);
   Instruction *foldICmpAddConstant(ICmpInst &Cmp, BinaryOperator *Add,
                                    const APInt *C);
+  Instruction *foldICmpAndConstConst(ICmpInst &Cmp, BinaryOperator *And,
+                                     const APInt *C1);
+  Instruction *foldICmpAndShift(ICmpInst &Cmp, BinaryOperator *And,
+                                const APInt *C1);
 
   Instruction *foldICmpEqualityWithConstant(ICmpInst &ICI);
   Instruction *foldICmpIntrinsicWithConstant(ICmpInst &ICI);
@@ -588,8 +592,8 @@ private:
 
   Value *FoldLogicalPlusAnd(Value *LHS, Value *RHS, ConstantInt *Mask,
                             bool isSub, Instruction &I);
-  Value *InsertRangeTest(Value *V, Constant *Lo, Constant *Hi, bool isSigned,
-                         bool Inside);
+  Value *insertRangeTest(Value *V, const APInt &Lo, const APInt &Hi,
+                         bool isSigned, bool Inside);
   Instruction *PromoteCastOfAllocation(BitCastInst &CI, AllocaInst &AI);
   Instruction *MatchBSwap(BinaryOperator &I);
   bool SimplifyStoreAtEndOfBlock(StoreInst &SI);

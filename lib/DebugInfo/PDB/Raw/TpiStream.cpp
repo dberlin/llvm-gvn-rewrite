@@ -14,6 +14,7 @@
 #include "llvm/DebugInfo/CodeView/TypeDeserializer.h"
 #include "llvm/DebugInfo/CodeView/TypeIndex.h"
 #include "llvm/DebugInfo/CodeView/TypeRecord.h"
+#include "llvm/DebugInfo/CodeView/TypeVisitorCallbackPipeline.h"
 #include "llvm/DebugInfo/MSF/MappedBlockStream.h"
 #include "llvm/DebugInfo/MSF/StreamReader.h"
 #include "llvm/DebugInfo/PDB/Raw/Hash.h"
@@ -120,15 +121,16 @@ public:
     return verify(Rec);
   }
 
-  Error visitTypeBegin(const CVRecord<TypeLeafKind> &Rec) override {
+  Expected<TypeLeafKind>
+  visitTypeBegin(const CVRecord<TypeLeafKind> &Rec) override {
     ++Index;
-    RawRecord = &Rec;
-    return Error::success();
+    RawRecord = Rec;
+    return Rec.Type;
   }
 
 private:
   template <typename T> Error verify(T &Rec) {
-    uint32_t Hash = getTpiHash(Rec, *RawRecord);
+    uint32_t Hash = getTpiHash(Rec, RawRecord);
     if (Hash % NumHashBuckets != HashValues[Index])
       return errorInvalidHash();
     return Error::success();
@@ -150,7 +152,7 @@ private:
   }
 
   FixedStreamArray<support::ulittle32_t> HashValues;
-  const CVRecord<TypeLeafKind> *RawRecord;
+  CVRecord<TypeLeafKind> RawRecord;
   uint32_t NumHashBuckets;
   uint32_t Index = -1;
 };
@@ -160,8 +162,13 @@ private:
 // Currently we only verify SRC_LINE records.
 Error TpiStream::verifyHashValues() {
   TpiHashVerifier Verifier(HashValues, Header->NumHashBuckets);
-  TypeDeserializer Deserializer(Verifier);
-  CVTypeVisitor Visitor(Deserializer);
+  TypeDeserializer Deserializer;
+
+  TypeVisitorCallbackPipeline Pipeline;
+  Pipeline.addCallbackToPipeline(Deserializer);
+  Pipeline.addCallbackToPipeline(Verifier);
+
+  CVTypeVisitor Visitor(Pipeline);
   return Visitor.visitTypeStream(TypeRecords);
 }
 

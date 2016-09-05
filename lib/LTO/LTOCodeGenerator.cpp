@@ -185,17 +185,18 @@ void LTOCodeGenerator::setOptLevel(unsigned Level) {
   switch (OptLevel) {
   case 0:
     CGOptLevel = CodeGenOpt::None;
-    break;
+    return;
   case 1:
     CGOptLevel = CodeGenOpt::Less;
-    break;
+    return;
   case 2:
     CGOptLevel = CodeGenOpt::Default;
-    break;
+    return;
   case 3:
     CGOptLevel = CodeGenOpt::Aggressive;
-    break;
+    return;
   }
+  llvm_unreachable("Unknown optimization level!");
 }
 
 bool LTOCodeGenerator::writeMergedModules(const char *Path) {
@@ -373,21 +374,16 @@ void LTOCodeGenerator::preserveDiscardableGVs(
   }
   llvm::Type *i8PTy = llvm::Type::getInt8PtrTy(TheModule.getContext());
   auto mayPreserveGlobal = [&](GlobalValue &GV) {
-    if (!GV.isDiscardableIfUnused() || GV.isDeclaration())
+    if (!GV.isDiscardableIfUnused() || GV.isDeclaration() ||
+        !mustPreserveGV(GV)) 
       return;
-    if (!mustPreserveGV(GV))
-      return;
-    if (GV.hasAvailableExternallyLinkage()) {
-      emitWarning(
+    if (GV.hasAvailableExternallyLinkage())
+      return emitWarning(
           (Twine("Linker asked to preserve available_externally global: '") +
            GV.getName() + "'").str());
-      return;
-    }
-    if (GV.hasInternalLinkage()) {
-      emitWarning((Twine("Linker asked to preserve internal global: '") +
+    if (GV.hasInternalLinkage())
+      return emitWarning((Twine("Linker asked to preserve internal global: '") +
                    GV.getName() + "'").str());
-      return;
-    }
     UsedValuesSet.insert(ConstantExpr::getBitCast(&GV, i8PTy));
   };
   for (auto &GV : TheModule)

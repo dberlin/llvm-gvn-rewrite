@@ -335,6 +335,12 @@ public:
     return false;
   }
 
+  /// \brief Return true if it is cheaper to split the store of a merged int val
+  /// from a pair of smaller values into multiple stores.
+  virtual bool isMultiStoresCheaperThanBitsMerge(SDValue Lo, SDValue Hi) const {
+    return false;
+  }
+
   /// \brief Return if the target supports combining a
   /// chain like:
   /// \code
@@ -592,7 +598,7 @@ public:
   /// Returns true if the operation can trap for the value type.
   ///
   /// VT must be a legal type. By default, we optimistically assume most
-  /// operations don't trap except for divide and remainder.
+  /// operations don't trap except for integer divide and remainder.
   virtual bool canOpTrap(unsigned Op, EVT VT) const;
 
   /// Similar to isShuffleMaskLegal. This is used by Targets can use this to

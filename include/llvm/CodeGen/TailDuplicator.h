@@ -26,6 +26,8 @@
 
 namespace llvm {
 
+extern cl::opt<unsigned> TailDupIndirectBranchSize;
+
 /// Utility class to perform tail duplication.
 class TailDuplicator {
   const TargetInstrInfo *TII;
@@ -57,7 +59,13 @@ public:
   bool shouldTailDuplicate(bool IsSimple, MachineBasicBlock &TailBB);
   /// Returns true if TailBB can successfully be duplicated into PredBB
   bool canTailDuplicate(MachineBasicBlock *TailBB, MachineBasicBlock *PredBB);
-  bool tailDuplicateAndUpdate(bool IsSimple, MachineBasicBlock *MBB);
+  /// Tail duplicate a single basic block into its predecessors, and then clean
+  /// up.
+  /// If \p DuplicatePreds is not null, it will be updated to contain the list
+  /// of predecessors that received a copy of \p MBB.
+  bool tailDuplicateAndUpdate(
+      bool IsSimple, MachineBasicBlock *MBB,
+      SmallVectorImpl<MachineBasicBlock*> *DuplicatedPreds = nullptr);
 
 private:
   typedef TargetInstrInfo::RegSubRegPair RegSubRegPair;

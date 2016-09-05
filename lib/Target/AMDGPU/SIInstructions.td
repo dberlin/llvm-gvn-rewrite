@@ -18,9 +18,11 @@ def isSI : Predicate<"Subtarget->getGeneration() "
                       "== SISubtarget::SOUTHERN_ISLANDS">,
            AssemblerPredicate<"FeatureSouthernIslands">;
 
-
 def has16BankLDS : Predicate<"Subtarget->getLDSBankCount() == 16">;
 def has32BankLDS : Predicate<"Subtarget->getLDSBankCount() == 32">;
+
+include "SOPInstructions.td"
+include "SMInstructions.td"
 
 let SubtargetPredicate = isGCN in {
 
@@ -29,508 +31,6 @@ let SubtargetPredicate = isGCN in {
 //===----------------------------------------------------------------------===//
 
 defm EXP : EXP_m;
-
-//===----------------------------------------------------------------------===//
-// SMRD Instructions
-//===----------------------------------------------------------------------===//
-
-// We are using the SReg_32_XM0 and not the SReg_32 register class for 32-bit
-// SMRD instructions, because the SReg_32_XM0 register class does not include M0
-// and writing to M0 from an SMRD instruction will hang the GPU.
-defm S_LOAD_DWORD : SMRD_Helper <smrd<0x00>, "s_load_dword", SReg_64, SReg_32_XM0>;
-defm S_LOAD_DWORDX2 : SMRD_Helper <smrd<0x01>, "s_load_dwordx2", SReg_64, SReg_64>;
-defm S_LOAD_DWORDX4 : SMRD_Helper <smrd<0x02>, "s_load_dwordx4", SReg_64, SReg_128>;
-defm S_LOAD_DWORDX8 : SMRD_Helper <smrd<0x03>, "s_load_dwordx8", SReg_64, SReg_256>;
-defm S_LOAD_DWORDX16 : SMRD_Helper <smrd<0x04>, "s_load_dwordx16", SReg_64, SReg_512>;
-
-defm S_BUFFER_LOAD_DWORD : SMRD_Helper <
-  smrd<0x08>, "s_buffer_load_dword", SReg_128, SReg_32_XM0
->;
-
-defm S_BUFFER_LOAD_DWORDX2 : SMRD_Helper <
-  smrd<0x09>, "s_buffer_load_dwordx2", SReg_128, SReg_64
->;
-
-defm S_BUFFER_LOAD_DWORDX4 : SMRD_Helper <
-  smrd<0x0a>, "s_buffer_load_dwordx4", SReg_128, SReg_128
->;
-
-defm S_BUFFER_LOAD_DWORDX8 : SMRD_Helper <
-  smrd<0x0b>, "s_buffer_load_dwordx8", SReg_128, SReg_256
->;
-
-defm S_BUFFER_LOAD_DWORDX16 : SMRD_Helper <
-  smrd<0x0c>, "s_buffer_load_dwordx16", SReg_128, SReg_512
->;
-
-let mayStore = ? in {
-// FIXME: mayStore = ? is a workaround for tablegen bug for different
-// inferred mayStore flags for the instruction pattern vs. standalone
-// Pat. Each considers the other contradictory.
-
-defm S_MEMTIME : SMRD_Special <smrd<0x1e, 0x24>, "s_memtime",
-  (outs SReg_64:$sdst), ?, " $sdst", [(set i64:$sdst, (int_amdgcn_s_memtime))]
->;
-}
-
-defm S_DCACHE_INV : SMRD_Inval <smrd<0x1f, 0x20>, "s_dcache_inv",
-  int_amdgcn_s_dcache_inv>;
-
-//===----------------------------------------------------------------------===//
-// SOP1 Instructions
-//===----------------------------------------------------------------------===//
-
-let isMoveImm = 1 in {
-  let isReMaterializable = 1, isAsCheapAsAMove = 1 in {
-    defm S_MOV_B32 : SOP1_32 <sop1<0x03, 0x00>, "s_mov_b32", []>;
-    defm S_MOV_B64 : SOP1_64 <sop1<0x04, 0x01>, "s_mov_b64", []>;
-  } // End isRematerializeable = 1
-
-  let Uses = [SCC] in {
-    defm S_CMOV_B32 : SOP1_32 <sop1<0x05, 0x02>, "s_cmov_b32", []>;
-    defm S_CMOV_B64 : SOP1_64 <sop1<0x06, 0x03>, "s_cmov_b64", []>;
-  } // End Uses = [SCC]
-} // End isMoveImm = 1
-
-let Defs = [SCC] in {
-  defm S_NOT_B32 : SOP1_32 <sop1<0x07, 0x04>, "s_not_b32",
-    [(set i32:$sdst, (not i32:$src0))]
-  >;
-
-  defm S_NOT_B64 : SOP1_64 <sop1<0x08, 0x05>, "s_not_b64",
-    [(set i64:$sdst, (not i64:$src0))]
-  >;
-  defm S_WQM_B32 : SOP1_32 <sop1<0x09, 0x06>, "s_wqm_b32", []>;
-  defm S_WQM_B64 : SOP1_64 <sop1<0x0a, 0x07>, "s_wqm_b64", []>;
-} // End Defs = [SCC]
-
-
-defm S_BREV_B32 : SOP1_32 <sop1<0x0b, 0x08>, "s_brev_b32",
-  [(set i32:$sdst, (bitreverse i32:$src0))]
->;
-defm S_BREV_B64 : SOP1_64 <sop1<0x0c, 0x09>, "s_brev_b64", []>;
-
-let Defs = [SCC] in {
-  defm S_BCNT0_I32_B32 : SOP1_32 <sop1<0x0d, 0x0a>, "s_bcnt0_i32_b32", []>;
-  defm S_BCNT0_I32_B64 : SOP1_32_64 <sop1<0x0e, 0x0b>, "s_bcnt0_i32_b64", []>;
-  defm S_BCNT1_I32_B32 : SOP1_32 <sop1<0x0f, 0x0c>, "s_bcnt1_i32_b32",
-    [(set i32:$sdst, (ctpop i32:$src0))]
-  >;
-  defm S_BCNT1_I32_B64 : SOP1_32_64 <sop1<0x10, 0x0d>, "s_bcnt1_i32_b64", []>;
-} // End Defs = [SCC]
-
-defm S_FF0_I32_B32 : SOP1_32 <sop1<0x11, 0x0e>, "s_ff0_i32_b32", []>;
-defm S_FF0_I32_B64 : SOP1_32_64 <sop1<0x12, 0x0f>, "s_ff0_i32_b64", []>;
-defm S_FF1_I32_B32 : SOP1_32 <sop1<0x13, 0x10>, "s_ff1_i32_b32",
-  [(set i32:$sdst, (cttz_zero_undef i32:$src0))]
->;
-defm S_FF1_I32_B64 : SOP1_32_64 <sop1<0x14, 0x11>, "s_ff1_i32_b64", []>;
-
-defm S_FLBIT_I32_B32 : SOP1_32 <sop1<0x15, 0x12>, "s_flbit_i32_b32",
-  [(set i32:$sdst, (AMDGPUffbh_u32 i32:$src0))]
->;
-
-defm S_FLBIT_I32_B64 : SOP1_32_64 <sop1<0x16, 0x13>, "s_flbit_i32_b64", []>;
-defm S_FLBIT_I32 : SOP1_32 <sop1<0x17, 0x14>, "s_flbit_i32",
-  [(set i32:$sdst, (AMDGPUffbh_i32 i32:$src0))]
->;
-defm S_FLBIT_I32_I64 : SOP1_32_64 <sop1<0x18, 0x15>, "s_flbit_i32_i64", []>;
-defm S_SEXT_I32_I8 : SOP1_32 <sop1<0x19, 0x16>, "s_sext_i32_i8",
-  [(set i32:$sdst, (sext_inreg i32:$src0, i8))]
->;
-defm S_SEXT_I32_I16 : SOP1_32 <sop1<0x1a, 0x17>, "s_sext_i32_i16",
-  [(set i32:$sdst, (sext_inreg i32:$src0, i16))]
->;
-
-defm S_BITSET0_B32 : SOP1_32 <sop1<0x1b, 0x18>, "s_bitset0_b32", []>;
-defm S_BITSET0_B64 : SOP1_64_32 <sop1<0x1c, 0x19>, "s_bitset0_b64", []>;
-defm S_BITSET1_B32 : SOP1_32 <sop1<0x1d, 0x1a>, "s_bitset1_b32", []>;
-defm S_BITSET1_B64 : SOP1_64_32 <sop1<0x1e, 0x1b>, "s_bitset1_b64", []>;
-defm S_GETPC_B64 : SOP1_64_0 <sop1<0x1f, 0x1c>, "s_getpc_b64", []>;
-
-let isTerminator = 1, isBarrier = 1,
-    isBranch = 1, isIndirectBranch = 1 in {
-defm S_SETPC_B64 : SOP1_1 <sop1<0x20, 0x1d>, "s_setpc_b64", []>;
-}
-defm S_SWAPPC_B64 : SOP1_64 <sop1<0x21, 0x1e>, "s_swappc_b64", []>;
-defm S_RFE_B64 : SOP1_1 <sop1<0x22, 0x1f>, "s_rfe_b64", []>;
-
-let hasSideEffects = 1, Uses = [EXEC], Defs = [EXEC, SCC] in {
-
-defm S_AND_SAVEEXEC_B64 : SOP1_64 <sop1<0x24, 0x20>, "s_and_saveexec_b64", []>;
-defm S_OR_SAVEEXEC_B64 : SOP1_64 <sop1<0x25, 0x21>, "s_or_saveexec_b64", []>;
-defm S_XOR_SAVEEXEC_B64 : SOP1_64 <sop1<0x26, 0x22>, "s_xor_saveexec_b64", []>;
-defm S_ANDN2_SAVEEXEC_B64 : SOP1_64 <sop1<0x27, 0x23>, "s_andn2_saveexec_b64", []>;
-defm S_ORN2_SAVEEXEC_B64 : SOP1_64 <sop1<0x28, 0x24>, "s_orn2_saveexec_b64", []>;
-defm S_NAND_SAVEEXEC_B64 : SOP1_64 <sop1<0x29, 0x25>, "s_nand_saveexec_b64", []>;
-defm S_NOR_SAVEEXEC_B64 : SOP1_64 <sop1<0x2a, 0x26>, "s_nor_saveexec_b64", []>;
-defm S_XNOR_SAVEEXEC_B64 : SOP1_64 <sop1<0x2b, 0x27>, "s_xnor_saveexec_b64", []>;
-
-} // End hasSideEffects = 1, Uses = [EXEC], Defs = [EXEC, SCC]
-
-defm S_QUADMASK_B32 : SOP1_32 <sop1<0x2c, 0x28>, "s_quadmask_b32", []>;
-defm S_QUADMASK_B64 : SOP1_64 <sop1<0x2d, 0x29>, "s_quadmask_b64", []>;
-
-let Uses = [M0] in {
-defm S_MOVRELS_B32 : SOP1_32 <sop1<0x2e, 0x2a>, "s_movrels_b32", []>;
-defm S_MOVRELS_B64 : SOP1_64 <sop1<0x2f, 0x2b>, "s_movrels_b64", []>;
-defm S_MOVRELD_B32 : SOP1_32 <sop1<0x30, 0x2c>, "s_movreld_b32", []>;
-defm S_MOVRELD_B64 : SOP1_64 <sop1<0x31, 0x2d>, "s_movreld_b64", []>;
-} // End Uses = [M0]
-
-defm S_CBRANCH_JOIN : SOP1_1 <sop1<0x32, 0x2e>, "s_cbranch_join", []>;
-defm S_MOV_REGRD_B32 : SOP1_32 <sop1<0x33, 0x2f>, "s_mov_regrd_b32", []>;
-let Defs = [SCC] in {
-  defm S_ABS_I32 : SOP1_32 <sop1<0x34, 0x30>, "s_abs_i32", []>;
-} // End Defs = [SCC]
-defm S_MOV_FED_B32 : SOP1_32 <sop1<0x35, 0x31>, "s_mov_fed_b32", []>;
-
-//===----------------------------------------------------------------------===//
-// SOP2 Instructions
-//===----------------------------------------------------------------------===//
-
-let Defs = [SCC] in { // Carry out goes to SCC
-let isCommutable = 1 in {
-defm S_ADD_U32 : SOP2_32 <sop2<0x00>, "s_add_u32", []>;
-defm S_ADD_I32 : SOP2_32 <sop2<0x02>, "s_add_i32",
-  [(set i32:$sdst, (add SSrc_32:$src0, SSrc_32:$src1))]
->;
-} // End isCommutable = 1
-
-defm S_SUB_U32 : SOP2_32 <sop2<0x01>, "s_sub_u32", []>;
-defm S_SUB_I32 : SOP2_32 <sop2<0x03>, "s_sub_i32",
-  [(set i32:$sdst, (sub SSrc_32:$src0, SSrc_32:$src1))]
->;
-
-let Uses = [SCC] in { // Carry in comes from SCC
-let isCommutable = 1 in {
-defm S_ADDC_U32 : SOP2_32 <sop2<0x04>, "s_addc_u32",
-  [(set i32:$sdst, (adde (i32 SSrc_32:$src0), (i32 SSrc_32:$src1)))]>;
-} // End isCommutable = 1
-
-defm S_SUBB_U32 : SOP2_32 <sop2<0x05>, "s_subb_u32",
-  [(set i32:$sdst, (sube (i32 SSrc_32:$src0), (i32 SSrc_32:$src1)))]>;
-} // End Uses = [SCC]
-
-defm S_MIN_I32 : SOP2_32 <sop2<0x06>, "s_min_i32",
-  [(set i32:$sdst, (smin i32:$src0, i32:$src1))]
->;
-defm S_MIN_U32 : SOP2_32 <sop2<0x07>, "s_min_u32",
-  [(set i32:$sdst, (umin i32:$src0, i32:$src1))]
->;
-defm S_MAX_I32 : SOP2_32 <sop2<0x08>, "s_max_i32",
-  [(set i32:$sdst, (smax i32:$src0, i32:$src1))]
->;
-defm S_MAX_U32 : SOP2_32 <sop2<0x09>, "s_max_u32",
-  [(set i32:$sdst, (umax i32:$src0, i32:$src1))]
->;
-} // End Defs = [SCC]
-
-
-let Uses = [SCC] in {
-  defm S_CSELECT_B32 : SOP2_32 <sop2<0x0a>, "s_cselect_b32", []>;
-  defm S_CSELECT_B64 : SOP2_64 <sop2<0x0b>, "s_cselect_b64", []>;
-} // End Uses = [SCC]
-
-let Defs = [SCC] in {
-defm S_AND_B32 : SOP2_32 <sop2<0x0e, 0x0c>, "s_and_b32",
-  [(set i32:$sdst, (and i32:$src0, i32:$src1))]
->;
-
-defm S_AND_B64 : SOP2_64 <sop2<0x0f, 0x0d>, "s_and_b64",
-  [(set i64:$sdst, (and i64:$src0, i64:$src1))]
->;
-
-defm S_OR_B32 : SOP2_32 <sop2<0x10, 0x0e>, "s_or_b32",
-  [(set i32:$sdst, (or i32:$src0, i32:$src1))]
->;
-
-defm S_OR_B64 : SOP2_64 <sop2<0x11, 0x0f>, "s_or_b64",
-  [(set i64:$sdst, (or i64:$src0, i64:$src1))]
->;
-
-defm S_XOR_B32 : SOP2_32 <sop2<0x12, 0x10>, "s_xor_b32",
-  [(set i32:$sdst, (xor i32:$src0, i32:$src1))]
->;
-
-defm S_XOR_B64 : SOP2_64 <sop2<0x13, 0x11>, "s_xor_b64",
-  [(set i64:$sdst, (xor i64:$src0, i64:$src1))]
->;
-defm S_ANDN2_B32 : SOP2_32 <sop2<0x14, 0x12>, "s_andn2_b32", []>;
-defm S_ANDN2_B64 : SOP2_64 <sop2<0x15, 0x13>, "s_andn2_b64", []>;
-defm S_ORN2_B32 : SOP2_32 <sop2<0x16, 0x14>, "s_orn2_b32", []>;
-defm S_ORN2_B64 : SOP2_64 <sop2<0x17, 0x15>, "s_orn2_b64", []>;
-defm S_NAND_B32 : SOP2_32 <sop2<0x18, 0x16>, "s_nand_b32", []>;
-defm S_NAND_B64 : SOP2_64 <sop2<0x19, 0x17>, "s_nand_b64", []>;
-defm S_NOR_B32 : SOP2_32 <sop2<0x1a, 0x18>, "s_nor_b32", []>;
-defm S_NOR_B64 : SOP2_64 <sop2<0x1b, 0x19>, "s_nor_b64", []>;
-defm S_XNOR_B32 : SOP2_32 <sop2<0x1c, 0x1a>, "s_xnor_b32", []>;
-defm S_XNOR_B64 : SOP2_64 <sop2<0x1d, 0x1b>, "s_xnor_b64", []>;
-} // End Defs = [SCC]
-
-// Use added complexity so these patterns are preferred to the VALU patterns.
-let AddedComplexity = 1 in {
-let Defs = [SCC] in {
-
-defm S_LSHL_B32 : SOP2_32 <sop2<0x1e, 0x1c>, "s_lshl_b32",
-  [(set i32:$sdst, (shl i32:$src0, i32:$src1))]
->;
-defm S_LSHL_B64 : SOP2_64_32 <sop2<0x1f, 0x1d>, "s_lshl_b64",
-  [(set i64:$sdst, (shl i64:$src0, i32:$src1))]
->;
-defm S_LSHR_B32 : SOP2_32 <sop2<0x20, 0x1e>, "s_lshr_b32",
-  [(set i32:$sdst, (srl i32:$src0, i32:$src1))]
->;
-defm S_LSHR_B64 : SOP2_64_32 <sop2<0x21, 0x1f>, "s_lshr_b64",
-  [(set i64:$sdst, (srl i64:$src0, i32:$src1))]
->;
-defm S_ASHR_I32 : SOP2_32 <sop2<0x22, 0x20>, "s_ashr_i32",
-  [(set i32:$sdst, (sra i32:$src0, i32:$src1))]
->;
-defm S_ASHR_I64 : SOP2_64_32 <sop2<0x23, 0x21>, "s_ashr_i64",
-  [(set i64:$sdst, (sra i64:$src0, i32:$src1))]
->;
-} // End Defs = [SCC]
-
-defm S_BFM_B32 : SOP2_32 <sop2<0x24, 0x22>, "s_bfm_b32",
-  [(set i32:$sdst, (AMDGPUbfm i32:$src0, i32:$src1))]>;
-defm S_BFM_B64 : SOP2_64_32_32 <sop2<0x25, 0x23>, "s_bfm_b64", []>;
-defm S_MUL_I32 : SOP2_32 <sop2<0x26, 0x24>, "s_mul_i32",
-  [(set i32:$sdst, (mul i32:$src0, i32:$src1))]
->;
-
-} // End AddedComplexity = 1
-
-let Defs = [SCC] in {
-defm S_BFE_U32 : SOP2_32 <sop2<0x27, 0x25>, "s_bfe_u32", []>;
-defm S_BFE_I32 : SOP2_32 <sop2<0x28, 0x26>, "s_bfe_i32", []>;
-defm S_BFE_U64 : SOP2_64_32 <sop2<0x29, 0x27>, "s_bfe_u64", []>;
-defm S_BFE_I64 : SOP2_64_32 <sop2<0x2a, 0x28>, "s_bfe_i64", []>;
-} // End Defs = [SCC]
-
-let sdst = 0 in {
-defm S_CBRANCH_G_FORK : SOP2_m <
-  sop2<0x2b, 0x29>, "s_cbranch_g_fork", (outs),
-  (ins SReg_64:$src0, SReg_64:$src1), "s_cbranch_g_fork $src0, $src1", []
->;
-}
-
-let Defs = [SCC] in {
-defm S_ABSDIFF_I32 : SOP2_32 <sop2<0x2c, 0x2a>, "s_absdiff_i32", []>;
-} // End Defs = [SCC]
-
-//===----------------------------------------------------------------------===//
-// SOPC Instructions
-//===----------------------------------------------------------------------===//
-
-def S_CMP_EQ_I32 : SOPC_CMP_32 <0x00000000, "s_cmp_eq_i32", COND_EQ>;
-def S_CMP_LG_I32 : SOPC_CMP_32 <0x00000001, "s_cmp_lg_i32", COND_NE>;
-def S_CMP_GT_I32 : SOPC_CMP_32 <0x00000002, "s_cmp_gt_i32", COND_SGT>;
-def S_CMP_GE_I32 : SOPC_CMP_32 <0x00000003, "s_cmp_ge_i32", COND_SGE>;
-def S_CMP_LT_I32 : SOPC_CMP_32 <0x00000004, "s_cmp_lt_i32", COND_SLT>;
-def S_CMP_LE_I32 : SOPC_CMP_32 <0x00000005, "s_cmp_le_i32", COND_SLE>;
-def S_CMP_EQ_U32 : SOPC_CMP_32 <0x00000006, "s_cmp_eq_u32", COND_EQ>;
-def S_CMP_LG_U32 : SOPC_CMP_32 <0x00000007, "s_cmp_lg_u32", COND_NE >;
-def S_CMP_GT_U32 : SOPC_CMP_32 <0x00000008, "s_cmp_gt_u32", COND_UGT>;
-def S_CMP_GE_U32 : SOPC_CMP_32 <0x00000009, "s_cmp_ge_u32", COND_UGE>;
-def S_CMP_LT_U32 : SOPC_CMP_32 <0x0000000a, "s_cmp_lt_u32", COND_ULT>;
-def S_CMP_LE_U32 : SOPC_CMP_32 <0x0000000b, "s_cmp_le_u32", COND_ULE>;
-def S_BITCMP0_B32 : SOPC_32 <0x0000000c, "s_bitcmp0_b32">;
-def S_BITCMP1_B32 : SOPC_32 <0x0000000d, "s_bitcmp1_b32">;
-def S_BITCMP0_B64 : SOPC_64_32 <0x0000000e, "s_bitcmp0_b64">;
-def S_BITCMP1_B64 : SOPC_64_32 <0x0000000f, "s_bitcmp1_b64">;
-def S_SETVSKIP : SOPC_32 <0x00000010, "s_setvskip">;
-
-//===----------------------------------------------------------------------===//
-// SOPK Instructions
-//===----------------------------------------------------------------------===//
-
-let isReMaterializable = 1, isMoveImm = 1 in {
-defm S_MOVK_I32 : SOPK_32 <sopk<0x00>, "s_movk_i32", []>;
-} // End isReMaterializable = 1
-let Uses = [SCC] in {
-  defm S_CMOVK_I32 : SOPK_32 <sopk<0x02, 0x01>, "s_cmovk_i32", []>;
-}
-
-let isCompare = 1 in {
-
-/*
-This instruction is disabled for now until we can figure out how to teach
-the instruction selector to correctly use the  S_CMP* vs V_CMP*
-instructions.
-
-When this instruction is enabled the code generator sometimes produces this
-invalid sequence:
-
-SCC = S_CMPK_EQ_I32 SGPR0, imm
-VCC = COPY SCC
-VGPR0 = V_CNDMASK VCC, VGPR0, VGPR1
-
-defm S_CMPK_EQ_I32 : SOPK_SCC <sopk<0x03, 0x02>, "s_cmpk_eq_i32",
-  [(set i1:$dst, (setcc i32:$src0, imm:$src1, SETEQ))]
->;
-*/
-
-defm S_CMPK_EQ_I32 : SOPK_SCC <sopk<0x03, 0x02>, "s_cmpk_eq_i32", []>;
-defm S_CMPK_LG_I32 : SOPK_SCC <sopk<0x04, 0x03>, "s_cmpk_lg_i32", []>;
-defm S_CMPK_GT_I32 : SOPK_SCC <sopk<0x05, 0x04>, "s_cmpk_gt_i32", []>;
-defm S_CMPK_GE_I32 : SOPK_SCC <sopk<0x06, 0x05>, "s_cmpk_ge_i32", []>;
-defm S_CMPK_LT_I32 : SOPK_SCC <sopk<0x07, 0x06>, "s_cmpk_lt_i32", []>;
-defm S_CMPK_LE_I32 : SOPK_SCC <sopk<0x08, 0x07>, "s_cmpk_le_i32", []>;
-defm S_CMPK_EQ_U32 : SOPK_SCC <sopk<0x09, 0x08>, "s_cmpk_eq_u32", []>;
-defm S_CMPK_LG_U32 : SOPK_SCC <sopk<0x0a, 0x09>, "s_cmpk_lg_u32", []>;
-defm S_CMPK_GT_U32 : SOPK_SCC <sopk<0x0b, 0x0a>, "s_cmpk_gt_u32", []>;
-defm S_CMPK_GE_U32 : SOPK_SCC <sopk<0x0c, 0x0b>, "s_cmpk_ge_u32", []>;
-defm S_CMPK_LT_U32 : SOPK_SCC <sopk<0x0d, 0x0c>, "s_cmpk_lt_u32", []>;
-defm S_CMPK_LE_U32 : SOPK_SCC <sopk<0x0e, 0x0d>, "s_cmpk_le_u32", []>;
-} // End isCompare = 1
-
-let Defs = [SCC], isCommutable = 1, DisableEncoding = "$src0",
-    Constraints = "$sdst = $src0" in {
-  defm S_ADDK_I32 : SOPK_32TIE <sopk<0x0f, 0x0e>, "s_addk_i32", []>;
-  defm S_MULK_I32 : SOPK_32TIE <sopk<0x10, 0x0f>, "s_mulk_i32", []>;
-}
-
-defm S_CBRANCH_I_FORK : SOPK_m <
-  sopk<0x11, 0x10>, "s_cbranch_i_fork", (outs),
-  (ins SReg_64:$sdst, u16imm:$simm16), " $sdst, $simm16"
->;
-
-let mayLoad = 1 in {
-defm S_GETREG_B32 : SOPK_m <
-  sopk<0x12, 0x11>, "s_getreg_b32", (outs SReg_32:$sdst),
-  (ins hwreg:$simm16), " $sdst, $simm16"
->;
-}
-
-defm S_SETREG_B32 : SOPK_m <
-  sopk<0x13, 0x12>, "s_setreg_b32", (outs),
-  (ins SReg_32:$sdst, hwreg:$simm16), " $simm16, $sdst"
->;
-// FIXME: Not on SI?
-//defm S_GETREG_REGRD_B32 : SOPK_32 <sopk<0x14, 0x13>, "s_getreg_regrd_b32", []>;
-defm S_SETREG_IMM32_B32 : SOPK_IMM32 <
-  sopk<0x15, 0x14>, "s_setreg_imm32_b32", (outs),
-  (ins i32imm:$imm, hwreg:$simm16), " $simm16, $imm"
->;
-
-//===----------------------------------------------------------------------===//
-// SOPP Instructions
-//===----------------------------------------------------------------------===//
-
-def S_NOP : SOPP <0x00000000, (ins i16imm:$simm16), "s_nop $simm16">;
-
-let isTerminator = 1 in {
-
-def S_ENDPGM : SOPP <0x00000001, (ins), "s_endpgm",
-  [(AMDGPUendpgm)]> {
-  let simm16 = 0;
-  let isBarrier = 1;
-  let hasCtrlDep = 1;
-  let hasSideEffects = 1;
-}
-
-let isBranch = 1 in {
-def S_BRANCH : SOPP <
-  0x00000002, (ins sopp_brtarget:$simm16), "s_branch $simm16",
-  [(br bb:$simm16)]> {
-  let isBarrier = 1;
-}
-
-let Uses = [SCC] in {
-def S_CBRANCH_SCC0 : SOPP <
-  0x00000004, (ins sopp_brtarget:$simm16),
-  "s_cbranch_scc0 $simm16"
->;
-def S_CBRANCH_SCC1 : SOPP <
-  0x00000005, (ins sopp_brtarget:$simm16),
-  "s_cbranch_scc1 $simm16",
-  [(si_uniform_br_scc SCC, bb:$simm16)]
->;
-} // End Uses = [SCC]
-
-let Uses = [VCC] in {
-def S_CBRANCH_VCCZ : SOPP <
-  0x00000006, (ins sopp_brtarget:$simm16),
-  "s_cbranch_vccz $simm16"
->;
-def S_CBRANCH_VCCNZ : SOPP <
-  0x00000007, (ins sopp_brtarget:$simm16),
-  "s_cbranch_vccnz $simm16"
->;
-} // End Uses = [VCC]
-
-let Uses = [EXEC] in {
-def S_CBRANCH_EXECZ : SOPP <
-  0x00000008, (ins sopp_brtarget:$simm16),
-  "s_cbranch_execz $simm16"
->;
-def S_CBRANCH_EXECNZ : SOPP <
-  0x00000009, (ins sopp_brtarget:$simm16),
-  "s_cbranch_execnz $simm16"
->;
-} // End Uses = [EXEC]
-
-
-} // End isBranch = 1
-} // End isTerminator = 1
-
-let hasSideEffects = 1 in {
-def S_BARRIER : SOPP <0x0000000a, (ins), "s_barrier",
-  [(int_amdgcn_s_barrier)]
-> {
-  let SchedRW = [WriteBarrier];
-  let simm16 = 0;
-  let mayLoad = 1;
-  let mayStore = 1;
-  let isConvergent = 1;
-}
-
-let mayLoad = 1, mayStore = 1, hasSideEffects = 1 in
-def S_WAITCNT : SOPP <0x0000000c, (ins WAIT_FLAG:$simm16), "s_waitcnt $simm16">;
-def S_SETHALT : SOPP <0x0000000d, (ins i16imm:$simm16), "s_sethalt $simm16">;
-
-// On SI the documentation says sleep for approximately 64 * low 2
-// bits, consistent with the reported maximum of 448. On VI the
-// maximum reported is 960 cycles, so 960 / 64 = 15 max, so is the
-// maximum really 15 on VI?
-def S_SLEEP : SOPP <0x0000000e, (ins i32imm:$simm16),
-  "s_sleep $simm16", [(int_amdgcn_s_sleep SIMM16bit:$simm16)]> {
-  let hasSideEffects = 1;
-  let mayLoad = 1;
-  let mayStore = 1;
-}
-
-def S_SETPRIO : SOPP <0x0000000f, (ins i16imm:$simm16), "s_setprio $simm16">;
-
-let Uses = [EXEC, M0] in {
-  // FIXME: Should this be mayLoad+mayStore?
-  def S_SENDMSG : SOPP <0x00000010, (ins SendMsgImm:$simm16), "s_sendmsg $simm16",
-      [(AMDGPUsendmsg (i32 imm:$simm16))]
-  >;
-} // End Uses = [EXEC, M0]
-
-def S_SENDMSGHALT : SOPP <0x00000011, (ins SendMsgImm:$simm16), "s_sendmsghalt $simm16">;
-def S_TRAP : SOPP <0x00000012, (ins i16imm:$simm16), "s_trap $simm16">;
-def S_ICACHE_INV : SOPP <0x00000013, (ins), "s_icache_inv"> {
-	let simm16 = 0;
-}
-def S_INCPERFLEVEL : SOPP <0x00000014, (ins i32imm:$simm16), "s_incperflevel $simm16", 
-  [(int_amdgcn_s_incperflevel SIMM16bit:$simm16)]> {
-  let hasSideEffects = 1;
-  let mayLoad = 1;
-  let mayStore = 1;
-}
-def S_DECPERFLEVEL : SOPP <0x00000015, (ins i32imm:$simm16), "s_decperflevel $simm16",
-  [(int_amdgcn_s_decperflevel SIMM16bit:$simm16)]> {
-  let hasSideEffects = 1;
-  let mayLoad = 1;
-  let mayStore = 1;
-}
-def S_TTRACEDATA : SOPP <0x00000016, (ins), "s_ttracedata"> {
-  let simm16 = 0;
-}
-} // End hasSideEffects
 
 //===----------------------------------------------------------------------===//
 // VOPC Instructions
@@ -948,106 +448,6 @@ defm TBUFFER_STORE_FORMAT_XYZ : MTBUF_Store_Helper <0x00000006, "tbuffer_store_f
 defm TBUFFER_STORE_FORMAT_XYZW : MTBUF_Store_Helper <0x00000007, "tbuffer_store_format_xyzw", VReg_128>;
 
 //===----------------------------------------------------------------------===//
-// MIMG Instructions
-//===----------------------------------------------------------------------===//
-
-defm IMAGE_LOAD : MIMG_NoSampler <0x00000000, "image_load">;
-defm IMAGE_LOAD_MIP : MIMG_NoSampler <0x00000001, "image_load_mip">;
-//def IMAGE_LOAD_PCK : MIMG_NoPattern_ <"image_load_pck", 0x00000002>;
-//def IMAGE_LOAD_PCK_SGN : MIMG_NoPattern_ <"image_load_pck_sgn", 0x00000003>;
-//def IMAGE_LOAD_MIP_PCK : MIMG_NoPattern_ <"image_load_mip_pck", 0x00000004>;
-//def IMAGE_LOAD_MIP_PCK_SGN : MIMG_NoPattern_ <"image_load_mip_pck_sgn", 0x00000005>;
-defm IMAGE_STORE : MIMG_Store <0x00000008, "image_store">;
-defm IMAGE_STORE_MIP : MIMG_Store <0x00000009, "image_store_mip">;
-//def IMAGE_STORE_PCK : MIMG_NoPattern_ <"image_store_pck", 0x0000000a>;
-//def IMAGE_STORE_MIP_PCK : MIMG_NoPattern_ <"image_store_mip_pck", 0x0000000b>;
-defm IMAGE_GET_RESINFO : MIMG_NoSampler <0x0000000e, "image_get_resinfo">;
-defm IMAGE_ATOMIC_SWAP : MIMG_Atomic <mimg<0x0f, 0x10>, "image_atomic_swap">;
-defm IMAGE_ATOMIC_CMPSWAP : MIMG_Atomic <mimg<0x10, 0x11>, "image_atomic_cmpswap", VReg_64>;
-defm IMAGE_ATOMIC_ADD : MIMG_Atomic <mimg<0x11, 0x12>, "image_atomic_add">;
-defm IMAGE_ATOMIC_SUB : MIMG_Atomic <mimg<0x12, 0x13>, "image_atomic_sub">;
-//def IMAGE_ATOMIC_RSUB : MIMG_NoPattern_ <"image_atomic_rsub", 0x00000013>; -- not on VI
-defm IMAGE_ATOMIC_SMIN : MIMG_Atomic <mimg<0x14>, "image_atomic_smin">;
-defm IMAGE_ATOMIC_UMIN : MIMG_Atomic <mimg<0x15>, "image_atomic_umin">;
-defm IMAGE_ATOMIC_SMAX : MIMG_Atomic <mimg<0x16>, "image_atomic_smax">;
-defm IMAGE_ATOMIC_UMAX : MIMG_Atomic <mimg<0x17>, "image_atomic_umax">;
-defm IMAGE_ATOMIC_AND : MIMG_Atomic <mimg<0x18>, "image_atomic_and">;
-defm IMAGE_ATOMIC_OR : MIMG_Atomic <mimg<0x19>, "image_atomic_or">;
-defm IMAGE_ATOMIC_XOR : MIMG_Atomic <mimg<0x1a>, "image_atomic_xor">;
-defm IMAGE_ATOMIC_INC : MIMG_Atomic <mimg<0x1b>, "image_atomic_inc">;
-defm IMAGE_ATOMIC_DEC : MIMG_Atomic <mimg<0x1c>, "image_atomic_dec">;
-//def IMAGE_ATOMIC_FCMPSWAP : MIMG_NoPattern_ <"image_atomic_fcmpswap", 0x0000001d>; -- not on VI
-//def IMAGE_ATOMIC_FMIN : MIMG_NoPattern_ <"image_atomic_fmin", 0x0000001e>; -- not on VI
-//def IMAGE_ATOMIC_FMAX : MIMG_NoPattern_ <"image_atomic_fmax", 0x0000001f>; -- not on VI
-defm IMAGE_SAMPLE           : MIMG_Sampler_WQM <0x00000020, "image_sample">;
-defm IMAGE_SAMPLE_CL        : MIMG_Sampler_WQM <0x00000021, "image_sample_cl">;
-defm IMAGE_SAMPLE_D         : MIMG_Sampler <0x00000022, "image_sample_d">;
-defm IMAGE_SAMPLE_D_CL      : MIMG_Sampler <0x00000023, "image_sample_d_cl">;
-defm IMAGE_SAMPLE_L         : MIMG_Sampler <0x00000024, "image_sample_l">;
-defm IMAGE_SAMPLE_B         : MIMG_Sampler_WQM <0x00000025, "image_sample_b">;
-defm IMAGE_SAMPLE_B_CL      : MIMG_Sampler_WQM <0x00000026, "image_sample_b_cl">;
-defm IMAGE_SAMPLE_LZ        : MIMG_Sampler <0x00000027, "image_sample_lz">;
-defm IMAGE_SAMPLE_C         : MIMG_Sampler_WQM <0x00000028, "image_sample_c">;
-defm IMAGE_SAMPLE_C_CL      : MIMG_Sampler_WQM <0x00000029, "image_sample_c_cl">;
-defm IMAGE_SAMPLE_C_D       : MIMG_Sampler <0x0000002a, "image_sample_c_d">;
-defm IMAGE_SAMPLE_C_D_CL    : MIMG_Sampler <0x0000002b, "image_sample_c_d_cl">;
-defm IMAGE_SAMPLE_C_L       : MIMG_Sampler <0x0000002c, "image_sample_c_l">;
-defm IMAGE_SAMPLE_C_B       : MIMG_Sampler_WQM <0x0000002d, "image_sample_c_b">;
-defm IMAGE_SAMPLE_C_B_CL    : MIMG_Sampler_WQM <0x0000002e, "image_sample_c_b_cl">;
-defm IMAGE_SAMPLE_C_LZ      : MIMG_Sampler <0x0000002f, "image_sample_c_lz">;
-defm IMAGE_SAMPLE_O         : MIMG_Sampler_WQM <0x00000030, "image_sample_o">;
-defm IMAGE_SAMPLE_CL_O      : MIMG_Sampler_WQM <0x00000031, "image_sample_cl_o">;
-defm IMAGE_SAMPLE_D_O       : MIMG_Sampler <0x00000032, "image_sample_d_o">;
-defm IMAGE_SAMPLE_D_CL_O    : MIMG_Sampler <0x00000033, "image_sample_d_cl_o">;
-defm IMAGE_SAMPLE_L_O       : MIMG_Sampler <0x00000034, "image_sample_l_o">;
-defm IMAGE_SAMPLE_B_O       : MIMG_Sampler_WQM <0x00000035, "image_sample_b_o">;
-defm IMAGE_SAMPLE_B_CL_O    : MIMG_Sampler_WQM <0x00000036, "image_sample_b_cl_o">;
-defm IMAGE_SAMPLE_LZ_O      : MIMG_Sampler <0x00000037, "image_sample_lz_o">;
-defm IMAGE_SAMPLE_C_O       : MIMG_Sampler_WQM <0x00000038, "image_sample_c_o">;
-defm IMAGE_SAMPLE_C_CL_O    : MIMG_Sampler_WQM <0x00000039, "image_sample_c_cl_o">;
-defm IMAGE_SAMPLE_C_D_O     : MIMG_Sampler <0x0000003a, "image_sample_c_d_o">;
-defm IMAGE_SAMPLE_C_D_CL_O  : MIMG_Sampler <0x0000003b, "image_sample_c_d_cl_o">;
-defm IMAGE_SAMPLE_C_L_O     : MIMG_Sampler <0x0000003c, "image_sample_c_l_o">;
-defm IMAGE_SAMPLE_C_B_O     : MIMG_Sampler_WQM <0x0000003d, "image_sample_c_b_o">;
-defm IMAGE_SAMPLE_C_B_CL_O  : MIMG_Sampler_WQM <0x0000003e, "image_sample_c_b_cl_o">;
-defm IMAGE_SAMPLE_C_LZ_O    : MIMG_Sampler <0x0000003f, "image_sample_c_lz_o">;
-defm IMAGE_GATHER4          : MIMG_Gather_WQM <0x00000040, "image_gather4">;
-defm IMAGE_GATHER4_CL       : MIMG_Gather_WQM <0x00000041, "image_gather4_cl">;
-defm IMAGE_GATHER4_L        : MIMG_Gather <0x00000044, "image_gather4_l">;
-defm IMAGE_GATHER4_B        : MIMG_Gather_WQM <0x00000045, "image_gather4_b">;
-defm IMAGE_GATHER4_B_CL     : MIMG_Gather_WQM <0x00000046, "image_gather4_b_cl">;
-defm IMAGE_GATHER4_LZ       : MIMG_Gather <0x00000047, "image_gather4_lz">;
-defm IMAGE_GATHER4_C        : MIMG_Gather_WQM <0x00000048, "image_gather4_c">;
-defm IMAGE_GATHER4_C_CL     : MIMG_Gather_WQM <0x00000049, "image_gather4_c_cl">;
-defm IMAGE_GATHER4_C_L      : MIMG_Gather <0x0000004c, "image_gather4_c_l">;
-defm IMAGE_GATHER4_C_B      : MIMG_Gather_WQM <0x0000004d, "image_gather4_c_b">;
-defm IMAGE_GATHER4_C_B_CL   : MIMG_Gather_WQM <0x0000004e, "image_gather4_c_b_cl">;
-defm IMAGE_GATHER4_C_LZ     : MIMG_Gather <0x0000004f, "image_gather4_c_lz">;
-defm IMAGE_GATHER4_O        : MIMG_Gather_WQM <0x00000050, "image_gather4_o">;
-defm IMAGE_GATHER4_CL_O     : MIMG_Gather_WQM <0x00000051, "image_gather4_cl_o">;
-defm IMAGE_GATHER4_L_O      : MIMG_Gather <0x00000054, "image_gather4_l_o">;
-defm IMAGE_GATHER4_B_O      : MIMG_Gather_WQM <0x00000055, "image_gather4_b_o">;
-defm IMAGE_GATHER4_B_CL_O   : MIMG_Gather <0x00000056, "image_gather4_b_cl_o">;
-defm IMAGE_GATHER4_LZ_O     : MIMG_Gather <0x00000057, "image_gather4_lz_o">;
-defm IMAGE_GATHER4_C_O      : MIMG_Gather_WQM <0x00000058, "image_gather4_c_o">;
-defm IMAGE_GATHER4_C_CL_O   : MIMG_Gather_WQM <0x00000059, "image_gather4_c_cl_o">;
-defm IMAGE_GATHER4_C_L_O    : MIMG_Gather <0x0000005c, "image_gather4_c_l_o">;
-defm IMAGE_GATHER4_C_B_O    : MIMG_Gather_WQM <0x0000005d, "image_gather4_c_b_o">;
-defm IMAGE_GATHER4_C_B_CL_O : MIMG_Gather_WQM <0x0000005e, "image_gather4_c_b_cl_o">;
-defm IMAGE_GATHER4_C_LZ_O   : MIMG_Gather <0x0000005f, "image_gather4_c_lz_o">;
-defm IMAGE_GET_LOD          : MIMG_Sampler_WQM <0x00000060, "image_get_lod">;
-defm IMAGE_SAMPLE_CD        : MIMG_Sampler <0x00000068, "image_sample_cd">;
-defm IMAGE_SAMPLE_CD_CL     : MIMG_Sampler <0x00000069, "image_sample_cd_cl">;
-defm IMAGE_SAMPLE_C_CD      : MIMG_Sampler <0x0000006a, "image_sample_c_cd">;
-defm IMAGE_SAMPLE_C_CD_CL   : MIMG_Sampler <0x0000006b, "image_sample_c_cd_cl">;
-defm IMAGE_SAMPLE_CD_O      : MIMG_Sampler <0x0000006c, "image_sample_cd_o">;
-defm IMAGE_SAMPLE_CD_CL_O   : MIMG_Sampler <0x0000006d, "image_sample_cd_cl_o">;
-defm IMAGE_SAMPLE_C_CD_O    : MIMG_Sampler <0x0000006e, "image_sample_c_cd_o">;
-defm IMAGE_SAMPLE_C_CD_CL_O : MIMG_Sampler <0x0000006f, "image_sample_c_cd_cl_o">;
-//def IMAGE_RSRC256 : MIMG_NoPattern_RSRC256 <"image_rsrc256", 0x0000007e>;
-//def IMAGE_SAMPLER : MIMG_NoPattern_ <"image_sampler", 0x0000007f>;
-
-//===----------------------------------------------------------------------===//
 // VOP1 Instructions
 //===----------------------------------------------------------------------===//
 
@@ -1362,7 +762,7 @@ defm V_MUL_I32_I24 : VOP2Inst <vop2<0x9, 0x6>, "v_mul_i32_i24",
 >;
 
 defm V_MUL_HI_I32_I24 : VOP2Inst <vop2<0xa,0x7>, "v_mul_hi_i32_i24",
-  VOP_I32_I32_I32
+  VOP_I32_I32_I32, AMDGPUmulhi_i24
 >;
 
 defm V_MUL_U32_U24 : VOP2Inst <vop2<0xb, 0x8>, "v_mul_u32_u24",
@@ -1370,7 +770,7 @@ defm V_MUL_U32_U24 : VOP2Inst <vop2<0xb, 0x8>, "v_mul_u32_u24",
 >;
 
 defm V_MUL_HI_U32_U24 : VOP2Inst <vop2<0xc,0x9>, "v_mul_hi_u32_u24",
- VOP_I32_I32_I32
+ VOP_I32_I32_I32, AMDGPUmulhi_u24
 >;
 
 defm V_MIN_F32 : VOP2Inst <vop2<0xf, 0xa>, "v_min_f32", VOP_F32_F32_F32,
@@ -1781,6 +1181,7 @@ def V_CNDMASK_B64_PSEUDO : VOP3Common <(outs VReg_64:$vdst),
   (ins VSrc_64:$src0, VSrc_64:$src1, SSrc_64:$src2), "", []> {
   let isPseudo = 1;
   let isCodeGenOnly = 1;
+  let usesCustomInserter = 1;
 }
 
 // 64-bit vector move instruction.  This is mainly used by the SIFoldOperands
@@ -1803,7 +1204,7 @@ let hasSideEffects = 1 in {
 // Dummy terminator instruction to use after control flow instructions
 // replaced with exec mask operations.
 def SI_MASK_BRANCH : PseudoInstSI <
-  (outs), (ins brtarget:$target, SReg_64:$dst)> {
+  (outs), (ins brtarget:$target)> {
   let isBranch = 0;
   let isTerminator = 1;
   let isBarrier = 0;
@@ -1811,58 +1212,53 @@ def SI_MASK_BRANCH : PseudoInstSI <
   let Uses = [EXEC];
 }
 
-let Uses = [EXEC], Defs = [EXEC, SCC] in {
+let isTerminator = 1 in {
 
-let isBranch = 1, isTerminator = 1 in {
-
-def SI_IF: PseudoInstSI <
+def SI_IF: CFPseudoInstSI <
   (outs SReg_64:$dst), (ins SReg_64:$vcc, brtarget:$target),
-  [(set i64:$dst, (int_amdgcn_if i1:$vcc, bb:$target))]> {
+  [(set i64:$dst, (int_amdgcn_if i1:$vcc, bb:$target))], 1, 1> {
   let Constraints = "";
   let Size = 8;
 }
 
-def SI_ELSE : PseudoInstSI <
-  (outs SReg_64:$dst), (ins SReg_64:$src, brtarget:$target, i1imm:$execfix)> {
+def SI_ELSE : CFPseudoInstSI <
+  (outs SReg_64:$dst), (ins SReg_64:$src, brtarget:$target, i1imm:$execfix), [], 1, 1> {
   let Constraints = "$src = $dst";
   let Size = 12;
 }
 
-def SI_LOOP : PseudoInstSI <
+def SI_LOOP : CFPseudoInstSI <
   (outs), (ins SReg_64:$saved, brtarget:$target),
-  [(int_amdgcn_loop i64:$saved, bb:$target)]> {
+  [(int_amdgcn_loop i64:$saved, bb:$target)], 1, 1> {
   let Size = 8;
+  let isBranch = 1;
 }
 
 } // End isBranch = 1, isTerminator = 1
 
+def SI_END_CF : CFPseudoInstSI <
+  (outs), (ins SReg_64:$saved),
+  [(int_amdgcn_end_cf i64:$saved)], 1, 1> {
+  let Size = 4;
+}
 
-def SI_BREAK : PseudoInstSI <
+def SI_BREAK : CFPseudoInstSI <
   (outs SReg_64:$dst), (ins SReg_64:$src),
-  [(set i64:$dst, (int_amdgcn_break i64:$src))]> {
+  [(set i64:$dst, (int_amdgcn_break i64:$src))], 1> {
   let Size = 4;
 }
 
-def SI_IF_BREAK : PseudoInstSI <
+def SI_IF_BREAK : CFPseudoInstSI <
   (outs SReg_64:$dst), (ins SReg_64:$vcc, SReg_64:$src),
-  [(set i64:$dst, (int_amdgcn_if_break i1:$vcc, i64:$src))]
-> {
+  [(set i64:$dst, (int_amdgcn_if_break i1:$vcc, i64:$src))]> {
   let Size = 4;
 }
 
-def SI_ELSE_BREAK : PseudoInstSI <
+def SI_ELSE_BREAK : CFPseudoInstSI <
   (outs SReg_64:$dst), (ins SReg_64:$src0, SReg_64:$src1),
   [(set i64:$dst, (int_amdgcn_else_break i64:$src0, i64:$src1))]> {
   let Size = 4;
 }
-
-def SI_END_CF : PseudoInstSI <
-  (outs), (ins SReg_64:$saved),
-  [(int_amdgcn_end_cf i64:$saved)]> {
-  let Size = 4;
-}
-
-} // End Uses = [EXEC], Defs = [EXEC, SCC]
 
 let Uses = [EXEC], Defs = [EXEC,VCC] in {
 def SI_KILL : PseudoInstSI <
@@ -1872,7 +1268,7 @@ def SI_KILL : PseudoInstSI <
   let usesCustomInserter = 1;
 }
 
-def SI_KILL_TERMINATOR : PseudoInstSI <
+def SI_KILL_TERMINATOR : SPseudoInstSI <
   (outs), (ins VSrc_32:$src)> {
   let isTerminator = 1;
 }
@@ -1891,34 +1287,32 @@ def SI_PS_LIVE : PseudoInstSI <
 // s_mov_b32 rather than a copy of another initialized
 // register. MachineCSE skips copies, and we don't want to have to
 // fold operands before it runs.
-def SI_INIT_M0 : PseudoInstSI <(outs), (ins SSrc_32:$src)> {
+def SI_INIT_M0 : SPseudoInstSI <(outs), (ins SSrc_32:$src)> {
   let Defs = [M0];
   let usesCustomInserter = 1;
   let isAsCheapAsAMove = 1;
-  let SALU = 1;
   let isReMaterializable = 1;
 }
 
-def SI_RETURN : PseudoInstSI <
+def SI_RETURN : SPseudoInstSI <
   (outs), (ins variable_ops), [(AMDGPUreturn)]> {
   let isTerminator = 1;
   let isBarrier = 1;
   let isReturn = 1;
   let hasSideEffects = 1;
-  let SALU = 1;
   let hasNoSchedulingInfo = 1;
 }
 
-let Uses = [EXEC], Defs = [M0, EXEC],
+let Defs = [M0, EXEC],
   UseNamedOperandTable = 1 in {
 
-class SI_INDIRECT_SRC<RegisterClass rc> : PseudoInstSI <
+class SI_INDIRECT_SRC<RegisterClass rc> : VPseudoInstSI <
   (outs VGPR_32:$vdst),
   (ins rc:$src, VS_32:$idx, i32imm:$offset)> {
   let usesCustomInserter = 1;
 }
 
-class SI_INDIRECT_DST<RegisterClass rc> : PseudoInstSI <
+class SI_INDIRECT_DST<RegisterClass rc> : VPseudoInstSI <
   (outs rc:$vdst),
   (ins rc:$src, VS_32:$idx, i32imm:$offset, VGPR_32:$val)> {
   let Constraints = "$src = $vdst";
@@ -1968,8 +1362,8 @@ defm SI_SPILL_S256 : SI_SPILL_SGPR <SReg_256>;
 defm SI_SPILL_S512 : SI_SPILL_SGPR <SReg_512>;
 
 multiclass SI_SPILL_VGPR <RegisterClass vgpr_class> {
-  let UseNamedOperandTable = 1, VGPRSpill = 1, Uses = [EXEC] in {
-    def _SAVE : PseudoInstSI <
+  let UseNamedOperandTable = 1, VGPRSpill = 1 in {
+    def _SAVE : VPseudoInstSI <
       (outs),
       (ins vgpr_class:$src, i32imm:$frame_idx, SReg_128:$scratch_rsrc,
            SReg_32:$scratch_offset, i32imm:$offset)> {
@@ -1977,7 +1371,7 @@ multiclass SI_SPILL_VGPR <RegisterClass vgpr_class> {
       let mayLoad = 0;
     }
 
-    def _RESTORE : PseudoInstSI <
+    def _RESTORE : VPseudoInstSI <
       (outs vgpr_class:$dst),
       (ins i32imm:$frame_idx, SReg_128:$scratch_rsrc, SReg_32:$scratch_offset,
            i32imm:$offset)> {
@@ -1994,16 +1388,12 @@ defm SI_SPILL_V128 : SI_SPILL_VGPR <VReg_128>;
 defm SI_SPILL_V256 : SI_SPILL_VGPR <VReg_256>;
 defm SI_SPILL_V512 : SI_SPILL_VGPR <VReg_512>;
 
-let Defs = [SCC] in {
-
-def SI_PC_ADD_REL_OFFSET : PseudoInstSI <
+def SI_PC_ADD_REL_OFFSET : SPseudoInstSI <
   (outs SReg_64:$dst),
   (ins si_ga:$ptr),
   [(set SReg_64:$dst, (i64 (SIpc_add_rel_offset (tglobaladdr:$ptr))))]> {
-  let SALU = 1;
+  let Defs = [SCC];
 }
-
-} // End Defs = [SCC]
 
 } // End SubtargetPredicate = isGCN
 
@@ -2226,15 +1616,6 @@ def : Pat<
     sub0)
 >;
 
-
-//===----------------------------------------------------------------------===//
-// S_GETREG_B32 Intrinsic Pattern.
-//===----------------------------------------------------------------------===//
-def : Pat <
-  (int_amdgcn_s_getreg imm:$simm16),
-  (S_GETREG_B32 (as_i16imm $simm16))
->;
-
 //===----------------------------------------------------------------------===//
 // V_ICMPIntrinsic Pattern.
 //===----------------------------------------------------------------------===//
@@ -2299,100 +1680,6 @@ def : FCMP_Pattern <COND_UGT, V_CMP_NLE_F64_e64, f64>;
 def : FCMP_Pattern <COND_UGE, V_CMP_NLT_F64_e64, f64>;
 def : FCMP_Pattern <COND_ULT, V_CMP_NGE_F64_e64, f64>;
 def : FCMP_Pattern <COND_ULE, V_CMP_NGT_F64_e64, f64>;
-// SMRD Patterns
-//===----------------------------------------------------------------------===//
-
-multiclass SMRD_Pattern <string Instr, ValueType vt> {
-
-  // 1. IMM offset
-  def : Pat <
-    (smrd_load (SMRDImm i64:$sbase, i32:$offset)),
-    (vt (!cast<SMRD>(Instr#"_IMM") $sbase, $offset))
-  >;
-
-  // 2. SGPR offset
-  def : Pat <
-    (smrd_load (SMRDSgpr i64:$sbase, i32:$offset)),
-    (vt (!cast<SMRD>(Instr#"_SGPR") $sbase, $offset))
-  >;
-
-  def : Pat <
-    (smrd_load (SMRDImm32 i64:$sbase, i32:$offset)),
-    (vt (!cast<SMRD>(Instr#"_IMM_ci") $sbase, $offset))
-  > {
-    let Predicates = [isCIOnly];
-  }
-}
-
-// Global and constant loads can be selected to either MUBUF or SMRD
-// instructions, but SMRD instructions are faster so we want the instruction
-// selector to prefer those.
-let AddedComplexity = 100 in {
-
-defm : SMRD_Pattern <"S_LOAD_DWORD", i32>;
-defm : SMRD_Pattern <"S_LOAD_DWORDX2", v2i32>;
-defm : SMRD_Pattern <"S_LOAD_DWORDX4", v4i32>;
-defm : SMRD_Pattern <"S_LOAD_DWORDX8", v8i32>;
-defm : SMRD_Pattern <"S_LOAD_DWORDX16", v16i32>;
-
-// 1. Offset as an immediate
-def : Pat <
-  (SIload_constant v4i32:$sbase, (SMRDBufferImm i32:$offset)),
-  (S_BUFFER_LOAD_DWORD_IMM $sbase, $offset)
->;
-
-// 2. Offset loaded in an 32bit SGPR
-def : Pat <
-  (SIload_constant v4i32:$sbase, (SMRDBufferSgpr i32:$offset)),
-  (S_BUFFER_LOAD_DWORD_SGPR $sbase, $offset)
->;
-
-let Predicates = [isCI] in {
-
-def : Pat <
-  (SIload_constant v4i32:$sbase, (SMRDBufferImm32 i32:$offset)),
-  (S_BUFFER_LOAD_DWORD_IMM_ci $sbase, $offset)
->;
-
-} // End Predicates = [isCI]
-
-} // End let AddedComplexity = 10000
-
-//===----------------------------------------------------------------------===//
-// SOP1 Patterns
-//===----------------------------------------------------------------------===//
-
-def : Pat <
-  (i64 (ctpop i64:$src)),
-    (i64 (REG_SEQUENCE SReg_64,
-     (i32 (COPY_TO_REGCLASS (S_BCNT1_I32_B64 $src), SReg_32)), sub0,
-     (S_MOV_B32 0), sub1))
->;
-
-def : Pat <
-  (i32 (smax i32:$x, (i32 (ineg i32:$x)))),
-  (S_ABS_I32 $x)
->;
-
-//===----------------------------------------------------------------------===//
-// SOP2 Patterns
-//===----------------------------------------------------------------------===//
-
-// V_ADD_I32_e32/S_ADD_U32 produces carry in VCC/SCC. For the vector
-// case, the sgpr-copies pass will fix this to use the vector version.
-def : Pat <
-  (i32 (addc i32:$src0, i32:$src1)),
-  (S_ADD_U32 $src0, $src1)
->;
-
-//===----------------------------------------------------------------------===//
-// SOPP Patterns
-//===----------------------------------------------------------------------===//
-
-def : Pat <
-  (int_amdgcn_s_waitcnt i32:$simm16),
-  (S_WAITCNT (as_i16imm $simm16))
->;
 
 //===----------------------------------------------------------------------===//
 // VOP1 Patterns
@@ -2445,416 +1732,6 @@ def : Pat <
   (V_MAC_F32_e64 $src0_modifiers, $src0, $src1_modifiers, $src1,
                  $src2_modifiers, $src2, $clamp, $omod)
 >;
-
-/********** ======================= **********/
-/********** Image sampling patterns **********/
-/********** ======================= **********/
-
-// Image + sampler
-class SampleRawPattern<SDPatternOperator name, MIMG opcode, ValueType vt> : Pat <
-  (name vt:$addr, v8i32:$rsrc, v4i32:$sampler, i32:$dmask, i32:$unorm,
-        i32:$r128, i32:$da, i32:$glc, i32:$slc, i32:$tfe, i32:$lwe),
-  (opcode $addr, $rsrc, $sampler,
-          (as_i32imm $dmask), (as_i1imm $unorm), (as_i1imm $glc), (as_i1imm $slc),
-          (as_i1imm $r128), (as_i1imm $tfe), (as_i1imm $lwe), (as_i1imm $da))
->;
-
-multiclass SampleRawPatterns<SDPatternOperator name, string opcode> {
-  def : SampleRawPattern<name, !cast<MIMG>(opcode # _V4_V1), i32>;
-  def : SampleRawPattern<name, !cast<MIMG>(opcode # _V4_V2), v2i32>;
-  def : SampleRawPattern<name, !cast<MIMG>(opcode # _V4_V4), v4i32>;
-  def : SampleRawPattern<name, !cast<MIMG>(opcode # _V4_V8), v8i32>;
-  def : SampleRawPattern<name, !cast<MIMG>(opcode # _V4_V16), v16i32>;
-}
-
-
-// Image + sampler for amdgcn
-// TODO:
-// 1. Handle half data type like v4f16, and add D16 bit support;
-// 2. Handle v4i32 rsrc type (Register Class for the instruction to be SReg_128).
-// 3. Add A16 support when we pass address of half type.
-multiclass AMDGCNSamplePattern<SDPatternOperator name, MIMG opcode, ValueType vt>  {
-  def : Pat<
-    (v4f32 (name vt:$addr, v8i32:$rsrc, v4i32:$sampler, i32:$dmask, i1:$unorm, i1:$glc,
-        i1:$slc, i1:$lwe, i1:$da)),
-    (opcode $addr, $rsrc, $sampler,
-          (as_i32imm $dmask), (as_i1imm $unorm), (as_i1imm $glc), (as_i1imm $slc),
-          0, 0, (as_i1imm $lwe), (as_i1imm $da))
-    >;
-}
-
-multiclass AMDGCNSamplePatterns<SDPatternOperator name, string opcode> {
-  defm : AMDGCNSamplePattern<name, !cast<MIMG>(opcode # _V4_V1), f32>;
-  defm : AMDGCNSamplePattern<name, !cast<MIMG>(opcode # _V4_V2), v2f32>;
-  defm : AMDGCNSamplePattern<name, !cast<MIMG>(opcode # _V4_V4), v4f32>;
-  defm : AMDGCNSamplePattern<name, !cast<MIMG>(opcode # _V4_V8), v8f32>;
-  defm : AMDGCNSamplePattern<name, !cast<MIMG>(opcode # _V4_V16), v16f32>;
-}
-
-
-// Image only
-class ImagePattern<SDPatternOperator name, MIMG opcode, ValueType vt> : Pat <
-  (name vt:$addr, v8i32:$rsrc, imm:$dmask, imm:$unorm,
-        imm:$r128, imm:$da, imm:$glc, imm:$slc, imm:$tfe, imm:$lwe),
-  (opcode $addr, $rsrc,
-          (as_i32imm $dmask), (as_i1imm $unorm), (as_i1imm $glc), (as_i1imm $slc),
-          (as_i1imm $r128), (as_i1imm $tfe), (as_i1imm $lwe), (as_i1imm $da))
->;
-
-multiclass ImagePatterns<SDPatternOperator name, string opcode> {
-  def : ImagePattern<name, !cast<MIMG>(opcode # _V4_V1), i32>;
-  def : ImagePattern<name, !cast<MIMG>(opcode # _V4_V2), v2i32>;
-  def : ImagePattern<name, !cast<MIMG>(opcode # _V4_V4), v4i32>;
-}
-
-class ImageLoadPattern<SDPatternOperator name, MIMG opcode, ValueType vt> : Pat <
-  (name vt:$addr, v8i32:$rsrc, imm:$dmask, imm:$r128, imm:$da, imm:$glc,
-        imm:$slc),
-  (opcode $addr, $rsrc,
-          (as_i32imm $dmask), 1, (as_i1imm $glc), (as_i1imm $slc),
-          (as_i1imm $r128), 0, 0, (as_i1imm $da))
->;
-
-multiclass ImageLoadPatterns<SDPatternOperator name, string opcode> {
-  def : ImageLoadPattern<name, !cast<MIMG>(opcode # _V4_V1), i32>;
-  def : ImageLoadPattern<name, !cast<MIMG>(opcode # _V4_V2), v2i32>;
-  def : ImageLoadPattern<name, !cast<MIMG>(opcode # _V4_V4), v4i32>;
-}
-
-class ImageStorePattern<SDPatternOperator name, MIMG opcode, ValueType vt> : Pat <
-  (name v4f32:$data, vt:$addr, v8i32:$rsrc, i32:$dmask, imm:$r128, imm:$da,
-        imm:$glc, imm:$slc),
-  (opcode $data, $addr, $rsrc,
-          (as_i32imm $dmask), 1, (as_i1imm $glc), (as_i1imm $slc),
-          (as_i1imm $r128), 0, 0, (as_i1imm $da))
->;
-
-multiclass ImageStorePatterns<SDPatternOperator name, string opcode> {
-  def : ImageStorePattern<name, !cast<MIMG>(opcode # _V4_V1), i32>;
-  def : ImageStorePattern<name, !cast<MIMG>(opcode # _V4_V2), v2i32>;
-  def : ImageStorePattern<name, !cast<MIMG>(opcode # _V4_V4), v4i32>;
-}
-
-class ImageAtomicPattern<SDPatternOperator name, MIMG opcode, ValueType vt> : Pat <
-  (name i32:$vdata, vt:$addr, v8i32:$rsrc, imm:$r128, imm:$da, imm:$slc),
-  (opcode $vdata, $addr, $rsrc, 1, 1, 1, (as_i1imm $slc), (as_i1imm $r128), 0, 0, (as_i1imm $da))
->;
-
-multiclass ImageAtomicPatterns<SDPatternOperator name, string opcode> {
-  def : ImageAtomicPattern<name, !cast<MIMG>(opcode # _V1), i32>;
-  def : ImageAtomicPattern<name, !cast<MIMG>(opcode # _V2), v2i32>;
-  def : ImageAtomicPattern<name, !cast<MIMG>(opcode # _V4), v4i32>;
-}
-
-class ImageAtomicCmpSwapPattern<MIMG opcode, ValueType vt> : Pat <
-  (int_amdgcn_image_atomic_cmpswap i32:$vsrc, i32:$vcmp, vt:$addr, v8i32:$rsrc,
-                                   imm:$r128, imm:$da, imm:$slc),
-  (EXTRACT_SUBREG
-    (opcode (REG_SEQUENCE VReg_64, $vsrc, sub0, $vcmp, sub1),
-            $addr, $rsrc, 3, 1, 1, (as_i1imm $slc), (as_i1imm $r128), 0, 0, (as_i1imm $da)),
-    sub0)
->;
-
-// ======= SI Image Intrinsics ================
-
-// Image load
-defm : ImagePatterns<int_SI_image_load, "IMAGE_LOAD">;
-defm : ImagePatterns<int_SI_image_load_mip, "IMAGE_LOAD_MIP">;
-def : ImagePattern<int_SI_getresinfo, IMAGE_GET_RESINFO_V4_V1, i32>;
-
-// Basic sample
-defm : SampleRawPatterns<int_SI_image_sample,           "IMAGE_SAMPLE">;
-defm : SampleRawPatterns<int_SI_image_sample_cl,        "IMAGE_SAMPLE_CL">;
-defm : SampleRawPatterns<int_SI_image_sample_d,         "IMAGE_SAMPLE_D">;
-defm : SampleRawPatterns<int_SI_image_sample_d_cl,      "IMAGE_SAMPLE_D_CL">;
-defm : SampleRawPatterns<int_SI_image_sample_l,         "IMAGE_SAMPLE_L">;
-defm : SampleRawPatterns<int_SI_image_sample_b,         "IMAGE_SAMPLE_B">;
-defm : SampleRawPatterns<int_SI_image_sample_b_cl,      "IMAGE_SAMPLE_B_CL">;
-defm : SampleRawPatterns<int_SI_image_sample_lz,        "IMAGE_SAMPLE_LZ">;
-defm : SampleRawPatterns<int_SI_image_sample_cd,        "IMAGE_SAMPLE_CD">;
-defm : SampleRawPatterns<int_SI_image_sample_cd_cl,     "IMAGE_SAMPLE_CD_CL">;
-
-// Sample with comparison
-defm : SampleRawPatterns<int_SI_image_sample_c,         "IMAGE_SAMPLE_C">;
-defm : SampleRawPatterns<int_SI_image_sample_c_cl,      "IMAGE_SAMPLE_C_CL">;
-defm : SampleRawPatterns<int_SI_image_sample_c_d,       "IMAGE_SAMPLE_C_D">;
-defm : SampleRawPatterns<int_SI_image_sample_c_d_cl,    "IMAGE_SAMPLE_C_D_CL">;
-defm : SampleRawPatterns<int_SI_image_sample_c_l,       "IMAGE_SAMPLE_C_L">;
-defm : SampleRawPatterns<int_SI_image_sample_c_b,       "IMAGE_SAMPLE_C_B">;
-defm : SampleRawPatterns<int_SI_image_sample_c_b_cl,    "IMAGE_SAMPLE_C_B_CL">;
-defm : SampleRawPatterns<int_SI_image_sample_c_lz,      "IMAGE_SAMPLE_C_LZ">;
-defm : SampleRawPatterns<int_SI_image_sample_c_cd,      "IMAGE_SAMPLE_C_CD">;
-defm : SampleRawPatterns<int_SI_image_sample_c_cd_cl,   "IMAGE_SAMPLE_C_CD_CL">;
-
-// Sample with offsets
-defm : SampleRawPatterns<int_SI_image_sample_o,         "IMAGE_SAMPLE_O">;
-defm : SampleRawPatterns<int_SI_image_sample_cl_o,      "IMAGE_SAMPLE_CL_O">;
-defm : SampleRawPatterns<int_SI_image_sample_d_o,       "IMAGE_SAMPLE_D_O">;
-defm : SampleRawPatterns<int_SI_image_sample_d_cl_o,    "IMAGE_SAMPLE_D_CL_O">;
-defm : SampleRawPatterns<int_SI_image_sample_l_o,       "IMAGE_SAMPLE_L_O">;
-defm : SampleRawPatterns<int_SI_image_sample_b_o,       "IMAGE_SAMPLE_B_O">;
-defm : SampleRawPatterns<int_SI_image_sample_b_cl_o,    "IMAGE_SAMPLE_B_CL_O">;
-defm : SampleRawPatterns<int_SI_image_sample_lz_o,      "IMAGE_SAMPLE_LZ_O">;
-defm : SampleRawPatterns<int_SI_image_sample_cd_o,      "IMAGE_SAMPLE_CD_O">;
-defm : SampleRawPatterns<int_SI_image_sample_cd_cl_o,   "IMAGE_SAMPLE_CD_CL_O">;
-
-// Sample with comparison and offsets
-defm : SampleRawPatterns<int_SI_image_sample_c_o,       "IMAGE_SAMPLE_C_O">;
-defm : SampleRawPatterns<int_SI_image_sample_c_cl_o,    "IMAGE_SAMPLE_C_CL_O">;
-defm : SampleRawPatterns<int_SI_image_sample_c_d_o,     "IMAGE_SAMPLE_C_D_O">;
-defm : SampleRawPatterns<int_SI_image_sample_c_d_cl_o,  "IMAGE_SAMPLE_C_D_CL_O">;
-defm : SampleRawPatterns<int_SI_image_sample_c_l_o,     "IMAGE_SAMPLE_C_L_O">;
-defm : SampleRawPatterns<int_SI_image_sample_c_b_o,     "IMAGE_SAMPLE_C_B_O">;
-defm : SampleRawPatterns<int_SI_image_sample_c_b_cl_o,  "IMAGE_SAMPLE_C_B_CL_O">;
-defm : SampleRawPatterns<int_SI_image_sample_c_lz_o,    "IMAGE_SAMPLE_C_LZ_O">;
-defm : SampleRawPatterns<int_SI_image_sample_c_cd_o,    "IMAGE_SAMPLE_C_CD_O">;
-defm : SampleRawPatterns<int_SI_image_sample_c_cd_cl_o, "IMAGE_SAMPLE_C_CD_CL_O">;
-
-// Gather opcodes
-// Only the variants which make sense are defined.
-def : SampleRawPattern<int_SI_gather4,           IMAGE_GATHER4_V4_V2,        v2i32>;
-def : SampleRawPattern<int_SI_gather4,           IMAGE_GATHER4_V4_V4,        v4i32>;
-def : SampleRawPattern<int_SI_gather4_cl,        IMAGE_GATHER4_CL_V4_V4,     v4i32>;
-def : SampleRawPattern<int_SI_gather4_l,         IMAGE_GATHER4_L_V4_V4,      v4i32>;
-def : SampleRawPattern<int_SI_gather4_b,         IMAGE_GATHER4_B_V4_V4,      v4i32>;
-def : SampleRawPattern<int_SI_gather4_b_cl,      IMAGE_GATHER4_B_CL_V4_V4,   v4i32>;
-def : SampleRawPattern<int_SI_gather4_b_cl,      IMAGE_GATHER4_B_CL_V4_V8,   v8i32>;
-def : SampleRawPattern<int_SI_gather4_lz,        IMAGE_GATHER4_LZ_V4_V2,     v2i32>;
-def : SampleRawPattern<int_SI_gather4_lz,        IMAGE_GATHER4_LZ_V4_V4,     v4i32>;
-
-def : SampleRawPattern<int_SI_gather4_c,         IMAGE_GATHER4_C_V4_V4,      v4i32>;
-def : SampleRawPattern<int_SI_gather4_c_cl,      IMAGE_GATHER4_C_CL_V4_V4,   v4i32>;
-def : SampleRawPattern<int_SI_gather4_c_cl,      IMAGE_GATHER4_C_CL_V4_V8,   v8i32>;
-def : SampleRawPattern<int_SI_gather4_c_l,       IMAGE_GATHER4_C_L_V4_V4,    v4i32>;
-def : SampleRawPattern<int_SI_gather4_c_l,       IMAGE_GATHER4_C_L_V4_V8,    v8i32>;
-def : SampleRawPattern<int_SI_gather4_c_b,       IMAGE_GATHER4_C_B_V4_V4,    v4i32>;
-def : SampleRawPattern<int_SI_gather4_c_b,       IMAGE_GATHER4_C_B_V4_V8,    v8i32>;
-def : SampleRawPattern<int_SI_gather4_c_b_cl,    IMAGE_GATHER4_C_B_CL_V4_V8, v8i32>;
-def : SampleRawPattern<int_SI_gather4_c_lz,      IMAGE_GATHER4_C_LZ_V4_V4,   v4i32>;
-
-def : SampleRawPattern<int_SI_gather4_o,         IMAGE_GATHER4_O_V4_V4,      v4i32>;
-def : SampleRawPattern<int_SI_gather4_cl_o,      IMAGE_GATHER4_CL_O_V4_V4,   v4i32>;
-def : SampleRawPattern<int_SI_gather4_cl_o,      IMAGE_GATHER4_CL_O_V4_V8,   v8i32>;
-def : SampleRawPattern<int_SI_gather4_l_o,       IMAGE_GATHER4_L_O_V4_V4,    v4i32>;
-def : SampleRawPattern<int_SI_gather4_l_o,       IMAGE_GATHER4_L_O_V4_V8,    v8i32>;
-def : SampleRawPattern<int_SI_gather4_b_o,       IMAGE_GATHER4_B_O_V4_V4,    v4i32>;
-def : SampleRawPattern<int_SI_gather4_b_o,       IMAGE_GATHER4_B_O_V4_V8,    v8i32>;
-def : SampleRawPattern<int_SI_gather4_b_cl_o,    IMAGE_GATHER4_B_CL_O_V4_V8, v8i32>;
-def : SampleRawPattern<int_SI_gather4_lz_o,      IMAGE_GATHER4_LZ_O_V4_V4,   v4i32>;
-
-def : SampleRawPattern<int_SI_gather4_c_o,       IMAGE_GATHER4_C_O_V4_V4,    v4i32>;
-def : SampleRawPattern<int_SI_gather4_c_o,       IMAGE_GATHER4_C_O_V4_V8,    v8i32>;
-def : SampleRawPattern<int_SI_gather4_c_cl_o,    IMAGE_GATHER4_C_CL_O_V4_V8, v8i32>;
-def : SampleRawPattern<int_SI_gather4_c_l_o,     IMAGE_GATHER4_C_L_O_V4_V8,  v8i32>;
-def : SampleRawPattern<int_SI_gather4_c_b_o,     IMAGE_GATHER4_C_B_O_V4_V8,  v8i32>;
-def : SampleRawPattern<int_SI_gather4_c_b_cl_o,  IMAGE_GATHER4_C_B_CL_O_V4_V8, v8i32>;
-def : SampleRawPattern<int_SI_gather4_c_lz_o,    IMAGE_GATHER4_C_LZ_O_V4_V4, v4i32>;
-def : SampleRawPattern<int_SI_gather4_c_lz_o,    IMAGE_GATHER4_C_LZ_O_V4_V8, v8i32>;
-
-def : SampleRawPattern<int_SI_getlod, IMAGE_GET_LOD_V4_V1, i32>;
-def : SampleRawPattern<int_SI_getlod, IMAGE_GET_LOD_V4_V2, v2i32>;
-def : SampleRawPattern<int_SI_getlod, IMAGE_GET_LOD_V4_V4, v4i32>;
-
-
-// ======= amdgcn Image Intrinsics ==============
-
-// Image load
-defm : ImageLoadPatterns<int_amdgcn_image_load, "IMAGE_LOAD">;
-defm : ImageLoadPatterns<int_amdgcn_image_load_mip, "IMAGE_LOAD_MIP">;
-
-// Image store
-defm : ImageStorePatterns<int_amdgcn_image_store, "IMAGE_STORE">;
-defm : ImageStorePatterns<int_amdgcn_image_store_mip, "IMAGE_STORE_MIP">;
-
-// Basic sample
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample,           "IMAGE_SAMPLE">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_cl,        "IMAGE_SAMPLE_CL">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_d,         "IMAGE_SAMPLE_D">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_d_cl,      "IMAGE_SAMPLE_D_CL">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_l,         "IMAGE_SAMPLE_L">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_b,         "IMAGE_SAMPLE_B">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_b_cl,      "IMAGE_SAMPLE_B_CL">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_lz,        "IMAGE_SAMPLE_LZ">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_cd,        "IMAGE_SAMPLE_CD">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_cd_cl,     "IMAGE_SAMPLE_CD_CL">;
-
-// Sample with comparison
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c,         "IMAGE_SAMPLE_C">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_cl,      "IMAGE_SAMPLE_C_CL">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_d,       "IMAGE_SAMPLE_C_D">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_d_cl,    "IMAGE_SAMPLE_C_D_CL">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_l,       "IMAGE_SAMPLE_C_L">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_b,       "IMAGE_SAMPLE_C_B">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_b_cl,    "IMAGE_SAMPLE_C_B_CL">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_lz,      "IMAGE_SAMPLE_C_LZ">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_cd,      "IMAGE_SAMPLE_C_CD">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_cd_cl,   "IMAGE_SAMPLE_C_CD_CL">;
-
-// Sample with offsets
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_o,         "IMAGE_SAMPLE_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_cl_o,      "IMAGE_SAMPLE_CL_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_d_o,       "IMAGE_SAMPLE_D_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_d_cl_o,    "IMAGE_SAMPLE_D_CL_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_l_o,       "IMAGE_SAMPLE_L_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_b_o,       "IMAGE_SAMPLE_B_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_b_cl_o,    "IMAGE_SAMPLE_B_CL_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_lz_o,      "IMAGE_SAMPLE_LZ_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_cd_o,      "IMAGE_SAMPLE_CD_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_cd_cl_o,   "IMAGE_SAMPLE_CD_CL_O">;
-
-// Sample with comparison and offsets
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_o,       "IMAGE_SAMPLE_C_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_cl_o,    "IMAGE_SAMPLE_C_CL_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_d_o,     "IMAGE_SAMPLE_C_D_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_d_cl_o,  "IMAGE_SAMPLE_C_D_CL_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_l_o,     "IMAGE_SAMPLE_C_L_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_b_o,     "IMAGE_SAMPLE_C_B_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_b_cl_o,  "IMAGE_SAMPLE_C_B_CL_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_lz_o,    "IMAGE_SAMPLE_C_LZ_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_cd_o,    "IMAGE_SAMPLE_C_CD_O">;
-defm : AMDGCNSamplePatterns<int_amdgcn_image_sample_c_cd_cl_o, "IMAGE_SAMPLE_C_CD_CL_O">;
-
-// Gather opcodes
-// Only the variants which make sense are defined.
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4,           IMAGE_GATHER4_V4_V2,        v2f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4,           IMAGE_GATHER4_V4_V4,        v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_cl,        IMAGE_GATHER4_CL_V4_V4,     v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_l,         IMAGE_GATHER4_L_V4_V4,      v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_b,         IMAGE_GATHER4_B_V4_V4,      v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_b_cl,      IMAGE_GATHER4_B_CL_V4_V4,   v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_b_cl,      IMAGE_GATHER4_B_CL_V4_V8,   v8f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_lz,        IMAGE_GATHER4_LZ_V4_V2,     v2f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_lz,        IMAGE_GATHER4_LZ_V4_V4,     v4f32>;
-
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c,         IMAGE_GATHER4_C_V4_V4,      v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_cl,      IMAGE_GATHER4_C_CL_V4_V4,   v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_cl,      IMAGE_GATHER4_C_CL_V4_V8,   v8f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_l,       IMAGE_GATHER4_C_L_V4_V4,    v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_l,       IMAGE_GATHER4_C_L_V4_V8,    v8f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_b,       IMAGE_GATHER4_C_B_V4_V4,    v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_b,       IMAGE_GATHER4_C_B_V4_V8,    v8f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_b_cl,    IMAGE_GATHER4_C_B_CL_V4_V8, v8f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_lz,      IMAGE_GATHER4_C_LZ_V4_V4,   v4f32>;
-
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_o,         IMAGE_GATHER4_O_V4_V4,      v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_cl_o,      IMAGE_GATHER4_CL_O_V4_V4,   v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_cl_o,      IMAGE_GATHER4_CL_O_V4_V8,   v8f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_l_o,       IMAGE_GATHER4_L_O_V4_V4,    v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_l_o,       IMAGE_GATHER4_L_O_V4_V8,    v8f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_b_o,       IMAGE_GATHER4_B_O_V4_V4,    v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_b_o,       IMAGE_GATHER4_B_O_V4_V8,    v8f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_b_cl_o,    IMAGE_GATHER4_B_CL_O_V4_V8, v8f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_lz_o,      IMAGE_GATHER4_LZ_O_V4_V4,   v4f32>;
-
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_o,       IMAGE_GATHER4_C_O_V4_V4,    v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_o,       IMAGE_GATHER4_C_O_V4_V8,    v8f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_cl_o,    IMAGE_GATHER4_C_CL_O_V4_V8, v8f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_l_o,     IMAGE_GATHER4_C_L_O_V4_V8,  v8f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_b_o,     IMAGE_GATHER4_C_B_O_V4_V8,  v8f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_b_cl_o,  IMAGE_GATHER4_C_B_CL_O_V4_V8, v8f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_lz_o,    IMAGE_GATHER4_C_LZ_O_V4_V4, v4f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_gather4_c_lz_o,    IMAGE_GATHER4_C_LZ_O_V4_V8, v8f32>;
-
-defm : AMDGCNSamplePattern<int_amdgcn_image_getlod, IMAGE_GET_LOD_V4_V1, f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_getlod, IMAGE_GET_LOD_V4_V2, v2f32>;
-defm : AMDGCNSamplePattern<int_amdgcn_image_getlod, IMAGE_GET_LOD_V4_V4, v4f32>;
-
-// Image atomics
-defm : ImageAtomicPatterns<int_amdgcn_image_atomic_swap, "IMAGE_ATOMIC_SWAP">;
-def : ImageAtomicCmpSwapPattern<IMAGE_ATOMIC_CMPSWAP_V1, i32>;
-def : ImageAtomicCmpSwapPattern<IMAGE_ATOMIC_CMPSWAP_V2, v2i32>;
-def : ImageAtomicCmpSwapPattern<IMAGE_ATOMIC_CMPSWAP_V4, v4i32>;
-defm : ImageAtomicPatterns<int_amdgcn_image_atomic_add, "IMAGE_ATOMIC_ADD">;
-defm : ImageAtomicPatterns<int_amdgcn_image_atomic_sub, "IMAGE_ATOMIC_SUB">;
-defm : ImageAtomicPatterns<int_amdgcn_image_atomic_smin, "IMAGE_ATOMIC_SMIN">;
-defm : ImageAtomicPatterns<int_amdgcn_image_atomic_umin, "IMAGE_ATOMIC_UMIN">;
-defm : ImageAtomicPatterns<int_amdgcn_image_atomic_smax, "IMAGE_ATOMIC_SMAX">;
-defm : ImageAtomicPatterns<int_amdgcn_image_atomic_umax, "IMAGE_ATOMIC_UMAX">;
-defm : ImageAtomicPatterns<int_amdgcn_image_atomic_and, "IMAGE_ATOMIC_AND">;
-defm : ImageAtomicPatterns<int_amdgcn_image_atomic_or, "IMAGE_ATOMIC_OR">;
-defm : ImageAtomicPatterns<int_amdgcn_image_atomic_xor, "IMAGE_ATOMIC_XOR">;
-defm : ImageAtomicPatterns<int_amdgcn_image_atomic_inc, "IMAGE_ATOMIC_INC">;
-defm : ImageAtomicPatterns<int_amdgcn_image_atomic_dec, "IMAGE_ATOMIC_DEC">;
-
-/* SIsample for simple 1D texture lookup */
-def : Pat <
-  (SIsample i32:$addr, v8i32:$rsrc, v4i32:$sampler, imm),
-  (IMAGE_SAMPLE_V4_V1 $addr, $rsrc, $sampler, 0xf, 0, 0, 0, 0, 0, 0, 0)
->;
-
-class SamplePattern<SDNode name, MIMG opcode, ValueType vt> : Pat <
-    (name vt:$addr, v8i32:$rsrc, v4i32:$sampler, imm),
-    (opcode $addr, $rsrc, $sampler, 0xf, 0, 0, 0, 0, 0, 0, 0)
->;
-
-class SampleRectPattern<SDNode name, MIMG opcode, ValueType vt> : Pat <
-    (name vt:$addr, v8i32:$rsrc, v4i32:$sampler, TEX_RECT),
-    (opcode $addr, $rsrc, $sampler, 0xf, 1, 0, 0, 0, 0, 0, 0)
->;
-
-class SampleArrayPattern<SDNode name, MIMG opcode, ValueType vt> : Pat <
-    (name vt:$addr, v8i32:$rsrc, v4i32:$sampler, TEX_ARRAY),
-    (opcode $addr, $rsrc, $sampler, 0xf, 0, 0, 0, 0, 0, 0, 1)
->;
-
-class SampleShadowPattern<SDNode name, MIMG opcode,
-                          ValueType vt> : Pat <
-    (name vt:$addr, v8i32:$rsrc, v4i32:$sampler, TEX_SHADOW),
-    (opcode $addr, $rsrc, $sampler, 0xf, 0, 0, 0, 0, 0, 0, 0)
->;
-
-class SampleShadowArrayPattern<SDNode name, MIMG opcode,
-                               ValueType vt> : Pat <
-    (name vt:$addr, v8i32:$rsrc, v4i32:$sampler, TEX_SHADOW_ARRAY),
-    (opcode $addr, $rsrc, $sampler, 0xf, 0, 0, 0, 0, 0, 0, 1)
->;
-
-/* SIsample* for texture lookups consuming more address parameters */
-multiclass SamplePatterns<MIMG sample, MIMG sample_c, MIMG sample_l,
-                          MIMG sample_c_l, MIMG sample_b, MIMG sample_c_b,
-MIMG sample_d, MIMG sample_c_d, ValueType addr_type> {
-  def : SamplePattern <SIsample, sample, addr_type>;
-  def : SampleRectPattern <SIsample, sample, addr_type>;
-  def : SampleArrayPattern <SIsample, sample, addr_type>;
-  def : SampleShadowPattern <SIsample, sample_c, addr_type>;
-  def : SampleShadowArrayPattern <SIsample, sample_c, addr_type>;
-
-  def : SamplePattern <SIsamplel, sample_l, addr_type>;
-  def : SampleArrayPattern <SIsamplel, sample_l, addr_type>;
-  def : SampleShadowPattern <SIsamplel, sample_c_l, addr_type>;
-  def : SampleShadowArrayPattern <SIsamplel, sample_c_l, addr_type>;
-
-  def : SamplePattern <SIsampleb, sample_b, addr_type>;
-  def : SampleArrayPattern <SIsampleb, sample_b, addr_type>;
-  def : SampleShadowPattern <SIsampleb, sample_c_b, addr_type>;
-  def : SampleShadowArrayPattern <SIsampleb, sample_c_b, addr_type>;
-
-  def : SamplePattern <SIsampled, sample_d, addr_type>;
-  def : SampleArrayPattern <SIsampled, sample_d, addr_type>;
-  def : SampleShadowPattern <SIsampled, sample_c_d, addr_type>;
-  def : SampleShadowArrayPattern <SIsampled, sample_c_d, addr_type>;
-}
-
-defm : SamplePatterns<IMAGE_SAMPLE_V4_V2, IMAGE_SAMPLE_C_V4_V2,
-                      IMAGE_SAMPLE_L_V4_V2, IMAGE_SAMPLE_C_L_V4_V2,
-                      IMAGE_SAMPLE_B_V4_V2, IMAGE_SAMPLE_C_B_V4_V2,
-                      IMAGE_SAMPLE_D_V4_V2, IMAGE_SAMPLE_C_D_V4_V2,
-                      v2i32>;
-defm : SamplePatterns<IMAGE_SAMPLE_V4_V4, IMAGE_SAMPLE_C_V4_V4,
-                      IMAGE_SAMPLE_L_V4_V4, IMAGE_SAMPLE_C_L_V4_V4,
-                      IMAGE_SAMPLE_B_V4_V4, IMAGE_SAMPLE_C_B_V4_V4,
-                      IMAGE_SAMPLE_D_V4_V4, IMAGE_SAMPLE_C_D_V4_V4,
-                      v4i32>;
-defm : SamplePatterns<IMAGE_SAMPLE_V4_V8, IMAGE_SAMPLE_C_V4_V8,
-                      IMAGE_SAMPLE_L_V4_V8, IMAGE_SAMPLE_C_L_V4_V8,
-                      IMAGE_SAMPLE_B_V4_V8, IMAGE_SAMPLE_C_B_V4_V8,
-                      IMAGE_SAMPLE_D_V4_V8, IMAGE_SAMPLE_C_D_V4_V8,
-                      v8i32>;
-defm : SamplePatterns<IMAGE_SAMPLE_V4_V16, IMAGE_SAMPLE_C_V4_V16,
-                      IMAGE_SAMPLE_L_V4_V16, IMAGE_SAMPLE_C_L_V4_V16,
-                      IMAGE_SAMPLE_B_V4_V16, IMAGE_SAMPLE_C_B_V4_V16,
-                      IMAGE_SAMPLE_D_V4_V16, IMAGE_SAMPLE_C_D_V4_V16,
-                      v16i32>;
 
 /********** ============================================ **********/
 /********** Extraction, Insertion, Building and Casting  **********/
@@ -3491,13 +2368,6 @@ defm : BFMPatterns <i32, S_BFM_B32, S_MOV_B32>;
 // FIXME: defm : BFMPatterns <i64, S_BFM_B64, S_MOV_B64>;
 
 def : BFEPattern <V_BFE_U32, S_MOV_B32>;
-
-let Predicates = [isSICI] in {
-def : Pat <
-  (i64 (readcyclecounter)),
-  (S_MEMTIME)
->;
-}
 
 def : Pat<
   (fcanonicalize f32:$src),

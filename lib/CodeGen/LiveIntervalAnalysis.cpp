@@ -506,20 +506,19 @@ void LiveIntervals::shrinkToUses(LiveInterval::SubRange &SR, unsigned Reg) {
 
   // Visit all instructions reading Reg.
   SlotIndex LastIdx;
-  for (MachineOperand &MO : MRI->reg_operands(Reg)) {
-    MachineInstr *UseMI = MO.getParent();
-    if (UseMI->isDebugValue() || !MO.readsReg())
+  for (MachineOperand &MO : MRI->use_nodbg_operands(Reg)) {
+    // Skip "undef" uses.
+    if (!MO.readsReg())
       continue;
     // Maybe the operand is for a subregister we don't care about.
     unsigned SubReg = MO.getSubReg();
     if (SubReg != 0) {
       LaneBitmask LaneMask = TRI->getSubRegIndexLaneMask(SubReg);
-      if (MO.isDef())
-        LaneMask = ~LaneMask & MRI->getMaxLaneMaskForVReg(Reg);
       if ((LaneMask & SR.LaneMask) == 0)
         continue;
     }
     // We only need to visit each instruction once.
+    MachineInstr *UseMI = MO.getParent();
     SlotIndex Idx = getInstructionIndex(*UseMI).getRegSlot();
     if (Idx == LastIdx)
       continue;
@@ -568,11 +567,12 @@ void LiveIntervals::shrinkToUses(LiveInterval::SubRange &SR, unsigned Reg) {
 }
 
 void LiveIntervals::extendToIndices(LiveRange &LR,
-                                    ArrayRef<SlotIndex> Indices) {
+                                    ArrayRef<SlotIndex> Indices,
+                                    ArrayRef<SlotIndex> Undefs) {
   assert(LRCalc && "LRCalc not initialized.");
   LRCalc->reset(MF, getSlotIndexes(), DomTree, &getVNInfoAllocator());
   for (unsigned i = 0, e = Indices.size(); i != e; ++i)
-    LRCalc->extend(LR, Indices[i], /*PhysReg=*/0, /*Undefs=*/{});
+    LRCalc->extend(LR, Indices[i], /*PhysReg=*/0, Undefs);
 }
 
 void LiveIntervals::pruneValue(LiveRange &LR, SlotIndex Kill,

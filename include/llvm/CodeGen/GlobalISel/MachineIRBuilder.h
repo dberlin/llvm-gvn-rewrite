@@ -144,6 +144,28 @@ public:
   MachineInstrBuilder buildAdd(LLT Ty, unsigned Res, unsigned Op0,
                                 unsigned Op1);
 
+  /// Build and insert \p Res<def> = G_SUB \p Ty \p Op0, \p Op1
+  ///
+  /// G_SUB sets \p Res to the sum of integer parameters \p Op0 and \p Op1,
+  /// truncated to their width.
+  ///
+  /// \pre setBasicBlock or setMI must have been called.
+  ///
+  /// \return a MachineInstrBuilder for the newly created instruction.
+  MachineInstrBuilder buildSub(LLT Ty, unsigned Res, unsigned Op0,
+                               unsigned Op1);
+
+  /// Build and insert \p Res<def> = G_MUL \p Ty \p Op0, \p Op1
+  ///
+  /// G_MUL sets \p Res to the sum of integer parameters \p Op0 and \p Op1,
+  /// truncated to their width.
+  ///
+  /// \pre setBasicBlock or setMI must have been called.
+  ///
+  /// \return a MachineInstrBuilder for the newly created instruction.
+  MachineInstrBuilder buildMul(LLT Ty, unsigned Res, unsigned Op0,
+                               unsigned Op1);
+
   /// Build and insert \p Res<def>, \p CarryOut = G_UADDE \p Tys \p Op0, \p Op1,
   /// \p CarryIn
   ///
@@ -157,6 +179,18 @@ public:
   MachineInstrBuilder buildUAdde(ArrayRef<LLT> Tys, unsigned Res,
                                  unsigned CarryOut, unsigned Op0, unsigned Op1,
                                  unsigned CarryIn);
+
+  /// Build and insert \p Res<def> = G_TYPE \p Ty \p Op.
+  ///
+  /// G_TYPE gives a specified input register a type.
+  ///
+  /// \pre setBasicBlock or setMI must have been called.
+  /// \pre \p Op must be a physical register or a virtual register with a
+  ///      register-class already attached (i.e. it cannot be a generic virtual
+  ///      register).
+  ///
+  /// \return The newly created instruction.
+  MachineInstrBuilder buildType(LLT Ty, unsigned Res, unsigned Op);
 
   /// Build and insert \p Res<def> = G_ANYEXT \p { DstTy, SrcTy } \p Op0
   ///
@@ -271,6 +305,7 @@ public:
   /// Idxs[0] + N)` of \p Src and similarly for subsequent bit-indexes.
   ///
   /// \pre setBasicBlock or setMI must have been called.
+  /// \pre \p Indices must be in ascending order of bit position.
   ///
   /// \return a MachineInstrBuilder for the newly created instruction.
   MachineInstrBuilder buildExtract(ArrayRef<LLT> ResTys,
@@ -289,7 +324,7 @@ public:
   ///      destination register.
   /// \pre The bits defined by each Op (derived from index and scalar size) must
   ///      not overlap.
-  /// \pre Each source operand must have a
+  /// \pre \p Indices must be in ascending order of bit position.
   ///
   /// \return a MachineInstrBuilder for the newly created instruction.
   MachineInstrBuilder buildSequence(LLT ResTy, unsigned Res,

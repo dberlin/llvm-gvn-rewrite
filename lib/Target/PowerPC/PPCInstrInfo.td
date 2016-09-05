@@ -1509,6 +1509,18 @@ let usesCustomInserter = 1 in {
     def ATOMIC_LOAD_NAND_I8 : Pseudo<
       (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_NAND_I8",
       [(set i32:$dst, (atomic_load_nand_8 xoaddr:$ptr, i32:$incr))]>;
+    def ATOMIC_LOAD_MIN_I8 : Pseudo<
+      (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_MIN_I8",
+      [(set i32:$dst, (atomic_load_min_8 xoaddr:$ptr, i32:$incr))]>;
+    def ATOMIC_LOAD_MAX_I8 : Pseudo<
+      (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_MAX_I8",
+      [(set i32:$dst, (atomic_load_max_8 xoaddr:$ptr, i32:$incr))]>;
+    def ATOMIC_LOAD_UMIN_I8 : Pseudo<
+      (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_UMIN_I8",
+      [(set i32:$dst, (atomic_load_umin_8 xoaddr:$ptr, i32:$incr))]>;
+    def ATOMIC_LOAD_UMAX_I8 : Pseudo<
+      (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_UMAX_I8",
+      [(set i32:$dst, (atomic_load_umax_8 xoaddr:$ptr, i32:$incr))]>;
     def ATOMIC_LOAD_ADD_I16 : Pseudo<
       (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_ADD_I16",
       [(set i32:$dst, (atomic_load_add_16 xoaddr:$ptr, i32:$incr))]>;
@@ -1527,6 +1539,18 @@ let usesCustomInserter = 1 in {
     def ATOMIC_LOAD_NAND_I16 : Pseudo<
       (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_NAND_I16",
       [(set i32:$dst, (atomic_load_nand_16 xoaddr:$ptr, i32:$incr))]>;
+    def ATOMIC_LOAD_MIN_I16 : Pseudo<
+      (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_MIN_I16",
+      [(set i32:$dst, (atomic_load_min_16 xoaddr:$ptr, i32:$incr))]>;
+    def ATOMIC_LOAD_MAX_I16 : Pseudo<
+      (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_MAX_I16",
+      [(set i32:$dst, (atomic_load_max_16 xoaddr:$ptr, i32:$incr))]>;
+    def ATOMIC_LOAD_UMIN_I16 : Pseudo<
+      (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_UMIN_I16",
+      [(set i32:$dst, (atomic_load_umin_16 xoaddr:$ptr, i32:$incr))]>;
+    def ATOMIC_LOAD_UMAX_I16 : Pseudo<
+      (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_UMAX_I16",
+      [(set i32:$dst, (atomic_load_umax_16 xoaddr:$ptr, i32:$incr))]>;
     def ATOMIC_LOAD_ADD_I32 : Pseudo<
       (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_ADD_I32",
       [(set i32:$dst, (atomic_load_add_32 xoaddr:$ptr, i32:$incr))]>;
@@ -1545,6 +1569,18 @@ let usesCustomInserter = 1 in {
     def ATOMIC_LOAD_NAND_I32 : Pseudo<
       (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_NAND_I32",
       [(set i32:$dst, (atomic_load_nand_32 xoaddr:$ptr, i32:$incr))]>;
+    def ATOMIC_LOAD_MIN_I32 : Pseudo<
+      (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_MIN_I32",
+      [(set i32:$dst, (atomic_load_min_32 xoaddr:$ptr, i32:$incr))]>;
+    def ATOMIC_LOAD_MAX_I32 : Pseudo<
+      (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_MAX_I32",
+      [(set i32:$dst, (atomic_load_max_32 xoaddr:$ptr, i32:$incr))]>;
+    def ATOMIC_LOAD_UMIN_I32 : Pseudo<
+      (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_UMIN_I32",
+      [(set i32:$dst, (atomic_load_umin_32 xoaddr:$ptr, i32:$incr))]>;
+    def ATOMIC_LOAD_UMAX_I32 : Pseudo<
+      (outs gprc:$dst), (ins memrr:$ptr, gprc:$incr), "#ATOMIC_LOAD_UMAX_I32",
+      [(set i32:$dst, (atomic_load_umax_32 xoaddr:$ptr, i32:$incr))]>;
 
     def ATOMIC_CMP_SWAP_I8 : Pseudo<
       (outs gprc:$dst), (ins memrr:$ptr, gprc:$old, gprc:$new), "#ATOMIC_CMP_SWAP_I8",
@@ -3148,6 +3184,46 @@ defm : ExtSetCCPat<SETLE,
                               (RLWINM $in, 1, 31, 31)>,
                    OutPatFrag<(ops node:$in),
                               (RLDICL $in, 1, 63)> >;
+
+// An extended SETCC with shift amount.
+multiclass ExtSetCCShiftPat<CondCode cc, PatFrag pfrag,
+                            OutPatFrag rfrag, OutPatFrag rfrag8> {
+  def : Pat<(i32 (zext (i1 (pfrag i32:$s1, i32:$sa, cc)))),
+            (rfrag $s1, $sa)>;
+  def : Pat<(i64 (zext (i1 (pfrag i64:$s1, i32:$sa, cc)))),
+            (rfrag8 $s1, $sa)>;
+  def : Pat<(i64 (zext (i1 (pfrag i32:$s1, i32:$sa, cc)))),
+            (INSERT_SUBREG (i64 (IMPLICIT_DEF)), (rfrag $s1, $sa), sub_32)>;
+  def : Pat<(i32 (zext (i1 (pfrag i64:$s1, i32:$sa, cc)))),
+            (EXTRACT_SUBREG (rfrag8 $s1, $sa), sub_32)>;
+
+  def : Pat<(i32 (anyext (i1 (pfrag i32:$s1, i32:$sa, cc)))),
+            (rfrag $s1, $sa)>;
+  def : Pat<(i64 (anyext (i1 (pfrag i64:$s1, i32:$sa, cc)))),
+            (rfrag8 $s1, $sa)>;
+  def : Pat<(i64 (anyext (i1 (pfrag i32:$s1, i32:$sa, cc)))),
+            (INSERT_SUBREG (i64 (IMPLICIT_DEF)), (rfrag $s1, $sa), sub_32)>;
+  def : Pat<(i32 (anyext (i1 (pfrag i64:$s1, i32:$sa, cc)))),
+            (EXTRACT_SUBREG (rfrag8 $s1, $sa), sub_32)>;
+}
+
+defm : ExtSetCCShiftPat<SETNE,
+                        PatFrag<(ops node:$in, node:$sa, node:$cc),
+                                (setcc (and $in, (shl 1, $sa)), 0, $cc)>,
+                        OutPatFrag<(ops node:$in, node:$sa),
+                                   (RLWNM $in, (SUBFIC $sa, 32), 31, 31)>,
+                        OutPatFrag<(ops node:$in, node:$sa),
+                                   (RLDCL $in, (SUBFIC $sa, 64), 63)> >;
+
+defm : ExtSetCCShiftPat<SETEQ,
+                        PatFrag<(ops node:$in, node:$sa, node:$cc),
+                                (setcc (and $in, (shl 1, $sa)), 0, $cc)>,
+                        OutPatFrag<(ops node:$in, node:$sa),
+                                   (RLWNM (i32not $in),
+                                          (SUBFIC $sa, 32), 31, 31)>,
+                        OutPatFrag<(ops node:$in, node:$sa),
+                                   (RLDCL (i64not $in),
+                                          (SUBFIC $sa, 64), 63)> >;
 
 // SETCC for i32.
 def : Pat<(i1 (setcc i32:$s1, immZExt16:$imm, SETULT)),

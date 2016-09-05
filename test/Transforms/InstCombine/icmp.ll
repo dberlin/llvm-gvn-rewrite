@@ -282,11 +282,9 @@ define i1 @test23(i32 %x) {
   ret i1 %i4
 }
 
-; FIXME: Vectors should fold too.
 define <2 x i1> @test23vec(<2 x i32> %x) {
 ; CHECK-LABEL: @test23vec(
-; CHECK-NEXT:    [[I3:%.*]] = sdiv <2 x i32> %x, <i32 -1328634635, i32 -1328634635>
-; CHECK-NEXT:    [[I4:%.*]] = icmp eq <2 x i32> [[I3]], <i32 -1, i32 -1>
+; CHECK-NEXT:    [[I4:%.*]] = icmp sgt <2 x i32> %x, <i32 1328634634, i32 1328634634>
 ; CHECK-NEXT:    ret <2 x i1> [[I4]]
 ;
   %i3 = sdiv <2 x i32> %x, <i32 -1328634635, i32 -1328634635>
@@ -1815,11 +1813,9 @@ define i1 @icmp_and_X_-16_eq-16(i32 %X) {
   ret i1 %cmp
 }
 
-; FIXME: Vectors should fold the same way.
 define <2 x i1> @icmp_and_X_-16_eq-16_vec(<2 x i32> %X) {
 ; CHECK-LABEL: @icmp_and_X_-16_eq-16_vec(
-; CHECK-NEXT:    [[AND:%.*]] = and <2 x i32> %X, <i32 -16, i32 -16>
-; CHECK-NEXT:    [[CMP:%.*]] = icmp eq <2 x i32> [[AND]], <i32 -16, i32 -16>
+; CHECK-NEXT:    [[CMP:%.*]] = icmp ugt <2 x i32> %X, <i32 -17, i32 -17>
 ; CHECK-NEXT:    ret <2 x i1> [[CMP]]
 ;
   %and = and <2 x i32> %X, <i32 -16, i32 -16>
@@ -1837,11 +1833,9 @@ define i1 @icmp_and_X_-16_ne-16(i32 %X) {
   ret i1 %cmp
 }
 
-; FIXME: Vectors should fold the same way.
 define <2 x i1> @icmp_and_X_-16_ne-16_vec(<2 x i32> %X) {
 ; CHECK-LABEL: @icmp_and_X_-16_ne-16_vec(
-; CHECK-NEXT:    [[AND:%.*]] = and <2 x i32> %X, <i32 -16, i32 -16>
-; CHECK-NEXT:    [[CMP:%.*]] = icmp ne <2 x i32> [[AND]], <i32 -16, i32 -16>
+; CHECK-NEXT:    [[CMP:%.*]] = icmp ult <2 x i32> %X, <i32 -16, i32 -16>
 ; CHECK-NEXT:    ret <2 x i1> [[CMP]]
 ;
   %and = and <2 x i32> %X, <i32 -16, i32 -16>
