@@ -1537,15 +1537,13 @@ void NewGVN::deleteInstructionsInBlock(BasicBlock *BB) {
   // Note that we explicitly recalculate BB->rend() on each iteration,
   // as it may change when we remove the first instruction.
   for (BasicBlock::reverse_iterator I(StartPoint); I != BB->rend();) {
-    Instruction &Inst = *I;
+    Instruction &Inst = *I++;
     if (!Inst.use_empty())
       Inst.replaceAllUsesWith(UndefValue::get(Inst.getType()));
-    if (isa<LandingPadInst>(Inst)) {
-      ++I;
+    if (isa<LandingPadInst>(Inst))
       continue;
-    }
 
-    I = BasicBlock::reverse_iterator(Inst.eraseFromParent());
+    Inst.eraseFromParent();
     ++NumGVNInstrDeleted;
   }
 }
