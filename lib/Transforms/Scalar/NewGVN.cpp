@@ -1002,7 +1002,6 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
           DEBUG(dbgs() << "Erasing expression " << *E << " from table\n");
           ExpressionToClass.erase(VClass->DefiningExpr);
         }
-        // delete VClass;
       } else if (VClass->RepLeader == V) {
         /// XXX: Check this. When the leader changes, the value numbering of
         /// everything may change, so we need to reprocess.
