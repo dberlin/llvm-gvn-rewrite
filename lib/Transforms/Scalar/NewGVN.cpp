@@ -155,17 +155,6 @@ class NewGVN : public FunctionPass {
     }
   };
 
-  struct expression_equal_to {
-    bool operator()(const Expression *A, const Expression *B) const {
-      if (A == B)
-        return true;
-      return *A == *B;
-    }
-  };
-  struct hash_expression {
-    size_t operator()(const Expression *A) const { return A->getHashValue(); }
-  };
-
   // Expression to class mapping
   typedef DenseMap<const Expression *, CongruenceClass *,
                    ComparingExpressionInfo>
