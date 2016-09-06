@@ -20,6 +20,8 @@ def to_string(bytes):
 def convert_string(bytes):
     try:
         return to_string(bytes.decode('utf-8'))
+    except AttributeError: # 'str' object has no attribute 'decode'.
+        return str(bytes)
     except UnicodeError:
         return str(bytes)
 
@@ -69,10 +71,14 @@ def capture(args, env=None):
     exits with a non-zero status."""
     p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          env=env)
-    out,_ = p.communicate()
+    out, err = p.communicate()
+    out = convert_string(out)
+    err = convert_string(err)
     if p.returncode != 0:
-        raise subprocess.CalledProcessError(cmd=args, returncode=p.returncode)
-    return convert_string(out)
+        raise subprocess.CalledProcessError(cmd=args,
+                                            returncode=p.returncode,
+                                            output="{}\n{}".format(out, err))
+    return out
 
 def which(command, paths = None):
     """which(command, [paths]) - Look up the given command in the paths string

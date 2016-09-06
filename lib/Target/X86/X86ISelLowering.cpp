@@ -14896,29 +14896,15 @@ static SDValue EmitKTEST(SDValue Op, SelectionDAG &DAG,
   return SDValue();
 }
 
-static SDValue EmitTEST_i1(SDValue Op, SelectionDAG &DAG, const SDLoc &dl) {
-
-  // Most probably the value is in GPR, use ZEXT + CMP.
-  if(Op.getOpcode() == ISD::TRUNCATE ||
-     Op.getOpcode() == ISD::LOAD ||
-     Op.getOpcode() == ISD::CopyFromReg) {
-    SDValue ExtOp = DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i8, Op);
-    return DAG.getNode(X86ISD::CMP, dl, MVT::i32, ExtOp,
-                       DAG.getConstant(0, dl, MVT::i8));
-  }
-
-  // Create cmp i1 that should be mapped to KORTEST.
-  return DAG.getNode(X86ISD::CMP, dl, MVT::i1, Op,
-                     DAG.getConstant(0, dl, MVT::i8));
-}
-
 /// Emit nodes that will be selected as "test Op0,Op0", or something
 /// equivalent.
 SDValue X86TargetLowering::EmitTest(SDValue Op, unsigned X86CC, const SDLoc &dl,
                                     SelectionDAG &DAG) const {
-  if (Op.getValueType() == MVT::i1)
-    return EmitTEST_i1(Op, DAG, dl);
-
+  if (Op.getValueType() == MVT::i1) {
+    SDValue ExtOp = DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i8, Op);
+    return DAG.getNode(X86ISD::CMP, dl, MVT::i32, ExtOp,
+                       DAG.getConstant(0, dl, MVT::i8));
+  }
   // CF and OF aren't always set the way we want. Determine which
   // of these we need.
   bool NeedCF = false;
@@ -20229,7 +20215,8 @@ static SDValue LowerScalarImmediateShift(SDValue Op, SelectionDAG &DAG,
 
   // Special case in 32-bit mode, where i64 is expanded into high and low parts.
   if (!Subtarget.is64Bit() && !Subtarget.hasXOP() &&
-      (VT == MVT::v2i64 || (Subtarget.hasInt256() && VT == MVT::v4i64))) {
+      (VT == MVT::v2i64 || (Subtarget.hasInt256() && VT == MVT::v4i64) ||
+       (Subtarget.hasAVX512() && VT == MVT::v8i64))) {
 
     // Peek through any splat that was introduced for i64 shift vectorization.
     int SplatIndex = -1;
@@ -26480,8 +26467,8 @@ static SDValue combineShuffle(SDNode *N, SelectionDAG &DAG,
   if (SDValue LD = EltsFromConsecutiveLoads(VT, Elts, dl, DAG, true))
     return LD;
 
-  // For AVX2, we sometimes want to combine 
-  // (vector_shuffle <mask> (concat_vectors t1, undef) 
+  // For AVX2, we sometimes want to combine
+  // (vector_shuffle <mask> (concat_vectors t1, undef)
   //                        (concat_vectors t2, undef))
   // Into:
   // (vector_shuffle <mask> (concat_vectors t1, t2), undef)
