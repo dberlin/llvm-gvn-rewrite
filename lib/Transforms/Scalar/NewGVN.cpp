@@ -389,13 +389,9 @@ const Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
     if (Arg1 > Arg2)
       std::swap(Arg1, Arg2);
   }
-  bool UsedEquiv = false;
   auto BinaryLeader = lookupOperandLeader(Arg1, nullptr, B);
-  UsedEquiv |= BinaryLeader.second;
   E->ops_push_back(BinaryLeader.first);
-
   BinaryLeader = lookupOperandLeader(Arg2, nullptr, B);
-  UsedEquiv |= BinaryLeader.second;
   E->ops_push_back(BinaryLeader.first);
 
   Value *V = SimplifyBinOp(Opcode, E->getOperand(0), E->getOperand(1), *DL, TLI,
