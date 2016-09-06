@@ -1159,13 +1159,14 @@ void NewGVN::initializeCongruenceClasses(Function &F) {
 }
 
 void NewGVN::cleanupTables() {
-
-  ValueToClass.clear();
+#ifndef NDEBUG
   for (unsigned i = 0, e = CongruenceClasses.size(); i != e; ++i) {
     DEBUG(dbgs() << "Congruence class " << CongruenceClasses[i]->ID << " has "
                  << CongruenceClasses[i]->Members.size() << " members\n");
   }
+#endif
 
+  ValueToClass.clear();
   ArgRecycler.clear(ExpressionAllocator);
   ExpressionAllocator.Reset();
   CongruenceClasses.clear();
