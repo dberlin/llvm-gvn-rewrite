@@ -344,7 +344,6 @@ PHIExpression *NewGVN::createPHIExpression(Instruction *I) {
       E->ops_push_back(I->getOperand(i));
     }
   }
-  E->setUsedEquivalence(UsedEquiv);
   return E;
 }
 
@@ -369,7 +368,6 @@ bool NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
       AllConstant = false;
     E->ops_push_back(Operand.first);
   }
-  E->setUsedEquivalence(UsedEquiv);
   return AllConstant;
 }
 
@@ -577,7 +575,6 @@ const VariableExpression *
 NewGVN::createVariableExpression(Value *V, bool UsedEquivalence) {
   VariableExpression *E = new (ExpressionAllocator) VariableExpression(V);
   E->setOpcode(V->getValueID());
-  E->setUsedEquivalence(UsedEquivalence);
   return E;
 }
 
@@ -593,7 +590,6 @@ const ConstantExpression *
 NewGVN::createConstantExpression(Constant *C, bool UsedEquivalence) {
   ConstantExpression *E = new (ExpressionAllocator) ConstantExpression(C);
   E->setOpcode(C->getValueID());
-  E->setUsedEquivalence(UsedEquivalence);
   return E;
 }
 
@@ -631,7 +627,6 @@ LoadExpression *NewGVN::createLoadExpression(Type *LoadType, Value *PointerOp,
   E->ops_push_back(Operand.first);
   if (LI)
     E->setAlignment(LI->getAlignment());
-  E->setUsedEquivalence(Operand.second);
 
   // TODO: Value number heap versions. We may be able to discover
   // things alias analysis can't on it's own (IE that a store and a
@@ -650,7 +645,6 @@ const StoreExpression *NewGVN::createStoreExpression(StoreInst *SI,
   E->setOpcode(0);
   auto Operand = lookupOperandLeader(SI->getPointerOperand(), SI, B);
   E->ops_push_back(Operand.first);
-  E->setUsedEquivalence(Operand.second);
   // TODO: Value number heap versions. We may be able to discover
   // things alias analysis can't on it's own (IE that a store and a
   // load have the same value, and thus, it isn't clobbering the load)
