@@ -327,7 +327,6 @@ PHIExpression *NewGVN::createPHIExpression(Instruction *I) {
   E->allocateOperands(ArgRecycler, ExpressionAllocator);
   E->setType(I->getType());
   E->setOpcode(I->getOpcode());
-  bool UsedEquiv = false;
   for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i) {
     BasicBlock *B = PN->getIncomingBlock(i);
     if (!ReachableBlocks.count(B)) {
@@ -339,7 +338,6 @@ PHIExpression *NewGVN::createPHIExpression(Instruction *I) {
       const BasicBlockEdge BBE(B, PhiBlock);
       auto Operand = lookupOperandLeader(I->getOperand(i), I, BBE);
       E->ops_push_back(Operand.first);
-      UsedEquiv |= Operand.second;
     } else {
       E->ops_push_back(I->getOperand(i));
     }
@@ -353,7 +351,6 @@ PHIExpression *NewGVN::createPHIExpression(Instruction *I) {
 bool NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
                                     const BasicBlock *B) {
   bool AllConstant = true;
-  bool UsedEquiv = false;
   if (auto GEP = dyn_cast<GetElementPtrInst>(I))
     E->setType(GEP->getSourceElementType());
   else
@@ -363,7 +360,6 @@ bool NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
 
   for (auto &O : I->operands()) {
     auto Operand = lookupOperandLeader(O, I, B);
-    UsedEquiv |= Operand.second;
     if (!isa<Constant>(Operand.first))
       AllConstant = false;
     E->ops_push_back(Operand.first);
