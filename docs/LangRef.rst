@@ -1029,10 +1029,9 @@ Currently, only the following parameter attributes are defined:
     This indicates that the pointer parameter specifies the address of a
     structure that is the return value of the function in the source
     program. This pointer must be guaranteed by the caller to be valid:
-    loads and stores to the structure may be assumed by the callee
-    not to trap and to be properly aligned. This may only be applied to
-    the first parameter. This is not a valid attribute for return
-    values.
+    loads and stores to the structure may be assumed by the callee not
+    to trap and to be properly aligned. This is not a valid attribute
+    for return values.
 
 ``align <n>``
     This indicates that the pointer value may be assumed by the optimizer to
@@ -1127,10 +1126,11 @@ Currently, only the following parameter attributes are defined:
     This attribute is motivated to model and optimize Swift error handling. It
     can be applied to a parameter with pointer to pointer type or a
     pointer-sized alloca. At the call site, the actual argument that corresponds
-    to a ``swifterror`` parameter has to come from a ``swifterror`` alloca. A
-    ``swifterror`` value (either the parameter or the alloca) can only be loaded
-    and stored from, or used as a ``swifterror`` argument. This is not a valid
-    attribute for return values and can only be applied to one parameter.
+    to a ``swifterror`` parameter has to come from a ``swifterror`` alloca or
+    the ``swifterror`` parameter of the caller. A ``swifterror`` value (either
+    the parameter or the alloca) can only be loaded and stored from, or used as
+    a ``swifterror`` argument. This is not a valid attribute for return values
+    and can only be applied to one parameter.
 
     These constraints allow the calling convention to optimize access to
     ``swifterror`` variables by associating them with a specific register at

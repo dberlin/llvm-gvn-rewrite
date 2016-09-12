@@ -56,7 +56,7 @@ int main() {         // ALL:         [[@LINE]]| 1|int main() {
 // HTML-ALL: <td class='line-number'><a name='L[[@LINE-44]]'><pre>[[@LINE-44]]</pre></a></td><td class='uncovered-line'><pre>0</pre></td><td class='code'><pre>
 // HTML-ALL: <td class='line-number'><a name='L[[@LINE-44]]'><pre>[[@LINE-44]]</pre></a></td><td class='covered-line'><pre>2</pre></td><td class='code'><pre>}
 
-// HTML-SHARED: <div class='source-name-title'><pre>Function: _Z4funcIbEiT_</pre></div>
+// HTML-SHARED: <div class='source-name-title'><pre>_Z4funcIbEiT_</pre></div>
 // HTML-SHARED: <td class='line-number'><a name='L[[@LINE-53]]'><pre>[[@LINE-53]]</pre></a></td><td class='covered-line'><pre>1</pre></td><td class='code'><pre>int func(T x) {
 // HTML-SHARED: <td class='line-number'><a name='L[[@LINE-53]]'><pre>[[@LINE-53]]</pre></a></td><td class='covered-line'><pre>1</pre></td><td class='code'><pre>  if(x)
 // HTML-SHARED: <td class='line-number'><a name='L[[@LINE-53]]'><pre>[[@LINE-53]]</pre></a></td><td class='covered-line'><pre>1</pre></td><td class='code'><pre>    ret
@@ -65,7 +65,7 @@ int main() {         // ALL:         [[@LINE]]| 1|int main() {
 // HTML-SHARED: <td class='line-number'><a name='L[[@LINE-53]]'><pre>[[@LINE-53]]</pre></a></td><td class='uncovered-line'><pre>0</pre></td><td class='code'><pre>
 // HTML-SHARED: <td class='line-number'><a name='L[[@LINE-53]]'><pre>[[@LINE-53]]</pre></a></td><td class='covered-line'><pre>1</pre></td><td class='code'><pre>}
 
-// HTML-ALL: <div class='source-name-title'><pre>Function: _Z4funcIiEiT_</pre></div>
+// HTML-ALL: <div class='source-name-title'><pre>_Z4funcIiEiT_</pre></div>
 // HTML-FILTER-NOT: <div class='source-name-title'><pre>_Z4funcIiEiT_</pre></div><table>
 // HTML-ALL: <td class='line-number'><a name='L[[@LINE-63]]'><pre>[[@LINE-63]]</pre></a></td><td class='covered-line'><pre>1</pre></td><td class='code'><pre>int func(T x) {
 // HTML-ALL: <td class='line-number'><a name='L[[@LINE-63]]'><pre>[[@LINE-63]]</pre></a></td><td class='covered-line'><pre>1</pre></td><td class='code'><pre>  if(x)

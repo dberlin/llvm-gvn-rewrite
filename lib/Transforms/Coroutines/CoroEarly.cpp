@@ -26,10 +26,11 @@ namespace {
 // Created on demand if CoroEarly pass has work to do.
 class Lowerer : public coro::LowererBase {
   IRBuilder<> Builder;
-  PointerType *AnyResumeFnPtrTy;
+  PointerType *const AnyResumeFnPtrTy;
 
   void lowerResumeOrDestroy(CallSite CS, CoroSubFnInst::ResumeKind);
   void lowerCoroPromise(CoroPromiseInst *Intrin);
+  void lowerCoroDone(IntrinsicInst *II);
 
 public:
   Lowerer(Module &M)
@@ -81,6 +82,27 @@ void Lowerer::lowerCoroPromise(CoroPromiseInst *Intrin) {
   Intrin->eraseFromParent();
 }
 
+// When a coroutine reaches final suspend point, it zeros out ResumeFnAddr in
+// the coroutine frame (it is UB to resume from a final suspend point).
+// The llvm.coro.done intrinsic is used to check whether a coroutine is
+// suspended at the final suspend point or not.
+void Lowerer::lowerCoroDone(IntrinsicInst *II) {
+  Value *Operand = II->getArgOperand(0);
+
+  // ResumeFnAddr is the first pointer sized element of the coroutine frame.
+  auto *FrameTy = Int8Ptr;
+  PointerType *FramePtrTy = FrameTy->getPointerTo();
+
+  Builder.SetInsertPoint(II);
+  auto *BCI = Builder.CreateBitCast(Operand, FramePtrTy);
+  auto *Gep = Builder.CreateConstInBoundsGEP1_32(FrameTy, BCI, 0);
+  auto *Load = Builder.CreateLoad(Gep);
+  auto *Cond = Builder.CreateICmpEQ(Load, NullPtr);
+
+  II->replaceAllUsesWith(Cond);
+  II->eraseFromParent();
+}
+
 // Prior to CoroSplit, calls to coro.begin needs to be marked as NoDuplicate,
 // as CoroSplit assumes there is exactly one coro.begin. After CoroSplit,
 // NoDuplicate attribute will be removed from coro.begin otherwise, it will
@@ -93,12 +115,17 @@ static void setCannotDuplicate(CoroIdInst *CoroId) {
 
 bool Lowerer::lowerEarlyIntrinsics(Function &F) {
   bool Changed = false;
+  CoroIdInst *CoroId = nullptr;
+  SmallVector<CoroFreeInst *, 4> CoroFrees;
   for (auto IB = inst_begin(F), IE = inst_end(F); IB != IE;) {
     Instruction &I = *IB++;
     if (auto CS = CallSite(&I)) {
       switch (CS.getIntrinsicID()) {
       default:
         continue;
+      case Intrinsic::coro_free:
+        CoroFrees.push_back(cast<CoroFreeInst>(&I));
+        break;
       case Intrinsic::coro_suspend:
         // Make sure that final suspend point is not duplicated as CoroSplit
         // pass expects that there is at most one final suspend point.
@@ -119,6 +146,7 @@ bool Lowerer::lowerEarlyIntrinsics(Function &F) {
             F.addFnAttr(CORO_PRESPLIT_ATTR, UNPREPARED_FOR_SPLIT);
             setCannotDuplicate(CII);
             CII->setCoroutineSelf();
+            CoroId = cast<CoroIdInst>(&I);
           }
         }
         break;
@@ -131,10 +159,19 @@ bool Lowerer::lowerEarlyIntrinsics(Function &F) {
       case Intrinsic::coro_promise:
         lowerCoroPromise(cast<CoroPromiseInst>(&I));
         break;
+      case Intrinsic::coro_done:
+        lowerCoroDone(cast<IntrinsicInst>(&I));
+        break;
       }
       Changed = true;
     }
   }
+  // Make sure that all CoroFree reference the coro.id intrinsic.
+  // Token type is not exposed through coroutine C/C++ builtins to plain C, so
+  // we allow specifying none and fixing it up here.
+  if (CoroId)
+    for (CoroFreeInst *CF : CoroFrees)
+      CF->setArgOperand(0, CoroId);
   return Changed;
 }
 
@@ -153,9 +190,10 @@ struct CoroEarly : public FunctionPass {
   // This pass has work to do only if we find intrinsics we are going to lower
   // in the module.
   bool doInitialization(Module &M) override {
-    if (coro::declaresIntrinsics(M, {"llvm.coro.begin", "llvm.coro.resume",
-                                     "llvm.coro.destroy", "llvm.coro.suspend",
-                                     "llvm.coro.end"}))
+    if (coro::declaresIntrinsics(M, {"llvm.coro.id", "llvm.coro.destroy",
+                                     "llvm.coro.done", "llvm.coro.end",
+                                     "llvm.coro.free", "llvm.coro.promise",
+                                     "llvm.coro.resume", "llvm.coro.suspend"}))
       L = llvm::make_unique<Lowerer>(M);
     return false;
   }

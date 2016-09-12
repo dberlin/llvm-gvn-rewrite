@@ -61,6 +61,8 @@ void Fuzzer::ResetCounters() {
   if (Options.UseCounters) {
     EF->__sanitizer_update_counter_bitset_and_clear_counters(0);
   }
+  if (EF->__sanitizer_get_coverage_pc_buffer_pos)
+    PcBufferPos = EF->__sanitizer_get_coverage_pc_buffer_pos();
 }
 
 void Fuzzer::PrepareCounters(Fuzzer::Coverage *C) {
@@ -115,9 +117,9 @@ bool Fuzzer::RecordMaxCoverage(Fuzzer::Coverage *C) {
 
   if (EF->__sanitizer_get_coverage_pc_buffer_pos) {
     uint64_t NewPcBufferPos = EF->__sanitizer_get_coverage_pc_buffer_pos();
-    if (NewPcBufferPos > C->PcBufferPos) {
+    if (NewPcBufferPos > PcBufferPos) {
       Res = true;
-      C->PcBufferPos = NewPcBufferPos;
+      PcBufferPos = NewPcBufferPos;
     }
 
     if (PcBufferLen && NewPcBufferPos >= PcBufferLen) {
@@ -186,7 +188,23 @@ void Fuzzer::StaticDeathCallback() {
   F->DeathCallback();
 }
 
+static void WarnOnUnsuccessfullMerge(bool DoWarn) {
+  if (!DoWarn) return;
+  Printf(
+   "***\n"
+   "***\n"
+   "***\n"
+   "*** NOTE: merge did not succeed due to a failure on one of the inputs.\n"
+   "*** You will need to filter out crashes from the corpus, e.g. like this:\n"
+   "***   for f in WITH_CRASHES/*; do ./fuzzer $f && cp $f NO_CRASHES; done\n"
+   "*** Future versions may have crash-resistant merge, stay tuned.\n"
+   "***\n"
+   "***\n"
+   "***\n");
+}
+
 void Fuzzer::DumpCurrentUnit(const char *Prefix) {
+  WarnOnUnsuccessfullMerge(InMergeMode);
   if (!CurrentUnitData) return;  // Happens when running individual inputs.
   MD.PrintMutationSequence();
   Printf("; base unit: %s\n", Sha1ToString(BaseSha1).c_str());
@@ -423,7 +441,7 @@ void Fuzzer::ShuffleAndMinimize() {
 }
 
 bool Fuzzer::UpdateMaxCoverage() {
-  PrevPcBufferPos = MaxCoverage.PcBufferPos;
+  PrevPcBufferPos = PcBufferPos;
   bool Res = RecordMaxCoverage(&MaxCoverage);
 
   return Res;
@@ -432,8 +450,6 @@ bool Fuzzer::UpdateMaxCoverage() {
 bool Fuzzer::RunOne(const uint8_t *Data, size_t Size) {
   TotalNumberOfRuns++;
 
-  // TODO(aizatsky): this Reset call seems to be not needed.
-  ResetCounters();
   ExecuteCallback(Data, Size);
   bool Res = UpdateMaxCoverage();
 
@@ -478,6 +494,7 @@ void Fuzzer::ExecuteCallback(const uint8_t *Data, size_t Size) {
   AssignTaintLabels(DataCopy, Size);
   CurrentUnitSize = Size;
   AllocTracer.Start();
+  ResetCounters();  // Reset coverage right before the callback.
   int Res = CB(DataCopy, Size);
   (void)Res;
   HasMoreMallocsThanFrees = AllocTracer.Stop();
@@ -543,12 +560,15 @@ void Fuzzer::PrintStatusForNewUnit(const Unit &U) {
 }
 
 void Fuzzer::PrintNewPCs() {
-  if (Options.PrintNewCovPcs && PrevPcBufferPos != MaxCoverage.PcBufferPos) {
-    for (size_t I = PrevPcBufferPos; I < MaxCoverage.PcBufferPos; ++I) {
+  if (Options.PrintNewCovPcs && PrevPcBufferPos != PcBufferPos) {
+    int NumPrinted = 0;
+    for (size_t I = PrevPcBufferPos; I < PcBufferPos; ++I) {
+      if (NumPrinted++ > 30) break;  // Don't print too many new PCs.
       if (EF->__sanitizer_symbolize_pc) {
         char PcDescr[1024];
         EF->__sanitizer_symbolize_pc(reinterpret_cast<void*>(PcBuffer[I]),
                                      "%p %F %L", PcDescr, sizeof(PcDescr));
+        PcDescr[sizeof(PcDescr) - 1] = 0;  // Just in case.
         Printf("\tNEW_PC: %s\n", PcDescr);
       } else {
         Printf("\tNEW_PC: %p\n", PcBuffer[I]);
@@ -608,6 +628,7 @@ void Fuzzer::Merge(const std::vector<std::string> &Corpora) {
     Printf("Merge requires two or more corpus dirs\n");
     return;
   }
+  InMergeMode = true;
   std::vector<std::string> ExtraCorpora(Corpora.begin() + 1, Corpora.end());
 
   assert(Options.MaxLen > 0);

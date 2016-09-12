@@ -8,6 +8,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "CodeViewYaml.h"
+#include "PdbYaml.h"
+#include "YamlSerializationContext.h"
 
 #include "llvm/DebugInfo/CodeView/CVTypeVisitor.h"
 #include "llvm/DebugInfo/CodeView/EnumTables.h"
@@ -25,6 +27,35 @@ LLVM_YAML_IS_SEQUENCE_VECTOR(OneMethodRecord)
 LLVM_YAML_IS_SEQUENCE_VECTOR(VFTableSlotKind)
 LLVM_YAML_IS_SEQUENCE_VECTOR(StringRef)
 LLVM_YAML_IS_SEQUENCE_VECTOR(CVType)
+LLVM_YAML_IS_SEQUENCE_VECTOR(llvm::pdb::yaml::PdbTpiRecord)
+
+namespace {
+struct FieldListRecordSplitter : public TypeVisitorCallbacks {
+public:
+  explicit FieldListRecordSplitter(
+      std::vector<llvm::pdb::yaml::PdbTpiRecord> &Records)
+      : Records(Records) {}
+
+#define TYPE_RECORD(EnumName, EnumVal, Name)
+#define TYPE_RECORD_ALIAS(EnumName, EnumVal, Name, AliasName)
+#define MEMBER_RECORD_ALIAS(EnumName, EnumVal, Name, AliasName)
+#define MEMBER_RECORD(EnumName, EnumVal, Name)                                 \
+  Error visitKnownRecord(CVType &CVT, Name##Record &Record) override {         \
+    visitKnownRecordImpl(CVT);                                                 \
+    return Error::success();                                                   \
+  }
+#include "llvm/DebugInfo/CodeView/TypeRecords.def"
+
+private:
+  void visitKnownRecordImpl(CVType &CVT) {
+    llvm::pdb::yaml::PdbTpiRecord R;
+    R.Record = CVT;
+    Records.push_back(std::move(R));
+  }
+
+  std::vector<llvm::pdb::yaml::PdbTpiRecord> &Records;
+};
+}
 
 namespace llvm {
 namespace yaml {
@@ -239,32 +270,17 @@ template <> struct ScalarTraits<APSInt> {
   static bool mustQuote(StringRef Scalar) { return false; }
 };
 
-void MappingTraits<CVType>::mapping(IO &IO, CVType &Record) {
+void MappingContextTraits<CVType, pdb::yaml::SerializationContext>::mapping(
+    IO &IO, CVType &Record, pdb::yaml::SerializationContext &Context) {
   if (IO.outputting()) {
     codeview::TypeDeserializer Deserializer;
-    codeview::yaml::YamlTypeDumperCallbacks Callbacks(IO);
 
     codeview::TypeVisitorCallbackPipeline Pipeline;
     Pipeline.addCallbackToPipeline(Deserializer);
-    Pipeline.addCallbackToPipeline(Callbacks);
+    Pipeline.addCallbackToPipeline(Context.Dumper);
 
     codeview::CVTypeVisitor Visitor(Pipeline);
     consumeError(Visitor.visitTypeRecord(Record));
-  }
-}
-
-void MappingTraits<FieldListRecord>::mapping(IO &IO,
-                                             FieldListRecord &FieldList) {
-  if (IO.outputting()) {
-    codeview::yaml::YamlTypeDumperCallbacks Callbacks(IO);
-    codeview::TypeDeserializer Deserializer;
-
-    codeview::TypeVisitorCallbackPipeline Pipeline;
-    Pipeline.addCallbackToPipeline(Deserializer);
-    Pipeline.addCallbackToPipeline(Callbacks);
-
-    codeview::CVTypeVisitor Visitor(Pipeline);
-    consumeError(Visitor.visitFieldListMemberStream(FieldList.Data));
   }
 }
 
@@ -508,13 +524,30 @@ void ScalarEnumerationTraits<TypeLeafKind>::enumeration(IO &io,
 }
 }
 
-Expected<TypeLeafKind>
-llvm::codeview::yaml::YamlTypeDumperCallbacks::visitTypeBegin(
-    const CVRecord<TypeLeafKind> &CVR) {
-  // When we're outputting, `CVR.Type` already has the right value in it.  But
-  // when we're inputting, we need to read the value.  Since `CVR.Type` is const
-  // we do it into a temp variable.
-  TypeLeafKind K = CVR.Type;
-  YamlIO.mapRequired("Kind", K);
-  return K;
+Error llvm::codeview::yaml::YamlTypeDumperCallbacks::visitTypeBegin(
+    CVRecord<TypeLeafKind> &CVR) {
+  YamlIO.mapRequired("Kind", CVR.Type);
+  return Error::success();
+}
+
+void llvm::codeview::yaml::YamlTypeDumperCallbacks::visitKnownRecordImpl(
+    const char *Name, CVType &CVR, FieldListRecord &FieldList) {
+  std::vector<llvm::pdb::yaml::PdbTpiRecord> FieldListRecords;
+  if (YamlIO.outputting()) {
+    // If we are outputting, then `FieldList.Data` contains a huge chunk of data
+    // representing the serialized list of members.  We need to split it up into
+    // individual CVType records where each record represents an individual
+    // member.  This way, we can simply map the entire thing as a Yaml sequence,
+    // which will recurse back to the standard handler for top-level fields
+    // (top-level and member fields all have the exact same Yaml syntax so use
+    // the same parser).
+    //
+    // If we are not outputting, then the array contains no data starting out,
+    // and is instead populated from the sequence represented by the yaml --
+    // again, using the same logic that we use for top-level records.
+    FieldListRecordSplitter Splitter(FieldListRecords);
+    CVTypeVisitor V(Splitter);
+    consumeError(V.visitFieldListMemberStream(FieldList.Data));
+  }
+  YamlIO.mapRequired("FieldList", FieldListRecords, Context);
 }

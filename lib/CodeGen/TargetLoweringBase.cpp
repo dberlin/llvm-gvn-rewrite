@@ -488,12 +488,10 @@ static void InitLibcallNames(const char **Names, const Triple &TT) {
   Names[RTLIB::DEOPTIMIZE] = "__llvm_deoptimize";
 }
 
-/// InitLibcallCallingConvs - Set default libcall CallingConvs.
-///
+/// Set default libcall CallingConvs.
 static void InitLibcallCallingConvs(CallingConv::ID *CCs) {
-  for (int i = 0; i < RTLIB::UNKNOWN_LIBCALL; ++i) {
-    CCs[i] = CallingConv::C;
-  }
+  for (int LC = 0; LC < RTLIB::UNKNOWN_LIBCALL; ++LC)
+    CCs[LC] = CallingConv::C;
 }
 
 /// getFPEXT - Return the FPEXT_*_* value for the given types, or

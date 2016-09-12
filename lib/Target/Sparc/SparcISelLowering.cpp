@@ -1620,7 +1620,7 @@ SparcTargetLowering::SparcTargetLowering(const TargetMachine &TM,
   if (Subtarget->isV9())
     setMaxAtomicSizeInBitsSupported(64);
   else if (Subtarget->hasLeonCasa())
-    setMaxAtomicSizeInBitsSupported(64);
+    setMaxAtomicSizeInBitsSupported(32);
   else
     setMaxAtomicSizeInBitsSupported(0);
 
@@ -1639,6 +1639,13 @@ SparcTargetLowering::SparcTargetLowering(const TargetMachine &TM,
     setOperationAction(ISD::ATOMIC_SWAP, MVT::i64, Legal);
     setOperationAction(ISD::ATOMIC_LOAD, MVT::i64, Custom);
     setOperationAction(ISD::ATOMIC_STORE, MVT::i64, Custom);
+  }
+
+  if (!Subtarget->is64Bit()) {
+    // These libcalls are not available in 32-bit.
+    setLibcallName(RTLIB::SHL_I128, nullptr);
+    setLibcallName(RTLIB::SRL_I128, nullptr);
+    setLibcallName(RTLIB::SRA_I128, nullptr);
   }
 
   if (!Subtarget->isV9()) {

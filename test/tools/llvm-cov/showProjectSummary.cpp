@@ -16,7 +16,7 @@ int main(int argc, char ** argv) {
 // RUN: llvm-cov show %S/Inputs/showProjectSummary.covmapping -instr-profile %t.profdata -project-title "Test Suite" -filename-equivalence %s | FileCheck -check-prefixes=TEXT-TITLE,TEXT,TEXT-FILE,TEXT-HEADER %s
 // RUN: llvm-cov show %S/Inputs/showProjectSummary.covmapping -instr-profile %t.profdata -project-title "Test Suite" -name=main -filename-equivalence %s | FileCheck -check-prefixes=TEXT-FUNCTION,TEXT-HEADER %s
 // TEXT-TITLE: Test Suite
-// TEXT: Code Coverage Report
+// TEXT: Coverage Report
 // TEXT: Created:
 // TEXT-FILE: showProjectSummary.cpp:
 // TEXT-FILE: showProjectSummary.covmapping:
@@ -30,17 +30,11 @@ int main(int argc, char ** argv) {
 // RUN: FileCheck -check-prefixes=HTML-TITLE,HTML -input-file %t.dir/index.html %s
 // RUN: llvm-cov show %S/Inputs/showProjectSummary.covmapping -format=html -o %t.dir -instr-profile %t.profdata  -project-title "Test Suite" -filename-equivalence -name=main %s
 // RUN: FileCheck -check-prefixes=HTML-FUNCTION,HTML-HEADER -input-file %t.dir/functions.html %s
-// HTML-TITLE: <div class='project-title'>
-// HTML-TITLE: <span>Test Suite</span>
-// HTML: <div class='report-title'>
-// HTML: <span>Code Coverage Report</span>
-// HTML: <div class='created-time'>
-// HTML: <span>Created:
-// HTML-FILE: <pre>Source:
-// HTML-FILE: showProjectSummary.cpp</pre>
-// HTML-FILE: <pre>Binary:
-// HTML-FILE: showProjectSummary.covmapping</pre>
-// HTML-FUNCTION: <pre>Function: main</pre>
-// HTML-HEADER: <tr><td><span><pre>Line No.</pre></span></td>
-// HTML-HEADER: <td><span><pre>Count</pre></span></td>
-// HTML-HEADER: <td><span><pre>Source</pre></span></td>
+// HTML-TITLE: <h1>Test Suite</h1>
+// HTML: <h2>Coverage Report</h2>
+// HTML: <h4>Created:{{.*}}</h4>
+// HTML-FILE: <pre>{{.*}}showProjectSummary.cpp (Binary: showProjectSummary.covmapping)</pre>
+// HTML-FUNCTION: <pre>main</pre>
+// HTML-HEADER: <td><pre>Line No.</pre></td>
+// HTML-HEADER: <td><pre>Count</pre></td>
+// HTML-HEADER: <td><pre>Source (<a href='#L8'>jump to first uncovered line</a>)</pre></td>

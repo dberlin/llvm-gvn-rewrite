@@ -1230,7 +1230,7 @@ static bool HoistThenElseCodeToIf(BranchInst *BI,
     BIParent->getInstList().splice(BI->getIterator(), BB1->getInstList(), I1);
     if (!I2->use_empty())
       I2->replaceAllUsesWith(I1);
-    I1->intersectOptionalDataWith(I2);
+    I1->andIRFlags(I2);
     unsigned KnownIDs[] = {LLVMContext::MD_tbaa,
                            LLVMContext::MD_range,
                            LLVMContext::MD_fpmath,
@@ -1242,6 +1242,14 @@ static bool HoistThenElseCodeToIf(BranchInst *BI,
                            LLVMContext::MD_dereferenceable_or_null,
                            LLVMContext::MD_mem_parallel_loop_access};
     combineMetadata(I1, I2, KnownIDs);
+
+    // If the debug loc for I1 and I2 are different, as we are combining them
+    // into one instruction, we do not want to select debug loc randomly from 
+    // I1 or I2. Instead, we set the 0-line DebugLoc to note that we do not
+    // know the debug loc of the hoisted instruction.
+    if (!isa<CallInst>(I1) &&  I1->getDebugLoc() != I2->getDebugLoc())
+      I1->setDebugLoc(DebugLoc());
+ 
     I2->eraseFromParent();
     Changed = true;
 
@@ -1338,6 +1346,10 @@ HoistTerminator:
 // FIXME: This should be promoted to Instruction.
 static bool canReplaceOperandWithVariable(const Instruction *I,
                                           unsigned OpIdx) {
+  // We can't have a PHI with a metadata type.
+  if (I->getOperand(OpIdx)->getType()->isMetadataTy())
+    return false;
+
   // Early exit.
   if (!isa<Constant>(I->getOperand(OpIdx)))
     return true;
@@ -1401,9 +1413,13 @@ static bool canSinkInstructions(
   // we're contemplating sinking, it must already be determined to be sinkable.
   if (!isa<StoreInst>(I0)) {
     auto *PNUse = dyn_cast<PHINode>(*I0->user_begin());
-    if (!all_of(Insts, [&PNUse](const Instruction *I) -> bool {
+    auto *Succ = I0->getParent()->getTerminator()->getSuccessor(0);
+    if (!all_of(Insts, [&PNUse,&Succ](const Instruction *I) -> bool {
           auto *U = cast<Instruction>(*I->user_begin());
-          return U == PNUse || U->getParent() == I->getParent();
+          return (PNUse &&
+                  PNUse->getParent() == Succ &&
+                  PNUse->getIncomingValueForBlock(I->getParent()) == I) ||
+                 U->getParent() == I->getParent();
         }))
       return false;
   }
@@ -1412,6 +1428,25 @@ static bool canSinkInstructions(
     if (I0->getOperand(OI)->getType()->isTokenTy())
       // Don't touch any operand of token type.
       return false;
+
+    // Because SROA can't handle speculating stores of selects, try not
+    // to sink loads or stores of allocas when we'd have to create a PHI for
+    // the address operand. Also, because it is likely that loads or stores
+    // of allocas will disappear when Mem2Reg/SROA is run, don't sink them.
+    // This can cause code churn which can have unintended consequences down
+    // the line - see https://llvm.org/bugs/show_bug.cgi?id=30244.
+    // FIXME: This is a workaround for a deficiency in SROA - see
+    // https://llvm.org/bugs/show_bug.cgi?id=30188
+    if (OI == 1 && isa<StoreInst>(I0) &&
+        any_of(Insts, [](const Instruction *I) {
+          return isa<AllocaInst>(I->getOperand(1));
+        }))
+      return false;
+    if (OI == 0 && isa<LoadInst>(I0) && any_of(Insts, [](const Instruction *I) {
+          return isa<AllocaInst>(I->getOperand(0));
+        }))
+      return false;
+
     auto SameAsI0 = [&I0, OI](const Instruction *I) {
       assert(I->getNumOperands() == I0->getNumOperands());
       return I->getOperand(OI) == I0->getOperand(OI);
@@ -1425,16 +1460,6 @@ static bool canSinkInstructions(
         // FIXME: if the call was *already* indirect, we should do this.
         return false;
       }
-      // Because SROA can't handle speculating stores of selects, try not
-      // to sink stores of allocas when we'd have to create a PHI for the
-      // address operand.
-      // FIXME: This is a workaround for a deficiency in SROA - see
-      // https://llvm.org/bugs/show_bug.cgi?id=30188
-      if (OI == 1 && isa<StoreInst>(I0) &&
-          any_of(Insts, [](const Instruction *I) {
-            return isa<AllocaInst>(I->getOperand(1));
-          }))
-        return false;
       for (auto *I : Insts)
         PHIOperands[I].push_back(I->getOperand(OI));
     }
@@ -1661,8 +1686,7 @@ static bool SinkThenElseCodeToEnd(BranchInst *BI1) {
     --LRI;
   }
 
-  auto ProfitableToSinkLastInstruction = [&]() {
-    LRI.reset();
+  auto ProfitableToSinkInstruction = [&](LockstepReverseIterator &LRI) {
     unsigned NumPHIdValues = 0;
     for (auto *I : *LRI)
       for (auto *V : PHIOperands[I])
@@ -1677,8 +1701,23 @@ static bool SinkThenElseCodeToEnd(BranchInst *BI1) {
   };
 
   if (ScanIdx > 0 && Cond) {
-    // Check if we would actually sink anything first!
-    if (!ProfitableToSinkLastInstruction())
+    // Check if we would actually sink anything first! This mutates the CFG and
+    // adds an extra block. The goal in doing this is to allow instructions that
+    // couldn't be sunk before to be sunk - obviously, speculatable instructions
+    // (such as trunc, add) can be sunk and predicated already. So we check that
+    // we're going to sink at least one non-speculatable instruction.
+    LRI.reset();
+    unsigned Idx = 0;
+    bool Profitable = false;
+    while (ProfitableToSinkInstruction(LRI) && Idx < ScanIdx) {
+      if (!isSafeToSpeculativelyExecute((*LRI)[0])) {
+        Profitable = true;
+        break;
+      }
+      --LRI;
+      ++Idx;
+    }
+    if (!Profitable)
       return false;
     
     DEBUG(dbgs() << "SINK: Splitting edge\n");
@@ -1710,7 +1749,8 @@ static bool SinkThenElseCodeToEnd(BranchInst *BI1) {
 
     // Because we've sunk every instruction in turn, the current instruction to
     // sink is always at index 0.
-    if (!ProfitableToSinkLastInstruction()) {
+    LRI.reset();
+    if (!ProfitableToSinkInstruction(LRI)) {
       // Too many PHIs would be created.
       DEBUG(dbgs() << "SINK: stopping here, too many PHIs would be created!\n");
       break;

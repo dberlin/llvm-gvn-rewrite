@@ -49,13 +49,6 @@ def UnsafeFPMath : Predicate<"TM.Options.UnsafeFPMath">;
 def InstFlag : OperandWithDefaultOps <i32, (ops (i32 0))>;
 def ADDRIndirect : ComplexPattern<iPTR, 2, "SelectADDRIndirect", [], []>;
 
-// 32-bit VALU immediate operand that uses the constant bus.
-def u32kimm : Operand<i32> {
-  let OperandNamespace = "AMDGPU";
-  let OperandType = "OPERAND_KIMM32";
-  let PrintMethod = "printU32ImmOperand";
-}
-
 let OperandType = "OPERAND_IMMEDIATE" in {
 
 def u32imm : Operand<i32> {
@@ -380,12 +373,6 @@ class global_binary_atomic_op<SDNode atomic_op> : PatFrag<
   [{return cast<MemSDNode>(N)->getAddressSpace() == AMDGPUAS::GLOBAL_ADDRESS;}]
 >;
 
-class flat_binary_atomic_op<SDNode atomic_op> : PatFrag<
-  (ops node:$ptr, node:$value),
-  (atomic_op node:$ptr, node:$value),
-  [{return cast<MemSDNode>(N)->getAddressSpace() == AMDGPUAS::FLAT_ADDRESS;}]
->;
-
 def atomic_swap_global : global_binary_atomic_op<atomic_swap>;
 def atomic_add_global : global_binary_atomic_op<atomic_load_add>;
 def atomic_and_global : global_binary_atomic_op<atomic_load_and>;
@@ -403,19 +390,6 @@ def atomic_cmp_swap_global_nortn : PatFrag<
   (atomic_cmp_swap_global node:$ptr, node:$value),
   [{ return SDValue(N, 0).use_empty(); }]
 >;
-
-def atomic_swap_flat : flat_binary_atomic_op<atomic_swap>;
-def atomic_add_flat : flat_binary_atomic_op<atomic_load_add>;
-def atomic_and_flat : flat_binary_atomic_op<atomic_load_and>;
-def atomic_max_flat : flat_binary_atomic_op<atomic_load_max>;
-def atomic_min_flat : flat_binary_atomic_op<atomic_load_min>;
-def atomic_or_flat : flat_binary_atomic_op<atomic_load_or>;
-def atomic_sub_flat : flat_binary_atomic_op<atomic_load_sub>;
-def atomic_umax_flat : flat_binary_atomic_op<atomic_load_umax>;
-def atomic_umin_flat : flat_binary_atomic_op<atomic_load_umin>;
-def atomic_xor_flat : flat_binary_atomic_op<atomic_load_xor>;
-
-def atomic_cmp_swap_flat : flat_binary_atomic_op<AMDGPUatomic_cmp_swap>;
 
 //===----------------------------------------------------------------------===//
 // Misc Pattern Fragments

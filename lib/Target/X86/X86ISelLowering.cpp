@@ -14896,29 +14896,15 @@ static SDValue EmitKTEST(SDValue Op, SelectionDAG &DAG,
   return SDValue();
 }
 
-static SDValue EmitTEST_i1(SDValue Op, SelectionDAG &DAG, const SDLoc &dl) {
-
-  // Most probably the value is in GPR, use ZEXT + CMP.
-  if(Op.getOpcode() == ISD::TRUNCATE ||
-     Op.getOpcode() == ISD::LOAD ||
-     Op.getOpcode() == ISD::CopyFromReg) {
-    SDValue ExtOp = DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i8, Op);
-    return DAG.getNode(X86ISD::CMP, dl, MVT::i32, ExtOp,
-                       DAG.getConstant(0, dl, MVT::i8));
-  }
-
-  // Create cmp i1 that should be mapped to KORTEST.
-  return DAG.getNode(X86ISD::CMP, dl, MVT::i1, Op,
-                     DAG.getConstant(0, dl, MVT::i8));
-}
-
 /// Emit nodes that will be selected as "test Op0,Op0", or something
 /// equivalent.
 SDValue X86TargetLowering::EmitTest(SDValue Op, unsigned X86CC, const SDLoc &dl,
                                     SelectionDAG &DAG) const {
-  if (Op.getValueType() == MVT::i1)
-    return EmitTEST_i1(Op, DAG, dl);
-
+  if (Op.getValueType() == MVT::i1) {
+    SDValue ExtOp = DAG.getNode(ISD::ZERO_EXTEND, dl, MVT::i8, Op);
+    return DAG.getNode(X86ISD::CMP, dl, MVT::i32, ExtOp,
+                       DAG.getConstant(0, dl, MVT::i8));
+  }
   // CF and OF aren't always set the way we want. Determine which
   // of these we need.
   bool NeedCF = false;
@@ -17676,9 +17662,6 @@ static SDValue LowerINTRINSIC_WO_CHAIN(SDValue Op, const X86Subtarget &Subtarget
     case INTR_TYPE_2OP:
       return DAG.getNode(IntrData->Opc0, dl, Op.getValueType(), Op.getOperand(1),
         Op.getOperand(2));
-    case INTR_TYPE_2OP_IMM8:
-      return DAG.getNode(IntrData->Opc0, dl, Op.getValueType(), Op.getOperand(1),
-                         DAG.getNode(ISD::TRUNCATE, dl, MVT::i8, Op.getOperand(2)));
     case INTR_TYPE_3OP:
       return DAG.getNode(IntrData->Opc0, dl, Op.getValueType(), Op.getOperand(1),
         Op.getOperand(2), Op.getOperand(3));
@@ -17834,8 +17817,8 @@ static SDValue LowerINTRINSIC_WO_CHAIN(SDValue Op, const X86Subtarget &Subtarget
       else
         Rnd = DAG.getConstant(X86::STATIC_ROUNDING::CUR_DIRECTION, dl, MVT::i32);
       return getVectorMaskingNode(DAG.getNode(IntrData->Opc0, dl, VT,
-        Src1, Src2, Imm, Rnd),
-        Mask, PassThru, Subtarget, DAG);
+                                              Src1, Src2, Imm, Rnd),
+                                  Mask, PassThru, Subtarget, DAG);
     }
     case INTR_TYPE_3OP_IMM8_MASK:
     case INTR_TYPE_3OP_MASK:
@@ -17886,19 +17869,21 @@ static SDValue LowerINTRINSIC_WO_CHAIN(SDValue Op, const X86Subtarget &Subtarget
     }
     case VPERM_3OP_MASKZ:
     case VPERM_3OP_MASK:{
+      MVT VT = Op.getSimpleValueType();
       // Src2 is the PassThru
       SDValue Src1 = Op.getOperand(1);
-      SDValue Src2 = Op.getOperand(2);
+      // PassThru needs to be the same type as the destination in order
+      // to pattern match correctly.
+      SDValue Src2 = DAG.getBitcast(VT, Op.getOperand(2));
       SDValue Src3 = Op.getOperand(3);
       SDValue Mask = Op.getOperand(4);
-      MVT VT = Op.getSimpleValueType();
       SDValue PassThru = SDValue();
 
       // set PassThru element
       if (IntrData->Type == VPERM_3OP_MASKZ)
         PassThru = getZeroVector(VT, Subtarget, DAG, dl);
       else
-        PassThru = DAG.getBitcast(VT, Src2);
+        PassThru = Src2;
 
       // Swap Src1 and Src2 in the node creation
       return getVectorMaskingNode(DAG.getNode(IntrData->Opc0,
@@ -20229,7 +20214,8 @@ static SDValue LowerScalarImmediateShift(SDValue Op, SelectionDAG &DAG,
 
   // Special case in 32-bit mode, where i64 is expanded into high and low parts.
   if (!Subtarget.is64Bit() && !Subtarget.hasXOP() &&
-      (VT == MVT::v2i64 || (Subtarget.hasInt256() && VT == MVT::v4i64))) {
+      (VT == MVT::v2i64 || (Subtarget.hasInt256() && VT == MVT::v4i64) ||
+       (Subtarget.hasAVX512() && VT == MVT::v8i64))) {
 
     // Peek through any splat that was introduced for i64 shift vectorization.
     int SplatIndex = -1;
@@ -24535,7 +24521,6 @@ X86TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
   case X86::TAILJMPd64:
   case X86::TAILJMPr64:
   case X86::TAILJMPm64:
-  case X86::TAILJMPd64_REX:
   case X86::TAILJMPr64_REX:
   case X86::TAILJMPm64_REX:
     llvm_unreachable("TAILJMP64 would not be touched here.");
@@ -25484,29 +25469,29 @@ static bool combineX86ShuffleChain(ArrayRef<SDValue> Inputs, SDValue Root,
     // Bits[2:0] - (Per Lane) PS Shuffle Mask.
     unsigned NumLanes = MaskVT.getSizeInBits() / 128;
     unsigned NumEltsPerLane = NumMaskElts / NumLanes;
-    SmallVector<SDValue, 8> VPerm2Idx;
+    SmallVector<int, 8> VPerm2Idx;
     MVT MaskIdxSVT = MVT::getIntegerVT(MaskVT.getScalarSizeInBits());
     MVT MaskIdxVT = MVT::getVectorVT(MaskIdxSVT, NumMaskElts);
     unsigned M2ZImm = 0;
     for (int M : Mask) {
       if (M == SM_SentinelUndef) {
-        VPerm2Idx.push_back(DAG.getUNDEF(MaskIdxSVT));
+        VPerm2Idx.push_back(-1);
         continue;
       }
       if (M == SM_SentinelZero) {
         M2ZImm = 2;
-        VPerm2Idx.push_back(DAG.getConstant(8, DL, MaskIdxSVT));
+        VPerm2Idx.push_back(8);
         continue;
       }
       int Index = (M % NumEltsPerLane) + ((M / NumMaskElts) * NumEltsPerLane);
       Index = (MaskVT.getScalarSizeInBits() == 64 ? Index << 1 : Index);
-      VPerm2Idx.push_back(DAG.getConstant(Index, DL, MaskIdxSVT));
+      VPerm2Idx.push_back(Index);
     }
     V1 = DAG.getBitcast(MaskVT, V1);
     DCI.AddToWorklist(V1.getNode());
     V2 = DAG.getBitcast(MaskVT, V2);
     DCI.AddToWorklist(V2.getNode());
-    SDValue VPerm2MaskOp = DAG.getBuildVector(MaskIdxVT, DL, VPerm2Idx);
+    SDValue VPerm2MaskOp = getConstVector(VPerm2Idx, MaskIdxVT, DAG, DL, true);
     DCI.AddToWorklist(VPerm2MaskOp.getNode());
     Res = DAG.getNode(X86ISD::VPERMIL2, DL, MaskVT, V1, V2, VPerm2MaskOp,
                       DAG.getConstant(M2ZImm, DL, MVT::i8));
@@ -26480,8 +26465,8 @@ static SDValue combineShuffle(SDNode *N, SelectionDAG &DAG,
   if (SDValue LD = EltsFromConsecutiveLoads(VT, Elts, dl, DAG, true))
     return LD;
 
-  // For AVX2, we sometimes want to combine 
-  // (vector_shuffle <mask> (concat_vectors t1, undef) 
+  // For AVX2, we sometimes want to combine
+  // (vector_shuffle <mask> (concat_vectors t1, undef)
   //                        (concat_vectors t2, undef))
   // Into:
   // (vector_shuffle <mask> (concat_vectors t1, t2), undef)
@@ -27066,6 +27051,107 @@ static SDValue combineVSelectWithAllOnesOrZeros(SDNode *N, SelectionDAG &DAG) {
   return DAG.getBitcast(VT, Ret);
 }
 
+static SDValue combineSelectOfTwoConstants(SDNode *N, SelectionDAG &DAG) {
+  SDValue Cond = N->getOperand(0);
+  SDValue LHS = N->getOperand(1);
+  SDValue RHS = N->getOperand(2);
+  SDLoc DL(N);
+
+  auto *TrueC = dyn_cast<ConstantSDNode>(LHS);
+  auto *FalseC = dyn_cast<ConstantSDNode>(RHS);
+  if (!TrueC || !FalseC)
+    return SDValue();
+
+  // Don't do this for crazy integer types.
+  if (!DAG.getTargetLoweringInfo().isTypeLegal(LHS.getValueType()))
+    return SDValue();
+
+  // If this is efficiently invertible, canonicalize the LHSC/RHSC values
+  // so that TrueC (the true value) is larger than FalseC.
+  bool NeedsCondInvert = false;
+  if (TrueC->getAPIntValue().ult(FalseC->getAPIntValue()) &&
+      // Efficiently invertible.
+      (Cond.getOpcode() == ISD::SETCC || // setcc -> invertible.
+       (Cond.getOpcode() == ISD::XOR &&  // xor(X, C) -> invertible.
+        isa<ConstantSDNode>(Cond.getOperand(1))))) {
+    NeedsCondInvert = true;
+    std::swap(TrueC, FalseC);
+  }
+
+  // Optimize C ? 8 : 0 -> zext(C) << 3.  Likewise for any pow2/0.
+  if (FalseC->getAPIntValue() == 0 && TrueC->getAPIntValue().isPowerOf2()) {
+    if (NeedsCondInvert) // Invert the condition if needed.
+      Cond = DAG.getNode(ISD::XOR, DL, Cond.getValueType(), Cond,
+                         DAG.getConstant(1, DL, Cond.getValueType()));
+
+    // Zero extend the condition if needed.
+    Cond = DAG.getNode(ISD::ZERO_EXTEND, DL, LHS.getValueType(), Cond);
+
+    unsigned ShAmt = TrueC->getAPIntValue().logBase2();
+    return DAG.getNode(ISD::SHL, DL, LHS.getValueType(), Cond,
+                       DAG.getConstant(ShAmt, DL, MVT::i8));
+  }
+
+  // Optimize Cond ? cst+1 : cst -> zext(setcc(C)+cst.
+  if (FalseC->getAPIntValue() + 1 == TrueC->getAPIntValue()) {
+    if (NeedsCondInvert) // Invert the condition if needed.
+      Cond = DAG.getNode(ISD::XOR, DL, Cond.getValueType(), Cond,
+                         DAG.getConstant(1, DL, Cond.getValueType()));
+
+    // Zero extend the condition if needed.
+    Cond = DAG.getNode(ISD::ZERO_EXTEND, DL, FalseC->getValueType(0), Cond);
+    return DAG.getNode(ISD::ADD, DL, Cond.getValueType(), Cond,
+                       SDValue(FalseC, 0));
+  }
+
+  // Optimize cases that will turn into an LEA instruction.  This requires
+  // an i32 or i64 and an efficient multiplier (1, 2, 3, 4, 5, 8, 9).
+  if (N->getValueType(0) == MVT::i32 || N->getValueType(0) == MVT::i64) {
+    uint64_t Diff = TrueC->getZExtValue() - FalseC->getZExtValue();
+    if (N->getValueType(0) == MVT::i32)
+      Diff = (unsigned)Diff;
+
+    bool isFastMultiplier = false;
+    if (Diff < 10) {
+      switch ((unsigned char)Diff) {
+      default:
+        break;
+      case 1: // result = add base, cond
+      case 2: // result = lea base(    , cond*2)
+      case 3: // result = lea base(cond, cond*2)
+      case 4: // result = lea base(    , cond*4)
+      case 5: // result = lea base(cond, cond*4)
+      case 8: // result = lea base(    , cond*8)
+      case 9: // result = lea base(cond, cond*8)
+        isFastMultiplier = true;
+        break;
+      }
+    }
+
+    if (isFastMultiplier) {
+      APInt Diff = TrueC->getAPIntValue() - FalseC->getAPIntValue();
+      if (NeedsCondInvert) // Invert the condition if needed.
+        Cond = DAG.getNode(ISD::XOR, DL, Cond.getValueType(), Cond,
+                           DAG.getConstant(1, DL, Cond.getValueType()));
+
+      // Zero extend the condition if needed.
+      Cond = DAG.getNode(ISD::ZERO_EXTEND, DL, FalseC->getValueType(0), Cond);
+      // Scale the condition by the difference.
+      if (Diff != 1)
+        Cond = DAG.getNode(ISD::MUL, DL, Cond.getValueType(), Cond,
+                           DAG.getConstant(Diff, DL, Cond.getValueType()));
+
+      // Add the base if non-zero.
+      if (FalseC->getAPIntValue() != 0)
+        Cond = DAG.getNode(ISD::ADD, DL, Cond.getValueType(), Cond,
+                           SDValue(FalseC, 0));
+      return Cond;
+    }
+  }
+  
+  return SDValue();
+}
+
 /// Do target-specific dag combines on SELECT and VSELECT nodes.
 static SDValue combineSelect(SDNode *N, SelectionDAG &DAG,
                              TargetLowering::DAGCombinerInfo &DCI,
@@ -27242,99 +27328,9 @@ static SDValue combineSelect(SDNode *N, SelectionDAG &DAG,
       return DAG.getNode(N->getOpcode(), DL, OpVT, Cond, LHS, RHS);
     }
   }
-  // If this is a select between two integer constants, try to do some
-  // optimizations.
-  if (ConstantSDNode *TrueC = dyn_cast<ConstantSDNode>(LHS)) {
-    if (ConstantSDNode *FalseC = dyn_cast<ConstantSDNode>(RHS))
-      // Don't do this for crazy integer types.
-      if (DAG.getTargetLoweringInfo().isTypeLegal(LHS.getValueType())) {
-        // If this is efficiently invertible, canonicalize the LHSC/RHSC values
-        // so that TrueC (the true value) is larger than FalseC.
-        bool NeedsCondInvert = false;
 
-        if (TrueC->getAPIntValue().ult(FalseC->getAPIntValue()) &&
-            // Efficiently invertible.
-            (Cond.getOpcode() == ISD::SETCC ||  // setcc -> invertible.
-             (Cond.getOpcode() == ISD::XOR &&   // xor(X, C) -> invertible.
-              isa<ConstantSDNode>(Cond.getOperand(1))))) {
-          NeedsCondInvert = true;
-          std::swap(TrueC, FalseC);
-        }
-
-        // Optimize C ? 8 : 0 -> zext(C) << 3.  Likewise for any pow2/0.
-        if (FalseC->getAPIntValue() == 0 &&
-            TrueC->getAPIntValue().isPowerOf2()) {
-          if (NeedsCondInvert) // Invert the condition if needed.
-            Cond = DAG.getNode(ISD::XOR, DL, Cond.getValueType(), Cond,
-                               DAG.getConstant(1, DL, Cond.getValueType()));
-
-          // Zero extend the condition if needed.
-          Cond = DAG.getNode(ISD::ZERO_EXTEND, DL, LHS.getValueType(), Cond);
-
-          unsigned ShAmt = TrueC->getAPIntValue().logBase2();
-          return DAG.getNode(ISD::SHL, DL, LHS.getValueType(), Cond,
-                             DAG.getConstant(ShAmt, DL, MVT::i8));
-        }
-
-        // Optimize Cond ? cst+1 : cst -> zext(setcc(C)+cst.
-        if (FalseC->getAPIntValue()+1 == TrueC->getAPIntValue()) {
-          if (NeedsCondInvert) // Invert the condition if needed.
-            Cond = DAG.getNode(ISD::XOR, DL, Cond.getValueType(), Cond,
-                               DAG.getConstant(1, DL, Cond.getValueType()));
-
-          // Zero extend the condition if needed.
-          Cond = DAG.getNode(ISD::ZERO_EXTEND, DL,
-                             FalseC->getValueType(0), Cond);
-          return DAG.getNode(ISD::ADD, DL, Cond.getValueType(), Cond,
-                             SDValue(FalseC, 0));
-        }
-
-        // Optimize cases that will turn into an LEA instruction.  This requires
-        // an i32 or i64 and an efficient multiplier (1, 2, 3, 4, 5, 8, 9).
-        if (N->getValueType(0) == MVT::i32 || N->getValueType(0) == MVT::i64) {
-          uint64_t Diff = TrueC->getZExtValue()-FalseC->getZExtValue();
-          if (N->getValueType(0) == MVT::i32) Diff = (unsigned)Diff;
-
-          bool isFastMultiplier = false;
-          if (Diff < 10) {
-            switch ((unsigned char)Diff) {
-              default: break;
-              case 1:  // result = add base, cond
-              case 2:  // result = lea base(    , cond*2)
-              case 3:  // result = lea base(cond, cond*2)
-              case 4:  // result = lea base(    , cond*4)
-              case 5:  // result = lea base(cond, cond*4)
-              case 8:  // result = lea base(    , cond*8)
-              case 9:  // result = lea base(cond, cond*8)
-                isFastMultiplier = true;
-                break;
-            }
-          }
-
-          if (isFastMultiplier) {
-            APInt Diff = TrueC->getAPIntValue()-FalseC->getAPIntValue();
-            if (NeedsCondInvert) // Invert the condition if needed.
-              Cond = DAG.getNode(ISD::XOR, DL, Cond.getValueType(), Cond,
-                                 DAG.getConstant(1, DL, Cond.getValueType()));
-
-            // Zero extend the condition if needed.
-            Cond = DAG.getNode(ISD::ZERO_EXTEND, DL, FalseC->getValueType(0),
-                               Cond);
-            // Scale the condition by the difference.
-            if (Diff != 1)
-              Cond = DAG.getNode(ISD::MUL, DL, Cond.getValueType(), Cond,
-                                 DAG.getConstant(Diff, DL,
-                                                 Cond.getValueType()));
-
-            // Add the base if non-zero.
-            if (FalseC->getAPIntValue() != 0)
-              Cond = DAG.getNode(ISD::ADD, DL, Cond.getValueType(), Cond,
-                                 SDValue(FalseC, 0));
-            return Cond;
-          }
-        }
-      }
-  }
+  if (SDValue V = combineSelectOfTwoConstants(N, DAG))
+    return V;
 
   // Canonicalize max and min:
   // (x > y) ? x : y -> (x >= y) ? x : y
@@ -28080,7 +28076,8 @@ static SDValue reduceVMULWidth(SDNode *N, SelectionDAG &DAG,
                                const X86Subtarget &Subtarget) {
   // pmulld is supported since SSE41. It is better to use pmulld
   // instead of pmullw+pmulhw.
-  if (Subtarget.hasSSE41())
+  // pmullw/pmulhw are not supported by SSE.
+  if (Subtarget.hasSSE41() || !Subtarget.hasSSE2())
     return SDValue();
 
   ShrinkMode Mode;
@@ -29247,28 +29244,6 @@ static SDValue foldVectorXorShiftIntoCmp(SDNode *N, SelectionDAG &DAG,
   return DAG.getNode(X86ISD::PCMPGT, SDLoc(N), VT, Shift.getOperand(0), Ones);
 }
 
-static SDValue combineXor(SDNode *N, SelectionDAG &DAG,
-                                 TargetLowering::DAGCombinerInfo &DCI,
-                                 const X86Subtarget &Subtarget) {
-  if (SDValue Cmp = foldVectorXorShiftIntoCmp(N, DAG, Subtarget))
-    return Cmp;
-
-  if (DCI.isBeforeLegalizeOps())
-    return SDValue();
-
-  if (SDValue RV = foldXorTruncShiftIntoCmp(N, DAG))
-    return RV;
-
-  if (Subtarget.hasCMov())
-    if (SDValue RV = combineIntegerAbs(N, DAG))
-      return RV;
-
-  if (SDValue FPLogic = convertIntLogicToFPLogic(N, DAG, Subtarget))
-    return FPLogic;
-
-  return SDValue();
-}
-
 /// This function detects the AVG pattern between vectors of unsigned i8/i16,
 /// which is c = (a + b + 1) / 2, and replace this operation with the efficient
 /// X86ISD::AVG instruction.
@@ -30377,12 +30352,68 @@ static SDValue combineTruncate(SDNode *N, SelectionDAG &DAG,
   return combineVectorTruncation(N, DAG, Subtarget);
 }
 
+/// Returns the negated value if the node \p N flips sign of FP value.
+///
+/// FP-negation node may have different forms: FNEG(x) or FXOR (x, 0x80000000).
+/// AVX512F does not have FXOR, so FNEG is lowered as
+/// (bitcast (xor (bitcast x), (bitcast ConstantFP(0x80000000)))).
+/// In this case we go though all bitcasts.
+static SDValue isFNEG(SDNode *N) {
+  if (N->getOpcode() == ISD::FNEG)
+    return N->getOperand(0);
+
+  SDValue Op = peekThroughBitcasts(SDValue(N, 0));
+  if (Op.getOpcode() != X86ISD::FXOR && Op.getOpcode() != ISD::XOR)
+    return SDValue();
+
+  SDValue Op1 = peekThroughBitcasts(Op.getOperand(1));
+  if (!Op1.getValueType().isFloatingPoint())
+    return SDValue();
+
+  SDValue Op0 = peekThroughBitcasts(Op.getOperand(0));
+
+  unsigned EltBits = Op1.getValueType().getScalarSizeInBits();
+  auto isSignBitValue = [&](const ConstantFP *C) {
+    return C->getValueAPF().bitcastToAPInt() == APInt::getSignBit(EltBits);
+  };
+
+  // There is more than one way to represent the same constant on
+  // the different X86 targets. The type of the node may also depend on size.
+  //  - load scalar value and broadcast
+  //  - BUILD_VECTOR node
+  //  - load from a constant pool.
+  // We check all variants here.
+  if (Op1.getOpcode() == X86ISD::VBROADCAST) {
+    if (auto *C = getTargetConstantFromNode(Op1.getOperand(0)))
+      if (isSignBitValue(cast<ConstantFP>(C)))
+        return Op0;
+
+  } else if (BuildVectorSDNode *BV = dyn_cast<BuildVectorSDNode>(Op1)) {
+    if (ConstantFPSDNode *CN = BV->getConstantFPSplatNode())
+      if (isSignBitValue(CN->getConstantFPValue()))
+        return Op0;
+
+  } else if (auto *C = getTargetConstantFromNode(Op1)) {
+    if (C->getType()->isVectorTy()) {
+      if (auto *SplatV = C->getSplatValue())
+        if (isSignBitValue(cast<ConstantFP>(SplatV)))
+          return Op0;
+    } else if (auto *FPConst = dyn_cast<ConstantFP>(C))
+      if (isSignBitValue(FPConst))
+        return Op0;
+  }
+  return SDValue();
+}
+
 /// Do target-specific dag combines on floating point negations.
 static SDValue combineFneg(SDNode *N, SelectionDAG &DAG,
                            const X86Subtarget &Subtarget) {
-  EVT VT = N->getValueType(0);
+  EVT OrigVT = N->getValueType(0);
+  SDValue Arg = isFNEG(N);
+  assert(Arg.getNode() && "N is expected to be an FNEG node");
+
+  EVT VT = Arg.getValueType();
   EVT SVT = VT.getScalarType();
-  SDValue Arg = N->getOperand(0);
   SDLoc DL(N);
 
   // Let legalize expand this if it isn't a legal type yet.
@@ -30395,40 +30426,30 @@ static SDValue combineFneg(SDNode *N, SelectionDAG &DAG,
   if (Arg.getOpcode() == ISD::FMUL && (SVT == MVT::f32 || SVT == MVT::f64) &&
       Arg->getFlags()->hasNoSignedZeros() && Subtarget.hasAnyFMA()) {
     SDValue Zero = DAG.getConstantFP(0.0, DL, VT);
-    return DAG.getNode(X86ISD::FNMSUB, DL, VT, Arg.getOperand(0),
-                       Arg.getOperand(1), Zero);
+    SDValue NewNode = DAG.getNode(X86ISD::FNMSUB, DL, VT, Arg.getOperand(0),
+                                  Arg.getOperand(1), Zero);
+    return DAG.getBitcast(OrigVT, NewNode);
   }
 
   // If we're negating a FMA node, then we can adjust the
   // instruction to include the extra negation.
+  unsigned NewOpcode = 0;
   if (Arg.hasOneUse()) {
     switch (Arg.getOpcode()) {
-    case X86ISD::FMADD:
-      return DAG.getNode(X86ISD::FNMSUB, DL, VT, Arg.getOperand(0),
-                         Arg.getOperand(1), Arg.getOperand(2));
-    case X86ISD::FMSUB:
-      return DAG.getNode(X86ISD::FNMADD, DL, VT, Arg.getOperand(0),
-                         Arg.getOperand(1), Arg.getOperand(2));
-    case X86ISD::FNMADD:
-      return DAG.getNode(X86ISD::FMSUB, DL, VT, Arg.getOperand(0),
-                         Arg.getOperand(1), Arg.getOperand(2));
-    case X86ISD::FNMSUB:
-      return DAG.getNode(X86ISD::FMADD, DL, VT, Arg.getOperand(0),
-                         Arg.getOperand(1), Arg.getOperand(2));
-    case X86ISD::FMADD_RND:
-      return DAG.getNode(X86ISD::FNMSUB_RND, DL, VT, Arg.getOperand(0),
-                         Arg.getOperand(1), Arg.getOperand(2), Arg.getOperand(3));
-    case X86ISD::FMSUB_RND:
-      return DAG.getNode(X86ISD::FNMADD_RND, DL, VT, Arg.getOperand(0),
-                         Arg.getOperand(1), Arg.getOperand(2), Arg.getOperand(3));
-    case X86ISD::FNMADD_RND:
-      return DAG.getNode(X86ISD::FMSUB_RND, DL, VT, Arg.getOperand(0),
-                         Arg.getOperand(1), Arg.getOperand(2), Arg.getOperand(3));
-    case X86ISD::FNMSUB_RND:
-      return DAG.getNode(X86ISD::FMADD_RND, DL, VT, Arg.getOperand(0),
-                         Arg.getOperand(1), Arg.getOperand(2), Arg.getOperand(3));
+    case X86ISD::FMADD:      NewOpcode = X86ISD::FNMSUB;     break;
+    case X86ISD::FMSUB:      NewOpcode = X86ISD::FNMADD;     break;
+    case X86ISD::FNMADD:     NewOpcode = X86ISD::FMSUB;      break;
+    case X86ISD::FNMSUB:     NewOpcode = X86ISD::FMADD;      break;
+    case X86ISD::FMADD_RND:  NewOpcode = X86ISD::FNMSUB_RND; break;
+    case X86ISD::FMSUB_RND:  NewOpcode = X86ISD::FNMADD_RND; break;
+    case X86ISD::FNMADD_RND: NewOpcode = X86ISD::FMSUB_RND;  break;
+    case X86ISD::FNMSUB_RND: NewOpcode = X86ISD::FMADD_RND;  break;
     }
   }
+  if (NewOpcode)
+    return DAG.getBitcast(OrigVT, DAG.getNode(NewOpcode, DL, VT,
+                                              Arg.getNode()->ops()));
+
   return SDValue();
 }
 
@@ -30456,42 +30477,28 @@ static SDValue lowerX86FPLogicOp(SDNode *N, SelectionDAG &DAG,
   return SDValue();
 }
 
-/// Returns true if the node \p N is FNEG(x) or FXOR (x, 0x80000000).
-bool isFNEG(const SDNode *N) {
-  if (N->getOpcode() == ISD::FNEG)
-    return true;
+static SDValue combineXor(SDNode *N, SelectionDAG &DAG,
+                                 TargetLowering::DAGCombinerInfo &DCI,
+                                 const X86Subtarget &Subtarget) {
+  if (SDValue Cmp = foldVectorXorShiftIntoCmp(N, DAG, Subtarget))
+    return Cmp;
 
-  if (N->getOpcode() == X86ISD::FXOR) {
-    unsigned EltBits = N->getSimpleValueType(0).getScalarSizeInBits();
-    SDValue Op1 = N->getOperand(1);
+  if (DCI.isBeforeLegalizeOps())
+    return SDValue();
 
-    auto isSignBitValue = [&](const ConstantFP *C) {
-      return C->getValueAPF().bitcastToAPInt() == APInt::getSignBit(EltBits);
-    };
+  if (SDValue RV = foldXorTruncShiftIntoCmp(N, DAG))
+    return RV;
 
-    // There is more than one way to represent the same constant on
-    // the different X86 targets. The type of the node may also depend on size.
-    //  - load scalar value and broadcast
-    //  - BUILD_VECTOR node
-    //  - load from a constant pool.
-    // We check all variants here.
-    if (Op1.getOpcode() == X86ISD::VBROADCAST) {
-      if (auto *C = getTargetConstantFromNode(Op1.getOperand(0)))
-        return isSignBitValue(cast<ConstantFP>(C));
+  if (Subtarget.hasCMov())
+    if (SDValue RV = combineIntegerAbs(N, DAG))
+      return RV;
 
-    } else if (BuildVectorSDNode *BV = dyn_cast<BuildVectorSDNode>(Op1)) {
-      if (ConstantFPSDNode *CN = BV->getConstantFPSplatNode())
-        return isSignBitValue(CN->getConstantFPValue());
+  if (SDValue FPLogic = convertIntLogicToFPLogic(N, DAG, Subtarget))
+    return FPLogic;
 
-    } else if (auto *C = getTargetConstantFromNode(Op1)) {
-      if (C->getType()->isVectorTy()) {
-        if (auto *SplatV = C->getSplatValue())
-          return isSignBitValue(cast<ConstantFP>(SplatV));
-      } else if (auto *FPConst = dyn_cast<ConstantFP>(C))
-        return isSignBitValue(FPConst);
-    }
-  }
-  return false;
+  if (isFNEG(N))
+    return combineFneg(N, DAG, Subtarget);
+  return SDValue();
 }
 
 /// Do target-specific dag combines on X86ISD::FOR and X86ISD::FXOR nodes.
@@ -30921,18 +30928,20 @@ static SDValue combineFMA(SDNode *N, SelectionDAG &DAG,
   SDValue B = N->getOperand(1);
   SDValue C = N->getOperand(2);
 
-  bool NegA = isFNEG(A.getNode());
-  bool NegB = isFNEG(B.getNode());
-  bool NegC = isFNEG(C.getNode());
+  auto invertIfNegative = [](SDValue &V) {
+    if (SDValue NegVal = isFNEG(V.getNode())) {
+      V = NegVal;
+      return true;
+    }
+    return false;
+  };
+
+  bool NegA = invertIfNegative(A);
+  bool NegB = invertIfNegative(B);
+  bool NegC = invertIfNegative(C);
 
   // Negative multiplication when NegA xor NegB
   bool NegMul = (NegA != NegB);
-  if (NegA)
-    A = A.getOperand(0);
-  if (NegB)
-    B = B.getOperand(0);
-  if (NegC)
-    C = C.getOperand(0);
 
   unsigned NewOpcode;
   if (!NegMul)
