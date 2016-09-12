@@ -25,6 +25,7 @@ class SOP1_Pseudo <string opName, dag outs, dag ins,
   let SALU = 1;
   let SOP1 = 1;
   let SchedRW = [WriteSALU];
+  let UseNamedOperandTable = 1;
 
   string Mnemonic = opName;
   string AsmOperands = asmOps;
@@ -56,24 +57,24 @@ class SOP1_Real<bits<8> op, SOP1_Pseudo ps> :
 }
 
 class SOP1_32 <string opName, list<dag> pattern=[]> : SOP1_Pseudo <
-  opName, (outs SReg_32:$sdst), (ins SSrc_32:$src0),
+  opName, (outs SReg_32:$sdst), (ins SSrc_b32:$src0),
   "$sdst, $src0", pattern
 >;
 
 class SOP1_64 <string opName, list<dag> pattern=[]> : SOP1_Pseudo <
-  opName, (outs SReg_64:$sdst), (ins SSrc_64:$src0),
+  opName, (outs SReg_64:$sdst), (ins SSrc_b64:$src0),
   "$sdst, $src0", pattern
 >;
 
 // 64-bit input, 32-bit output.
 class SOP1_32_64 <string opName, list<dag> pattern=[]> : SOP1_Pseudo <
-  opName, (outs SReg_32:$sdst), (ins SSrc_64:$src0),
+  opName, (outs SReg_32:$sdst), (ins SSrc_b64:$src0),
   "$sdst, $src0", pattern
 >;
 
 // 32-bit input, 64-bit output.
 class SOP1_64_32 <string opName, list<dag> pattern=[]> : SOP1_Pseudo <
-  opName, (outs SReg_64:$sdst), (ins SSrc_32:$src0),
+  opName, (outs SReg_64:$sdst), (ins SSrc_b32:$src0),
   "$sdst, $src0", pattern
 >;
 
@@ -253,22 +254,22 @@ class SOP2_Real<bits<7> op, SOP2_Pseudo ps> :
 
 
 class SOP2_32 <string opName, list<dag> pattern=[]> : SOP2_Pseudo <
-  opName, (outs SReg_32:$sdst), (ins SSrc_32:$src0, SSrc_32:$src1),
+  opName, (outs SReg_32:$sdst), (ins SSrc_b32:$src0, SSrc_b32:$src1),
   "$sdst, $src0, $src1", pattern
 >;
 
 class SOP2_64 <string opName, list<dag> pattern=[]> : SOP2_Pseudo <
-  opName, (outs SReg_64:$sdst), (ins SSrc_64:$src0, SSrc_64:$src1),
+  opName, (outs SReg_64:$sdst), (ins SSrc_b64:$src0, SSrc_b64:$src1),
   "$sdst, $src0, $src1", pattern
 >;
 
 class SOP2_64_32 <string opName, list<dag> pattern=[]> : SOP2_Pseudo <
-  opName, (outs SReg_64:$sdst), (ins SSrc_64:$src0, SSrc_32:$src1),
+  opName, (outs SReg_64:$sdst), (ins SSrc_b64:$src0, SSrc_b32:$src1),
   "$sdst, $src0, $src1", pattern
 >;
 
 class SOP2_64_32_32 <string opName, list<dag> pattern=[]> : SOP2_Pseudo <
-  opName, (outs SReg_64:$sdst), (ins SSrc_32:$src0, SSrc_32:$src1),
+  opName, (outs SReg_64:$sdst), (ins SSrc_b32:$src0, SSrc_b32:$src1),
   "$sdst, $src0, $src1", pattern
 >;
 
@@ -276,25 +277,27 @@ let Defs = [SCC] in { // Carry out goes to SCC
 let isCommutable = 1 in {
 def S_ADD_U32 : SOP2_32 <"s_add_u32">;
 def S_ADD_I32 : SOP2_32 <"s_add_i32",
-  [(set i32:$sdst, (add SSrc_32:$src0, SSrc_32:$src1))]
+  [(set i32:$sdst, (add SSrc_b32:$src0, SSrc_b32:$src1))]
 >;
 } // End isCommutable = 1
 
 def S_SUB_U32 : SOP2_32 <"s_sub_u32">;
 def S_SUB_I32 : SOP2_32 <"s_sub_i32",
-  [(set i32:$sdst, (sub SSrc_32:$src0, SSrc_32:$src1))]
+  [(set i32:$sdst, (sub SSrc_b32:$src0, SSrc_b32:$src1))]
 >;
 
 let Uses = [SCC] in { // Carry in comes from SCC
 let isCommutable = 1 in {
 def S_ADDC_U32 : SOP2_32 <"s_addc_u32",
-  [(set i32:$sdst, (adde (i32 SSrc_32:$src0), (i32 SSrc_32:$src1)))]>;
+  [(set i32:$sdst, (adde (i32 SSrc_b32:$src0), (i32 SSrc_b32:$src1)))]>;
 } // End isCommutable = 1
 
 def S_SUBB_U32 : SOP2_32 <"s_subb_u32",
-  [(set i32:$sdst, (sube (i32 SSrc_32:$src0), (i32 SSrc_32:$src1)))]>;
+  [(set i32:$sdst, (sube (i32 SSrc_b32:$src0), (i32 SSrc_b32:$src1)))]>;
 } // End Uses = [SCC]
 
+
+let isCommutable = 1 in {
 def S_MIN_I32 : SOP2_32 <"s_min_i32",
   [(set i32:$sdst, (smin i32:$src0, i32:$src1))]
 >;
@@ -307,6 +310,7 @@ def S_MAX_I32 : SOP2_32 <"s_max_i32",
 def S_MAX_U32 : SOP2_32 <"s_max_u32",
   [(set i32:$sdst, (umax i32:$src0, i32:$src1))]
 >;
+} // End isCommutable = 1
 } // End Defs = [SCC]
 
 
@@ -316,6 +320,7 @@ let Uses = [SCC] in {
 } // End Uses = [SCC]
 
 let Defs = [SCC] in {
+let isCommutable = 1 in {
 def S_AND_B32 : SOP2_32 <"s_and_b32",
   [(set i32:$sdst, (and i32:$src0, i32:$src1))]
 >;
@@ -339,6 +344,8 @@ def S_XOR_B32 : SOP2_32 <"s_xor_b32",
 def S_XOR_B64 : SOP2_64 <"s_xor_b64",
   [(set i64:$sdst, (xor i64:$src0, i64:$src1))]
 >;
+} // End isCommutable = 1
+
 def S_ANDN2_B32 : SOP2_32 <"s_andn2_b32">;
 def S_ANDN2_B64 : SOP2_64 <"s_andn2_b64">;
 def S_ORN2_B32 : SOP2_32 <"s_orn2_b32">;
@@ -379,8 +386,9 @@ def S_BFM_B32 : SOP2_32 <"s_bfm_b32",
   [(set i32:$sdst, (AMDGPUbfm i32:$src0, i32:$src1))]>;
 def S_BFM_B64 : SOP2_64_32_32 <"s_bfm_b64">;
 def S_MUL_I32 : SOP2_32 <"s_mul_i32",
-  [(set i32:$sdst, (mul i32:$src0, i32:$src1))]
->;
+  [(set i32:$sdst, (mul i32:$src0, i32:$src1))]> {
+  let isCommutable = 1;
+}
 
 } // End AddedComplexity = 1
 
@@ -606,13 +614,13 @@ class SOPC_Helper <bits<7> op, RegisterOperand rc, ValueType vt,
 }
 
 class SOPC_CMP_32<bits<7> op, string opName, PatLeaf cond = COND_NULL>
-  : SOPC_Helper<op, SSrc_32, i32, opName, cond>;
+  : SOPC_Helper<op, SSrc_b32, i32, opName, cond>;
 
 class SOPC_32<bits<7> op, string opName, list<dag> pattern = []>
-  : SOPC_Base<op, SSrc_32, SSrc_32, opName, pattern>;
+  : SOPC_Base<op, SSrc_b32, SSrc_b32, opName, pattern>;
 
 class SOPC_64_32<bits<7> op, string opName, list<dag> pattern = []>
-  : SOPC_Base<op, SSrc_64, SSrc_32, opName, pattern>;
+  : SOPC_Base<op, SSrc_b64, SSrc_b32, opName, pattern>;
 
 
 def S_CMP_EQ_I32 : SOPC_CMP_32 <0x00, "s_cmp_eq_i32", COND_EQ>;

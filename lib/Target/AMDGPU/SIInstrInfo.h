@@ -86,6 +86,10 @@ private:
   unsigned findUsedSGPR(const MachineInstr &MI, int OpIndices[3]) const;
 
 protected:
+  bool swapSourceModifiers(MachineInstr &MI,
+                           MachineOperand &Src0, unsigned Src0OpName,
+                           MachineOperand &Src1, unsigned Src1OpName) const;
+
   MachineInstr *commuteInstructionImpl(MachineInstr &MI, bool NewMI,
                                        unsigned OpIdx0,
                                        unsigned OpIdx1) const override;
@@ -144,7 +148,12 @@ public:
   unsigned getMovOpcode(const TargetRegisterClass *DstRC) const;
 
   LLVM_READONLY
-  int commuteOpcode(const MachineInstr &MI) const;
+  int commuteOpcode(unsigned Opc) const;
+
+  LLVM_READONLY
+  inline int commuteOpcode(const MachineInstr &MI) const {
+    return commuteOpcode(MI.getOpcode());
+  }
 
   bool findCommutedOpIndices(MachineInstr &MI, unsigned &SrcOpIdx1,
                              unsigned &SrcOpIdx2) const override;
@@ -356,6 +365,14 @@ public:
     return get(Opcode).TSFlags & SIInstrFlags::VGPRSpill;
   }
 
+  static bool isSGPRSpill(const MachineInstr &MI) {
+    return MI.getDesc().TSFlags & SIInstrFlags::SGPRSpill;
+  }
+
+  bool isSGPRSpill(uint16_t Opcode) const {
+    return get(Opcode).TSFlags & SIInstrFlags::SGPRSpill;
+  }
+
   static bool isDPP(const MachineInstr &MI) {
     return MI.getDesc().TSFlags & SIInstrFlags::DPP;
   }
@@ -540,6 +557,14 @@ public:
   const MCInstrDesc &getMCOpcodeFromPseudo(unsigned Opcode) const {
     return get(pseudoToMCOpcode(Opcode));
   }
+
+  unsigned isStackAccess(const MachineInstr &MI, int &FrameIndex) const;
+  unsigned isSGPRStackAccess(const MachineInstr &MI, int &FrameIndex) const;
+
+  unsigned isLoadFromStackSlot(const MachineInstr &MI,
+                               int &FrameIndex) const override;
+  unsigned isStoreToStackSlot(const MachineInstr &MI,
+                              int &FrameIndex) const override;
 
   unsigned getInstSizeInBytes(const MachineInstr &MI) const override;
 

@@ -26,7 +26,8 @@ public:
 
   void closeViewFile(OwnedStream OS) override;
 
-  Error createIndexFile(ArrayRef<StringRef> SourceFiles) override;
+  Error createIndexFile(ArrayRef<StringRef> SourceFiles,
+                        const coverage::CoverageMapping &Coverage) override;
 
   CoveragePrinterText(const CoverageViewOptions &Opts)
       : CoveragePrinter(Opts) {}
@@ -72,15 +73,15 @@ class SourceCoverageViewText : public SourceCoverageView {
 
   void renderCellInTitle(raw_ostream &OS, StringRef CellText) override;
 
-  void renderTableHeader(raw_ostream &OS, unsigned IndentLevel) override;
+  void renderTableHeader(raw_ostream &OS, unsigned FirstUncoveredLineNo,
+                         unsigned IndentLevel) override;
 
 public:
   SourceCoverageViewText(StringRef SourceName, const MemoryBuffer &File,
                          const CoverageViewOptions &Options,
-                         coverage::CoverageData &&CoverageInfo,
-                         bool FunctionView)
-      : SourceCoverageView(SourceName, File, Options, std::move(CoverageInfo),
-                           FunctionView) {}
+                         coverage::CoverageData &&CoverageInfo)
+      : SourceCoverageView(SourceName, File, Options, std::move(CoverageInfo)) {
+  }
 };
 
 } // namespace llvm

@@ -88,6 +88,7 @@ static void PrintHelp() {
 
   for (size_t F = 0; F < kNumFlags; F++) {
     const auto &D = FlagDescriptions[F];
+    if (strstr(D.Description, "internal flag") == D.Description) continue;
     Printf(" %s", D.Name);
     for (size_t i = 0, n = MaxFlagLen - strlen(D.Name); i < n; i++)
       Printf(" ");
@@ -395,7 +396,6 @@ int FuzzerDriver(int *argc, char ***argv, UserCallback Callback) {
   Options.MutateDepth = Flags.mutate_depth;
   Options.UseCounters = Flags.use_counters;
   Options.UseIndirCalls = Flags.use_indir_calls;
-  Options.UseTraces = Flags.use_traces;
   Options.UseMemcmp = Flags.use_memcmp;
   Options.UseMemmem = Flags.use_memmem;
   Options.ShuffleAtStartUp = Flags.shuffle;

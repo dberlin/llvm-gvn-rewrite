@@ -29,7 +29,8 @@ void CoveragePrinter::StreamDestructor::operator()(raw_ostream *OS) const {
 }
 
 std::string CoveragePrinter::getOutputPath(StringRef Path, StringRef Extension,
-                                           bool InToplevel, bool Relative) {
+                                           bool InToplevel,
+                                           bool Relative) const {
   assert(Extension.size() && "The file extension may not be empty");
 
   SmallString<256> FullPath;
@@ -53,7 +54,7 @@ std::string CoveragePrinter::getOutputPath(StringRef Path, StringRef Extension,
 
 Expected<CoveragePrinter::OwnedStream>
 CoveragePrinter::createOutputStream(StringRef Path, StringRef Extension,
-                                    bool InToplevel) {
+                                    bool InToplevel) const {
   if (!Opts.hasOutputDirectory())
     return OwnedStream(&outs());
 
@@ -80,6 +81,25 @@ CoveragePrinter::create(const CoverageViewOptions &Opts) {
     return llvm::make_unique<CoveragePrinterHTML>(Opts);
   }
   llvm_unreachable("Unknown coverage output format!");
+}
+
+unsigned SourceCoverageView::getFirstUncoveredLineNo() {
+  auto CheckIfUncovered = [](const coverage::CoverageSegment &S) {
+    return S.HasCount && S.Count == 0;
+  };
+  // L is less than R if (1) it's an uncovered segment (has a 0 count), and (2)
+  // either R is not an uncovered segment, or L has a lower line number than R.
+  const auto MinSegIt =
+      std::min_element(CoverageInfo.begin(), CoverageInfo.end(),
+                       [CheckIfUncovered](const coverage::CoverageSegment &L,
+                                          const coverage::CoverageSegment &R) {
+                         return (CheckIfUncovered(L) &&
+                                 (!CheckIfUncovered(R) || (L.Line < R.Line)));
+                       });
+  if (CheckIfUncovered(*MinSegIt))
+    return (*MinSegIt).Line;
+  // There is no uncovered line, return zero.
+  return 0;
 }
 
 std::string SourceCoverageView::formatCount(uint64_t N) {
@@ -110,17 +130,28 @@ bool SourceCoverageView::hasSubViews() const {
 std::unique_ptr<SourceCoverageView>
 SourceCoverageView::create(StringRef SourceName, const MemoryBuffer &File,
                            const CoverageViewOptions &Options,
-                           coverage::CoverageData &&CoverageInfo,
-                           bool FunctionView) {
+                           coverage::CoverageData &&CoverageInfo) {
   switch (Options.Format) {
   case CoverageViewOptions::OutputFormat::Text:
     return llvm::make_unique<SourceCoverageViewText>(
-        SourceName, File, Options, std::move(CoverageInfo), FunctionView);
+        SourceName, File, Options, std::move(CoverageInfo));
   case CoverageViewOptions::OutputFormat::HTML:
     return llvm::make_unique<SourceCoverageViewHTML>(
-        SourceName, File, Options, std::move(CoverageInfo), FunctionView);
+        SourceName, File, Options, std::move(CoverageInfo));
   }
   llvm_unreachable("Unknown coverage output format!");
+}
+
+std::string SourceCoverageView::getSourceName() const {
+  SmallString<128> SourceText(SourceName);
+  sys::path::remove_dots(SourceText, /*remove_dot_dots=*/true);
+  sys::path::native(SourceText);
+  return SourceText.str();
+}
+
+std::string SourceCoverageView::getVerboseSourceName() const {
+  return getSourceName() + " (Binary: " +
+         sys::path::filename(getOptions().ObjectFilename).str() + ")";
 }
 
 void SourceCoverageView::addExpansion(
@@ -138,14 +169,15 @@ void SourceCoverageView::addInstantiation(
 void SourceCoverageView::print(raw_ostream &OS, bool WholeFile,
                                bool ShowSourceName, unsigned ViewDepth) {
   if (WholeFile)
-    renderCellInTitle(OS, "Code Coverage Report");
+    renderCellInTitle(OS, "Coverage Report");
 
   renderViewHeader(OS);
 
   if (ShowSourceName)
     renderSourceName(OS, WholeFile);
 
-  renderTableHeader(OS, ViewDepth);
+  renderTableHeader(OS, getFirstUncoveredLineNo(), ViewDepth);
+
   // We need the expansions and instantiations sorted so we can go through them
   // while we iterate lines.
   std::sort(ExpansionSubViews.begin(), ExpansionSubViews.end());

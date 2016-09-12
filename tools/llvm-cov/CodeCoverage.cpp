@@ -210,9 +210,9 @@ CodeCoverageTool::createFunctionView(const FunctionRecord &Function,
     return nullptr;
 
   auto Expansions = FunctionCoverage.getExpansions();
-  auto View = SourceCoverageView::create(
-      getSymbolForHumans(Function.Name), SourceBuffer.get(), ViewOpts,
-      std::move(FunctionCoverage), /*FunctionView=*/true);
+  auto View = SourceCoverageView::create(getSymbolForHumans(Function.Name),
+                                         SourceBuffer.get(), ViewOpts,
+                                         std::move(FunctionCoverage));
   attachExpansionSubViews(*View, Expansions, Coverage);
 
   return View;
@@ -238,7 +238,7 @@ CodeCoverageTool::createSourceFileView(StringRef SourceFile,
     auto SubViewExpansions = SubViewCoverage.getExpansions();
     auto SubView = SourceCoverageView::create(
         getSymbolForHumans(Function->Name), SourceBuffer.get(), ViewOpts,
-        std::move(SubViewCoverage), /*FunctionView=*/true);
+        std::move(SubViewCoverage));
     attachExpansionSubViews(*SubView, SubViewExpansions, Coverage);
 
     if (SubView) {
@@ -669,7 +669,7 @@ int CodeCoverageTool::show(int argc, const char **argv,
 
   // Show files
   bool ShowFilenames =
-      (SourceFiles.size() != 1) ||
+      (SourceFiles.size() != 1) || ViewOpts.hasOutputDirectory() ||
       (ViewOpts.Format == CoverageViewOptions::OutputFormat::HTML);
 
   if (SourceFiles.empty())
@@ -679,7 +679,7 @@ int CodeCoverageTool::show(int argc, const char **argv,
 
   // Create an index out of the source files.
   if (ViewOpts.hasOutputDirectory()) {
-    if (Error E = Printer->createIndexFile(SourceFiles)) {
+    if (Error E = Printer->createIndexFile(SourceFiles, *Coverage)) {
       error("Could not create index file!", toString(std::move(E)));
       return 1;
     }
@@ -730,7 +730,7 @@ int CodeCoverageTool::report(int argc, const char **argv,
   if (!Coverage)
     return 1;
 
-  CoverageReport Report(ViewOpts, std::move(Coverage));
+  CoverageReport Report(ViewOpts, *Coverage.get());
   if (SourceFiles.empty())
     Report.renderFileReports(llvm::outs());
   else

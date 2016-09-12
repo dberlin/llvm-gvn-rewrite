@@ -197,5 +197,9 @@ int main(int argc, char **argv) {
   sys::Process::PreventCoreFiles();
 #endif
 
-  return D.run();
+  if (Error E = D.run()) {
+    errs() << toString(std::move(E));
+    return 1;
+  }
+  return 0;
 }

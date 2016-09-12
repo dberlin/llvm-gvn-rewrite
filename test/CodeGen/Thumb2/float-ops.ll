@@ -4,7 +4,6 @@
 ; RUN: llc < %s -mtriple=thumbv7-none-eabihf -mcpu=cortex-a8 | FileCheck %s -check-prefix=CHECK -check-prefix=HARD -check-prefix=DP -check-prefix=VFP4-ALL -check-prefix=VFP4-DP
 
 define float @add_f(float %a, float %b) {
-
 entry:
 ; CHECK-LABEL: add_f:
 ; NONE: bl __aeabi_fadd
@@ -84,7 +83,7 @@ define float @rem_f(float %a, float %b) {
 entry:
 ; CHECK-LABEL: rem_f:
 ; NONE: bl fmodf
-; HARD: bl fmodf
+; HARD: b fmodf
   %0 = frem float %a, %b
   ret float %0
 }
@@ -93,7 +92,7 @@ define double @rem_d(double %a, double %b) {
 entry:
 ; CHECK-LABEL: rem_d:
 ; NONE: bl fmod
-; HARD: bl fmod
+; HARD: b fmod
   %0 = frem double %a, %b
   ret double %0
 }
@@ -260,9 +259,9 @@ define i64 @bitcast_d_to_i(double %a) {
 
 define float @select_f(float %a, float %b, i1 %c) {
 ; CHECK-LABEL: select_f:
-; NONE: tst.w   r2, #1
+; NONE: lsls    r2, r2, #31
 ; NONE: moveq   r0, r1
-; HARD: tst.w   r0, #1
+; HARD: lsls    r0, r0, #31
 ; VFP4-ALL: vmovne.f32      s1, s0
 ; VFP4-ALL: vmov.f32        s0, s1
 ; FP-ARMv8: vseleq.f32 s0, s1, s0
@@ -272,18 +271,18 @@ define float @select_f(float %a, float %b, i1 %c) {
 
 define double @select_d(double %a, double %b, i1 %c) {
 ; CHECK-LABEL: select_d:
-; NONE: ldr.w   [[REG:r[0-9]+]], [sp]
-; NONE: ands    [[REG]], [[REG]], #1
+; NONE: ldr{{(.w)?}}     [[REG:r[0-9]+]], [sp]
+; NONE: lsls{{(.w)?}}    [[REG]], [[REG]], #31
 ; NONE: moveq   r0, r2
 ; NONE: moveq   r1, r3
-; SP: ands r0, r0, #1
+; SP: lsls r0, r0, #31
 ; SP-DAG: vmov [[ALO:r[0-9]+]], [[AHI:r[0-9]+]], d0
 ; SP-DAG: vmov [[BLO:r[0-9]+]], [[BHI:r[0-9]+]], d1
 ; SP: itt ne
 ; SP-DAG: movne [[BLO]], [[ALO]]
 ; SP-DAG: movne [[BHI]], [[AHI]]
 ; SP: vmov d0, [[BLO]], [[BHI]]
-; DP: tst.w   r0, #1
+; DP: lsls   r0, r0, #31
 ; VFP4-DP: vmovne.f64      d1, d0
 ; VFP4-DP: vmov.f64        d0, d1
 ; FP-ARMV8: vseleq.f64      d0, d1, d0

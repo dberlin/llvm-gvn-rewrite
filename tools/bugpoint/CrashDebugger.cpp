@@ -66,16 +66,15 @@ class ReducePassList : public ListReducer<std::string> {
 public:
   ReducePassList(BugDriver &bd) : BD(bd) {}
 
-  // doTest - Return true iff running the "removed" passes succeeds, and
-  // running the "Kept" passes fail when run on the output of the "removed"
-  // passes.  If we return true, we update the current module of bugpoint.
-  //
-  TestResult doTest(std::vector<std::string> &Removed,
-                    std::vector<std::string> &Kept) override;
+  // Return true iff running the "removed" passes succeeds, and running the
+  // "Kept" passes fail when run on the output of the "removed" passes.  If we
+  // return true, we update the current module of bugpoint.
+  Expected<TestResult> doTest(std::vector<std::string> &Removed,
+                              std::vector<std::string> &Kept) override;
 };
 }
 
-ReducePassList::TestResult
+Expected<ReducePassList::TestResult>
 ReducePassList::doTest(std::vector<std::string> &Prefix,
                        std::vector<std::string> &Suffix) {
   std::string PrefixOutput;
@@ -127,8 +126,8 @@ public:
                                 bool (*testFn)(const BugDriver &, Module *))
       : BD(bd), TestFn(testFn) {}
 
-  TestResult doTest(std::vector<GlobalVariable *> &Prefix,
-                    std::vector<GlobalVariable *> &Kept) override {
+  Expected<TestResult> doTest(std::vector<GlobalVariable *> &Prefix,
+                              std::vector<GlobalVariable *> &Kept) override {
     if (!Kept.empty() && TestGlobalVariables(Kept))
       return KeepSuffix;
     if (!Prefix.empty() && TestGlobalVariables(Prefix))
@@ -196,8 +195,8 @@ public:
                           bool (*testFn)(const BugDriver &, Module *))
       : BD(bd), TestFn(testFn) {}
 
-  TestResult doTest(std::vector<Function *> &Prefix,
-                    std::vector<Function *> &Kept) override {
+  Expected<TestResult> doTest(std::vector<Function *> &Prefix,
+                              std::vector<Function *> &Kept) override {
     if (!Kept.empty() && TestFuncs(Kept))
       return KeepSuffix;
     if (!Prefix.empty() && TestFuncs(Prefix))
@@ -369,8 +368,8 @@ public:
                        bool (*testFn)(const BugDriver &, Module *))
       : BD(BD), TestFn(testFn) {}
 
-  TestResult doTest(std::vector<const BasicBlock *> &Prefix,
-                    std::vector<const BasicBlock *> &Kept) override {
+  Expected<TestResult> doTest(std::vector<const BasicBlock *> &Prefix,
+                              std::vector<const BasicBlock *> &Kept) override {
     if (!Kept.empty() && TestBlocks(Kept))
       return KeepSuffix;
     if (!Prefix.empty() && TestBlocks(Prefix))
@@ -490,8 +489,8 @@ public:
                              bool Direction)
       : BD(bd), TestFn(testFn), Direction(Direction) {}
 
-  TestResult doTest(std::vector<const BasicBlock *> &Prefix,
-                    std::vector<const BasicBlock *> &Kept) override {
+  Expected<TestResult> doTest(std::vector<const BasicBlock *> &Prefix,
+                              std::vector<const BasicBlock *> &Kept) override {
     if (!Kept.empty() && TestBlocks(Kept))
       return KeepSuffix;
     if (!Prefix.empty() && TestBlocks(Prefix))
@@ -597,8 +596,8 @@ public:
   ReduceSimplifyCFG(BugDriver &bd, bool (*testFn)(const BugDriver &, Module *))
       : BD(bd), TestFn(testFn), TTI(bd.getProgram()->getDataLayout()) {}
 
-  TestResult doTest(std::vector<const BasicBlock *> &Prefix,
-                    std::vector<const BasicBlock *> &Kept) override {
+  Expected<TestResult> doTest(std::vector<const BasicBlock *> &Prefix,
+                              std::vector<const BasicBlock *> &Kept) override {
     if (!Kept.empty() && TestBlocks(Kept))
       return KeepSuffix;
     if (!Prefix.empty() && TestBlocks(Prefix))
@@ -691,8 +690,8 @@ public:
                              bool (*testFn)(const BugDriver &, Module *))
       : BD(bd), TestFn(testFn) {}
 
-  TestResult doTest(std::vector<const Instruction *> &Prefix,
-                    std::vector<const Instruction *> &Kept) override {
+  Expected<TestResult> doTest(std::vector<const Instruction *> &Prefix,
+                              std::vector<const Instruction *> &Kept) override {
     if (!Kept.empty() && TestInsts(Kept))
       return KeepSuffix;
     if (!Prefix.empty() && TestInsts(Prefix))
@@ -767,8 +766,8 @@ public:
                         bool (*testFn)(const BugDriver &, Module *))
       : BD(bd), TestFn(testFn) {}
 
-  TestResult doTest(std::vector<std::string> &Prefix,
-                    std::vector<std::string> &Kept) override {
+  Expected<TestResult> doTest(std::vector<std::string> &Prefix,
+                              std::vector<std::string> &Kept) override {
     if (!Kept.empty() && TestNamedMDs(Kept))
       return KeepSuffix;
     if (!Prefix.empty() && TestNamedMDs(Prefix))
@@ -836,8 +835,8 @@ public:
                            bool (*testFn)(const BugDriver &, Module *))
       : BD(bd), TestFn(testFn) {}
 
-  TestResult doTest(std::vector<const MDNode *> &Prefix,
-                    std::vector<const MDNode *> &Kept) override {
+  Expected<TestResult> doTest(std::vector<const MDNode *> &Prefix,
+                              std::vector<const MDNode *> &Kept) override {
     if (!Kept.empty() && TestNamedMDOps(Kept))
       return KeepSuffix;
     if (!Prefix.empty() && TestNamedMDOps(Prefix))
@@ -898,9 +897,9 @@ bool ReduceCrashingNamedMDOps::TestNamedMDOps(
   return false;
 }
 
-static void ReduceGlobalInitializers(BugDriver &BD,
-                                     bool (*TestFn)(const BugDriver &,
-                                                    Module *)) {
+static Error ReduceGlobalInitializers(BugDriver &BD,
+                                      bool (*TestFn)(const BugDriver &,
+                                                     Module *)) {
   if (BD.getProgram()->global_begin() != BD.getProgram()->global_end()) {
     // Now try to reduce the number of global variable initializers in the
     // module to something small.
@@ -942,7 +941,10 @@ static void ReduceGlobalInitializers(BugDriver &BD,
                  << "variables in the testcase\n";
 
           unsigned OldSize = GVs.size();
-          ReduceCrashingGlobalVariables(BD, TestFn).reduceList(GVs);
+          Expected<bool> Result =
+              ReduceCrashingGlobalVariables(BD, TestFn).reduceList(GVs);
+          if (Error E = Result.takeError())
+            return E;
 
           if (GVs.size() < OldSize)
             BD.EmitProgressBitcode(BD.getProgram(), "reduced-global-variables");
@@ -950,9 +952,10 @@ static void ReduceGlobalInitializers(BugDriver &BD,
       }
     }
   }
+  return Error::success();
 }
 
-static void ReduceInsts(BugDriver &BD,
+static Error ReduceInsts(BugDriver &BD,
                         bool (*TestFn)(const BugDriver &, Module *)) {
   // Attempt to delete instructions using bisection. This should help out nasty
   // cases with large basic blocks where the problem is at one end.
@@ -964,13 +967,17 @@ static void ReduceInsts(BugDriver &BD,
           if (!isa<TerminatorInst>(&I))
             Insts.push_back(&I);
 
-    ReduceCrashingInstructions(BD, TestFn).reduceList(Insts);
+    Expected<bool> Result =
+        ReduceCrashingInstructions(BD, TestFn).reduceList(Insts);
+    if (Error E = Result.takeError())
+      return E;
   }
 
   unsigned Simplification = 2;
   do {
     if (BugpointIsInterrupted)
-      return;
+      // TODO: Should we distinguish this with an "interrupted error"?
+      return Error::success();
     --Simplification;
     outs() << "\n*** Attempting to reduce testcase by deleting instruc"
            << "tions: Simplification Level #" << Simplification << '\n';
@@ -1001,7 +1008,8 @@ static void ReduceInsts(BugDriver &BD,
               --InstructionsToSkipBeforeDeleting;
             } else {
               if (BugpointIsInterrupted)
-                return;
+                // TODO: Should this be some kind of interrupted error?
+                return Error::success();
 
               if (I->isEHPad() || I->getType()->isTokenTy())
                 continue;
@@ -1028,17 +1036,19 @@ static void ReduceInsts(BugDriver &BD,
 
   } while (Simplification);
   BD.EmitProgressBitcode(BD.getProgram(), "reduced-instructions");
+  return Error::success();
 }
 
 /// DebugACrash - Given a predicate that determines whether a component crashes
 /// on a program, try to destructively reduce the program while still keeping
 /// the predicate true.
-static bool DebugACrash(BugDriver &BD,
-                        bool (*TestFn)(const BugDriver &, Module *)) {
+static Error DebugACrash(BugDriver &BD,
+                         bool (*TestFn)(const BugDriver &, Module *)) {
   // See if we can get away with nuking some of the global variable initializers
   // in the program...
   if (!NoGlobalRM)
-    ReduceGlobalInitializers(BD, TestFn);
+    if (Error E = ReduceGlobalInitializers(BD, TestFn))
+      return E;
 
   // Now try to reduce the number of functions in the module to something small.
   std::vector<Function *> Functions;
@@ -1051,7 +1061,10 @@ static bool DebugACrash(BugDriver &BD,
               "in the testcase\n";
 
     unsigned OldSize = Functions.size();
-    ReduceCrashingFunctions(BD, TestFn).reduceList(Functions);
+    Expected<bool> Result =
+        ReduceCrashingFunctions(BD, TestFn).reduceList(Functions);
+    if (Error E = Result.takeError())
+      return E;
 
     if (Functions.size() < OldSize)
       BD.EmitProgressBitcode(BD.getProgram(), "reduced-function");
@@ -1065,8 +1078,13 @@ static bool DebugACrash(BugDriver &BD,
       for (BasicBlock &BB : F)
         Blocks.push_back(&BB);
     unsigned OldSize = Blocks.size();
-    ReduceCrashingConditionals(BD, TestFn, true).reduceList(Blocks);
-    ReduceCrashingConditionals(BD, TestFn, false).reduceList(Blocks);
+    Expected<bool> Result =
+        ReduceCrashingConditionals(BD, TestFn, true).reduceList(Blocks);
+    if (Error E = Result.takeError())
+      return E;
+    Result = ReduceCrashingConditionals(BD, TestFn, false).reduceList(Blocks);
+    if (Error E = Result.takeError())
+      return E;
     if (Blocks.size() < OldSize)
       BD.EmitProgressBitcode(BD.getProgram(), "reduced-conditionals");
   }
@@ -1082,7 +1100,9 @@ static bool DebugACrash(BugDriver &BD,
       for (BasicBlock &BB : F)
         Blocks.push_back(&BB);
     unsigned OldSize = Blocks.size();
-    ReduceCrashingBlocks(BD, TestFn).reduceList(Blocks);
+    Expected<bool> Result = ReduceCrashingBlocks(BD, TestFn).reduceList(Blocks);
+    if (Error E = Result.takeError())
+      return E;
     if (Blocks.size() < OldSize)
       BD.EmitProgressBitcode(BD.getProgram(), "reduced-blocks");
   }
@@ -1093,7 +1113,9 @@ static bool DebugACrash(BugDriver &BD,
       for (BasicBlock &BB : F)
         Blocks.push_back(&BB);
     unsigned OldSize = Blocks.size();
-    ReduceSimplifyCFG(BD, TestFn).reduceList(Blocks);
+    Expected<bool> Result = ReduceSimplifyCFG(BD, TestFn).reduceList(Blocks);
+    if (Error E = Result.takeError())
+      return E;
     if (Blocks.size() < OldSize)
       BD.EmitProgressBitcode(BD.getProgram(), "reduced-simplifycfg");
   }
@@ -1101,7 +1123,8 @@ static bool DebugACrash(BugDriver &BD,
   // Attempt to delete instructions using bisection. This should help out nasty
   // cases with large basic blocks where the problem is at one end.
   if (!BugpointIsInterrupted)
-    ReduceInsts(BD, TestFn);
+    if (Error E = ReduceInsts(BD, TestFn))
+      return E;
 
   if (!NoNamedMDRM) {
     if (!BugpointIsInterrupted) {
@@ -1111,7 +1134,10 @@ static bool DebugACrash(BugDriver &BD,
       std::vector<std::string> NamedMDNames;
       for (auto &NamedMD : BD.getProgram()->named_metadata())
         NamedMDNames.push_back(NamedMD.getName().str());
-      ReduceCrashingNamedMD(BD, TestFn).reduceList(NamedMDNames);
+      Expected<bool> Result =
+          ReduceCrashingNamedMD(BD, TestFn).reduceList(NamedMDNames);
+      if (Error E = Result.takeError())
+        return E;
     }
 
     if (!BugpointIsInterrupted) {
@@ -1121,7 +1147,10 @@ static bool DebugACrash(BugDriver &BD,
       for (auto &NamedMD : BD.getProgram()->named_metadata())
         for (auto op : NamedMD.operands())
           NamedMDOps.push_back(op);
-      ReduceCrashingNamedMDOps(BD, TestFn).reduceList(NamedMDOps);
+      Expected<bool> Result =
+          ReduceCrashingNamedMDOps(BD, TestFn).reduceList(NamedMDOps);
+      if (Error E = Result.takeError())
+        return E;
     }
     BD.EmitProgressBitcode(BD.getProgram(), "reduced-named-md");
   }
@@ -1142,7 +1171,7 @@ static bool DebugACrash(BugDriver &BD,
 
   BD.EmitProgressBitcode(BD.getProgram(), "reduced-simplified");
 
-  return false;
+  return Error::success();
 }
 
 static bool TestForOptimizerCrash(const BugDriver &BD, Module *M) {
@@ -1153,12 +1182,15 @@ static bool TestForOptimizerCrash(const BugDriver &BD, Module *M) {
 /// It attempts to prune down the testcase to something reasonable, and figure
 /// out exactly which pass is crashing.
 ///
-bool BugDriver::debugOptimizerCrash(const std::string &ID) {
+Error BugDriver::debugOptimizerCrash(const std::string &ID) {
   outs() << "\n*** Debugging optimizer crash!\n";
 
   // Reduce the list of passes which causes the optimizer to crash...
-  if (!BugpointIsInterrupted && !DontReducePassList)
-    ReducePassList(*this).reduceList(PassesToRun);
+  if (!BugpointIsInterrupted && !DontReducePassList) {
+    Expected<bool> Result = ReducePassList(*this).reduceList(PassesToRun);
+    if (Error E = Result.takeError())
+      return E;
+  }
 
   outs() << "\n*** Found crashing pass"
          << (PassesToRun.size() == 1 ? ": " : "es: ")
@@ -1166,18 +1198,17 @@ bool BugDriver::debugOptimizerCrash(const std::string &ID) {
 
   EmitProgressBitcode(Program, ID);
 
-  bool Success = DebugACrash(*this, TestForOptimizerCrash);
-  return Success;
+  return DebugACrash(*this, TestForOptimizerCrash);
 }
 
 static bool TestForCodeGenCrash(const BugDriver &BD, Module *M) {
-  std::string Error;
-  BD.compileProgram(M, &Error);
-  if (!Error.empty()) {
+  if (Error E = BD.compileProgram(M)) {
     if (VerboseErrors)
-      errs() << Error << "\n";
-    else
+      errs() << toString(std::move(E)) << "\n";
+    else {
+      consumeError(std::move(E));
       errs() << "<crash>\n";
+    }
     return true; // Tool is still crashing.
   }
   errs() << '\n';
@@ -1187,7 +1218,7 @@ static bool TestForCodeGenCrash(const BugDriver &BD, Module *M) {
 /// debugCodeGeneratorCrash - This method is called when the code generator
 /// crashes on an input.  It attempts to reduce the input as much as possible
 /// while still causing the code generator to crash.
-bool BugDriver::debugCodeGeneratorCrash() {
+Error BugDriver::debugCodeGeneratorCrash() {
   errs() << "*** Debugging code generator crash!\n";
 
   return DebugACrash(*this, TestForCodeGenCrash);
