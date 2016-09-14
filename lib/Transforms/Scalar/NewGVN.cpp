@@ -269,8 +269,7 @@ private:
   // Congruence finding
   // Templated to allow them to work both on BB's and BB-edges
   template <class T>
-  std::pair<Value *, bool> lookupOperandLeader(Value *, const User *,
-                                               const T &) const;
+  Value *lookupOperandLeader(Value *, const User *, const T &) const;
   void performCongruenceFinding(Value *, const Expression *);
 
   // Reachability handling
@@ -337,7 +336,7 @@ PHIExpression *NewGVN::createPHIExpression(Instruction *I) {
     if (I->getOperand(i) != I) {
       const BasicBlockEdge BBE(B, PhiBlock);
       auto Operand = lookupOperandLeader(I->getOperand(i), I, BBE);
-      E->ops_push_back(Operand.first);
+      E->ops_push_back(Operand);
     } else {
       E->ops_push_back(I->getOperand(i));
     }
@@ -360,9 +359,9 @@ bool NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
 
   for (auto &O : I->operands()) {
     auto Operand = lookupOperandLeader(O, I, B);
-    if (!isa<Constant>(Operand.first))
+    if (!isa<Constant>(Operand))
       AllConstant = false;
-    E->ops_push_back(Operand.first);
+    E->ops_push_back(Operand);
   }
   return AllConstant;
 }
@@ -384,9 +383,9 @@ const Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
       std::swap(Arg1, Arg2);
   }
   auto BinaryLeader = lookupOperandLeader(Arg1, nullptr, B);
-  E->ops_push_back(BinaryLeader.first);
+  E->ops_push_back(BinaryLeader);
   BinaryLeader = lookupOperandLeader(Arg2, nullptr, B);
-  E->ops_push_back(BinaryLeader.first);
+  E->ops_push_back(BinaryLeader);
 
   Value *V = SimplifyBinOp(Opcode, E->getOperand(0), E->getOperand(1), *DL, TLI,
                            DT, AC);
@@ -577,11 +576,12 @@ NewGVN::createVariableExpression(Value *V, bool UsedEquivalence) {
 const Expression *NewGVN::createVariableOrConstant(Value *V,
                                                    const BasicBlock *B) {
   auto Leader = lookupOperandLeader(V, nullptr, B);
-  if (Constant *C = dyn_cast<Constant>(Leader.first))
-    return createConstantExpression(C, Leader.second);
-  return createVariableExpression(Leader.first, Leader.second);
+  if (Constant *C = dyn_cast<Constant>(Leader))
+    return createConstantExpression(C, false);
+  return createVariableExpression(Leader, false);
 }
 
+// XXXDAVIDE
 const ConstantExpression *
 NewGVN::createConstantExpression(Constant *C, bool UsedEquivalence) {
   ConstantExpression *E = new (ExpressionAllocator) ConstantExpression(C);
@@ -600,15 +600,14 @@ const CallExpression *NewGVN::createCallExpression(CallInst *CI,
 
 // lookupOperandLeader -- See if we have a congruence class and leader
 // for this operand, and if so, return it. Otherwise, return the
-// original operand.  The second part of the return value is true if a
-// dominating equivalence is being returned.
+// original operand.
 template <class T>
-std::pair<Value *, bool> NewGVN::lookupOperandLeader(Value *V, const User *U,
-                                                     const T &B) const {
+Value *NewGVN::lookupOperandLeader(Value *V, const User *U,
+                                   const T &B) const {
   CongruenceClass *CC = ValueToClass.lookup(V);
   if (CC && (CC != InitialClass))
-    return std::make_pair(CC->RepLeader, false);
-  return std::make_pair(V, false);
+    return CC->RepLeader;
+  return V;
 }
 
 LoadExpression *NewGVN::createLoadExpression(Type *LoadType, Value *PointerOp,
@@ -620,7 +619,7 @@ LoadExpression *NewGVN::createLoadExpression(Type *LoadType, Value *PointerOp,
   // Give store and loads same opcode so they value number together
   E->setOpcode(0);
   auto Operand = lookupOperandLeader(PointerOp, LI, B);
-  E->ops_push_back(Operand.first);
+  E->ops_push_back(Operand);
   if (LI)
     E->setAlignment(LI->getAlignment());
 
@@ -640,7 +639,7 @@ const StoreExpression *NewGVN::createStoreExpression(StoreInst *SI,
   // Give store and loads same opcode so they value number together
   E->setOpcode(0);
   auto Operand = lookupOperandLeader(SI->getPointerOperand(), SI, B);
-  E->ops_push_back(Operand.first);
+  E->ops_push_back(Operand);
   // TODO: Value number heap versions. We may be able to discover
   // things alias analysis can't on it's own (IE that a store and a
   // load have the same value, and thus, it isn't clobbering the load)
@@ -664,7 +663,7 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
     return nullptr;
 
   Value *LoadAddressLeader =
-      lookupOperandLeader(LI->getPointerOperand(), I, B).first;
+      lookupOperandLeader(LI->getPointerOperand(), I, B);
   // Load of undef is undef
   if (isa<UndefValue>(LoadAddressLeader))
     return createConstantExpression(UndefValue::get(LI->getType()), false);
@@ -1026,9 +1025,8 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
 // value for it already
 Value *NewGVN::findConditionEquivalence(Value *Cond, BasicBlock *B) const {
   auto Result = lookupOperandLeader(Cond, nullptr, B);
-  if (isa<Constant>(Result.first))
-    return Result.first;
-
+  if (isa<Constant>(Result))
+    return Result;
   return nullptr;
 }
 
