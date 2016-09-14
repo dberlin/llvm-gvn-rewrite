@@ -222,8 +222,8 @@ private:
   bool setBasicExpressionInfo(Instruction *, BasicExpression *,
                               const BasicBlock *);
   PHIExpression *createPHIExpression(Instruction *);
-  const VariableExpression *createVariableExpression(Value *, bool);
-  const ConstantExpression *createConstantExpression(Constant *, bool);
+  const VariableExpression *createVariableExpression(Value *);
+  const ConstantExpression *createConstantExpression(Constant *);
   const Expression *createVariableOrConstant(Value *V, const BasicBlock *B);
   const StoreExpression *createStoreExpression(StoreInst *, MemoryAccess *,
                                                const BasicBlock *);
@@ -415,7 +415,7 @@ const Expression *NewGVN::checkSimplificationResults(Expression *E,
 
     cast<BasicExpression>(E)->deallocateOperands(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
-    return createConstantExpression(C, E->usedEquivalence());
+    return createConstantExpression(C);
   } else if (isa<Argument>(V) || isa<GlobalVariable>(V)) {
 #ifndef NDEBUG
     if (I)
@@ -424,7 +424,7 @@ const Expression *NewGVN::checkSimplificationResults(Expression *E,
 #endif
     cast<BasicExpression>(E)->deallocateOperands(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
-    return createVariableExpression(V, E->usedEquivalence());
+    return createVariableExpression(V);
   }
 
   CongruenceClass *CC = ValueToClass.lookup(V);
@@ -567,7 +567,7 @@ NewGVN::createAggregateValueExpression(Instruction *I, const BasicBlock *B) {
 }
 
 const VariableExpression *
-NewGVN::createVariableExpression(Value *V, bool UsedEquivalence) {
+NewGVN::createVariableExpression(Value *V) {
   VariableExpression *E = new (ExpressionAllocator) VariableExpression(V);
   E->setOpcode(V->getValueID());
   return E;
@@ -577,13 +577,12 @@ const Expression *NewGVN::createVariableOrConstant(Value *V,
                                                    const BasicBlock *B) {
   auto Leader = lookupOperandLeader(V, nullptr, B);
   if (Constant *C = dyn_cast<Constant>(Leader))
-    return createConstantExpression(C, false);
-  return createVariableExpression(Leader, false);
+    return createConstantExpression(C);
+  return createVariableExpression(Leader);
 }
 
-// XXXDAVIDE
 const ConstantExpression *
-NewGVN::createConstantExpression(Constant *C, bool UsedEquivalence) {
+NewGVN::createConstantExpression(Constant *C) {
   ConstantExpression *E = new (ExpressionAllocator) ConstantExpression(C);
   E->setOpcode(C->getValueID());
   return E;
@@ -666,7 +665,7 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
       lookupOperandLeader(LI->getPointerOperand(), I, B);
   // Load of undef is undef
   if (isa<UndefValue>(LoadAddressLeader))
-    return createConstantExpression(UndefValue::get(LI->getType()), false);
+    return createConstantExpression(UndefValue::get(LI->getType()));
 
   MemoryAccess *DefiningAccess = MSSAWalker->getClobberingMemoryAccess(I);
 
@@ -676,7 +675,7 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
       // If the defining instruction is not reachable, replace with
       // undef
       if (!ReachableBlocks.count(DefiningInst->getParent()))
-        return createConstantExpression(UndefValue::get(LI->getType()), false);
+        return createConstantExpression(UndefValue::get(LI->getType()));
     }
   }
 
@@ -709,7 +708,7 @@ const Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
                  << "\n");
     E->deallocateOperands(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
-    return createConstantExpression(UndefValue::get(I->getType()), false);
+    return createConstantExpression(UndefValue::get(I->getType()));
   }
 
   Value *AllSameValue = E->getOperand(0);
@@ -743,8 +742,8 @@ const Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
     E->deallocateOperands(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
     if (Constant *C = dyn_cast<Constant>(AllSameValue))
-      return createConstantExpression(C, E->usedEquivalence());
-    return createVariableExpression(AllSameValue, E->usedEquivalence());
+      return createConstantExpression(C);
+    return createVariableExpression(AllSameValue);
   }
   return E;
 }
@@ -797,9 +796,9 @@ const Expression *NewGVN::performSymbolicEvaluation(Value *V,
                                                     const BasicBlock *B) {
   const Expression *E = NULL;
   if (Constant *C = dyn_cast<Constant>(V))
-    E = createConstantExpression(C, false);
+    E = createConstantExpression(C);
   else if (isa<Argument>(V) || isa<GlobalVariable>(V)) {
-    E = createVariableExpression(V, false);
+    E = createVariableExpression(V);
   } else {
     // TODO: memory intrinsics
     // TODO: Some day, we should do the forward propagation and reassociation
@@ -1674,7 +1673,7 @@ bool NewGVN::eliminateInstructions(Function &F) {
 
         ValueDFSStack EliminationStack;
 
-        // Convert the members and equivalences to DFS ordered sets and
+        // Convert the members to DFS ordered sets and
         // then merge them.
         std::vector<ValueDFS> DFSOrderedSet;
         convertDenseToDFSOrdered(CC->Members, DFSOrderedSet);
