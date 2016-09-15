@@ -51,7 +51,6 @@ private:
 protected:
   ExpressionType EType;
   unsigned int Opcode;
-  bool UsedEquivalence;
 
 public:
   unsigned int getOpcode() const { return Opcode; }
@@ -63,9 +62,9 @@ public:
   static inline bool classof(const Expression *) { return true; }
 
   Expression(unsigned int o = ~2U)
-      : EType(ExpressionTypeBase), Opcode(o), UsedEquivalence(false) {}
+      : EType(ExpressionTypeBase), Opcode(o) {}
   Expression(ExpressionType etype, unsigned int o = ~2U)
-      : EType(etype), Opcode(o), UsedEquivalence(false) {}
+      : EType(etype), Opcode(o) {}
 
   virtual ~Expression() {}
 
@@ -82,19 +81,16 @@ public:
 
     return equals(Other);
   }
-  bool usedEquivalence() const { return UsedEquivalence; }
-  void setUsedEquivalence(bool V) { UsedEquivalence = V; }
 
   virtual bool equals(const Expression &other) const { return true; }
 
   virtual hash_code getHashValue() const {
-    return hash_combine(EType, Opcode, UsedEquivalence);
+    return hash_combine(EType, Opcode);
   }
   virtual void printInternal(raw_ostream &OS, bool printEType) const {
     if (printEType)
       OS << "etype = " << EType << ",";
     OS << "opcode = " << Opcode << ", ";
-    OS << "UsedEquivalence = " << UsedEquivalence << ", ";
   }
 
   void print(raw_ostream &OS) const {
