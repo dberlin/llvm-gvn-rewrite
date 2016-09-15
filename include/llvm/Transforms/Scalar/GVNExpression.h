@@ -318,64 +318,6 @@ public:
     OS << " with DefiningAccess " << DefiningAccess;
   }
 };
-class CoercibleLoadExpression final : public LoadExpression {
-private:
-  void operator=(const CoercibleLoadExpression &) = delete;
-  CoercibleLoadExpression(const CoercibleLoadExpression &) = delete;
-  CoercibleLoadExpression() = delete;
-
-  // Offset into the value we can coerce from;
-  unsigned int Offset;
-  // Value we can coerce from
-  Value *Src;
-
-public:
-  unsigned int getOffset() const { return Offset; }
-  void setOffset(unsigned int O) { Offset = O; }
-  Value *getSrc() const { return Src; }
-  void setSrc(Value *S) { Src = S; }
-
-  /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const CoercibleLoadExpression *) { return true; }
-  static inline bool classof(const Expression *EB) {
-    return EB->getExpressionType() == ExpressionTypeCoercibleLoad;
-  }
-
-  CoercibleLoadExpression(unsigned int NumOperands, LoadInst *L,
-                          MemoryAccess *DA, unsigned int O, Value *S)
-      : LoadExpression(ExpressionTypeCoercibleLoad, NumOperands, L, DA),
-        Offset(O), Src(S) {}
-
-  virtual ~CoercibleLoadExpression() {}
-  virtual bool equals(const Expression &Other) const {
-    // Unlike normal loads, coercible loads are equal if they have the same src,
-    // offset, and type, because that is what we are going to pull the value
-    // from. The rest of the load arguments don't actually matter since we've
-    // already analyzed that they are "the same enough" for us to do coercion.
-    if (!isa<CoercibleLoadExpression>(Other))
-      return false;
-
-    const CoercibleLoadExpression &OE = cast<CoercibleLoadExpression>(Other);
-    if (ValueType != OE.ValueType)
-      return false;
-    if (Src != OE.Src)
-      return false;
-    if (Offset != OE.Offset)
-      return false;
-
-    return true;
-  }
-  virtual hash_code getHashValue() const {
-    return hash_combine(ValueType, Offset, Src);
-  }
-  virtual void printInternal(raw_ostream &OS, bool printEType) const {
-    if (printEType)
-      OS << "ExpressionTypeCoercibleLoad, ";
-    this->LoadExpression::printInternal(OS, false);
-    OS << " represents CoercibleLoad at " << Load << " with Src " << Src
-       << " and offset " << Offset;
-  }
-};
 
 class StoreExpression final : public BasicExpression {
 private:
