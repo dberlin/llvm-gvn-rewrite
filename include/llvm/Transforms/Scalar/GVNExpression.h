@@ -39,7 +39,6 @@ enum ExpressionType {
   ExpressionTypeAggregateValue,
   ExpressionTypePhi,
   ExpressionTypeLoad,
-  ExpressionTypeCoercibleLoad,
   ExpressionTypeStore,
   ExpressionTypeBasicEnd
 };
@@ -294,8 +293,7 @@ public:
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const LoadExpression *) { return true; }
   static inline bool classof(const Expression *EB) {
-    return EB->getExpressionType() >= ExpressionTypeLoad &&
-           EB->getExpressionType() <= ExpressionTypeCoercibleLoad;
+    return EB->getExpressionType() == ExpressionTypeLoad;
   }
 
   LoadExpression(unsigned int NumOperands, LoadInst *L, MemoryAccess *DA)
