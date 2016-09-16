@@ -75,6 +75,10 @@ struct PdbTpiRecord {
   codeview::CVType Record;
 };
 
+struct PdbTpiFieldListRecord {
+  codeview::CVMemberRecord Record;
+};
+
 struct PdbTpiStream {
   PdbRaw_TpiVer Version;
   std::vector<PdbTpiRecord> Records;
@@ -89,6 +93,7 @@ struct PdbObject {
   Optional<PdbInfoStream> PdbStream;
   Optional<PdbDbiStream> DbiStream;
   Optional<PdbTpiStream> TpiStream;
+  Optional<PdbTpiStream> IpiStream;
 
   BumpPtrAllocator &Allocator;
 };

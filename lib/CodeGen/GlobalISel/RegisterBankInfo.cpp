@@ -367,7 +367,7 @@ unsigned RegisterBankInfo::getSizeInBits(unsigned Reg,
     RC = TRI.getMinimalPhysRegClass(Reg);
   } else {
     LLT Ty = MRI.getType(Reg);
-    unsigned RegSize = Ty.isSized() ? Ty.getSizeInBits() : 0;
+    unsigned RegSize = Ty.isValid() ? Ty.getSizeInBits() : 0;
     // If Reg is not a generic register, query the register class to
     // get its size.
     if (RegSize)
@@ -390,7 +390,7 @@ void RegisterBankInfo::PartialMapping::dump() const {
 bool RegisterBankInfo::PartialMapping::verify() const {
   assert(RegBank && "Register bank not set");
   assert(Length && "Empty mapping");
-  assert((StartIdx < getHighBitIdx()) && "Overflow, switch to APInt?");
+  assert((StartIdx <= getHighBitIdx()) && "Overflow, switch to APInt?");
   // Check if the minimum width fits into RegBank.
   assert(RegBank->getSize() >= Length && "Register bank too small for Mask");
   return true;

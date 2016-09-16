@@ -181,7 +181,7 @@ namespace {
     /// if things it uses can be simplified by bit propagation.
     /// If so, return true.
     bool SimplifyDemandedBits(SDValue Op) {
-      unsigned BitWidth = Op.getValueType().getScalarType().getSizeInBits();
+      unsigned BitWidth = Op.getScalarValueSizeInBits();
       APInt Demanded = APInt::getAllOnesValue(BitWidth);
       return SimplifyDemandedBits(Op, Demanded);
     }
@@ -378,6 +378,7 @@ namespace {
     SDValue TransformFPLoadStorePair(SDNode *N);
     SDValue reduceBuildVecExtToExtBuildVec(SDNode *N);
     SDValue reduceBuildVecConvertToConvertBuildVec(SDNode *N);
+    SDValue reduceBuildVecToShuffle(SDNode *N);
 
     SDValue GetDemandedBits(SDValue V, const APInt &Mask);
 
@@ -1753,7 +1754,7 @@ SDValue DAGCombiner::visitADD(SDNode *N) {
   if (N1.getOpcode() == ISD::AND) {
     SDValue AndOp0 = N1.getOperand(0);
     unsigned NumSignBits = DAG.ComputeNumSignBits(AndOp0);
-    unsigned DestBits = VT.getScalarType().getSizeInBits();
+    unsigned DestBits = VT.getScalarSizeInBits();
 
     // (add z, (and (sbbl x, x), 1)) -> (sub z, (sbbl x, x))
     // and similar xforms where the inner op is either ~0 or 0.
@@ -2057,7 +2058,7 @@ SDValue DAGCombiner::visitMUL(SDNode *N) {
   // We require a splat of the entire scalar bit width for non-contiguous
   // bit patterns.
   bool IsFullSplat =
-    ConstValue1.getBitWidth() == VT.getScalarType().getSizeInBits();
+    ConstValue1.getBitWidth() == VT.getScalarSizeInBits();
   // fold (mul x, 1) -> x
   if (N1IsConst && ConstValue1 == 1 && IsFullSplat)
     return N0;
@@ -2486,8 +2487,7 @@ SDValue DAGCombiner::visitMULHS(SDNode *N) {
   if (isOneConstant(N1)) {
     SDLoc DL(N);
     return DAG.getNode(ISD::SRA, DL, N0.getValueType(), N0,
-                       DAG.getConstant(N0.getValueType().getSizeInBits() - 1,
-                                       DL,
+                       DAG.getConstant(N0.getValueSizeInBits() - 1, DL,
                                        getShiftAmountTy(N0.getValueType())));
   }
   // fold (mulhs x, undef) -> 0
@@ -3079,16 +3079,12 @@ SDValue DAGCombiner::visitAND(SDNode *N) {
     // fold (and x, 0) -> 0, vector edition
     if (ISD::isBuildVectorAllZeros(N0.getNode()))
       // do not return N0, because undef node may exist in N0
-      return DAG.getConstant(
-          APInt::getNullValue(
-              N0.getValueType().getScalarType().getSizeInBits()),
-          SDLoc(N), N0.getValueType());
+      return DAG.getConstant(APInt::getNullValue(N0.getScalarValueSizeInBits()),
+                             SDLoc(N), N0.getValueType());
     if (ISD::isBuildVectorAllZeros(N1.getNode()))
       // do not return N1, because undef node may exist in N1
-      return DAG.getConstant(
-          APInt::getNullValue(
-              N1.getValueType().getScalarType().getSizeInBits()),
-          SDLoc(N), N1.getValueType());
+      return DAG.getConstant(APInt::getNullValue(N1.getScalarValueSizeInBits()),
+                             SDLoc(N), N1.getValueType());
 
     // fold (and x, -1) -> x, vector edition
     if (ISD::isBuildVectorAllOnes(N0.getNode()))
@@ -3110,7 +3106,7 @@ SDValue DAGCombiner::visitAND(SDNode *N) {
   if (isAllOnesConstant(N1))
     return N0;
   // if (and x, c) is known to be zero, return 0
-  unsigned BitWidth = VT.getScalarType().getSizeInBits();
+  unsigned BitWidth = VT.getScalarSizeInBits();
   if (N1C && DAG.MaskedValueIsZero(SDValue(N, 0),
                                    APInt::getAllOnesValue(BitWidth)))
     return DAG.getConstant(0, SDLoc(N), VT);
@@ -3177,7 +3173,7 @@ SDValue DAGCombiner::visitAND(SDNode *N) {
         // that will apply equally to all members of the vector, so AND all the
         // lanes of the constant together.
         EVT VT = Vector->getValueType(0);
-        unsigned BitWidth = VT.getScalarType().getSizeInBits();
+        unsigned BitWidth = VT.getScalarSizeInBits();
 
         // If the splat value has been compressed to a bitlength lower
         // than the size of the vector lane, we need to re-expand it to
@@ -3209,7 +3205,7 @@ SDValue DAGCombiner::visitAND(SDNode *N) {
     // extension. If it is still the AllOnesValue then this AND is completely
     // unneeded.
     Constant =
-      Constant.zextOrTrunc(Load->getMemoryVT().getScalarType().getSizeInBits());
+      Constant.zextOrTrunc(Load->getMemoryVT().getScalarSizeInBits());
 
     bool B;
     switch (Load->getExtensionType()) {
@@ -3326,9 +3322,9 @@ SDValue DAGCombiner::visitAND(SDNode *N) {
     EVT MemVT = LN0->getMemoryVT();
     // If we zero all the possible extended bits, then we can turn this into
     // a zextload if we are running before legalize or the operation is legal.
-    unsigned BitWidth = N1.getValueType().getScalarType().getSizeInBits();
+    unsigned BitWidth = N1.getScalarValueSizeInBits();
     if (DAG.MaskedValueIsZero(N1, APInt::getHighBitsSet(BitWidth,
-                           BitWidth - MemVT.getScalarType().getSizeInBits())) &&
+                           BitWidth - MemVT.getScalarSizeInBits())) &&
         ((!LegalOperations && !LN0->isVolatile()) ||
          TLI.isLoadExtLegal(ISD::ZEXTLOAD, VT, MemVT))) {
       SDValue ExtLoad = DAG.getExtLoad(ISD::ZEXTLOAD, SDLoc(N0), VT,
@@ -3346,9 +3342,9 @@ SDValue DAGCombiner::visitAND(SDNode *N) {
     EVT MemVT = LN0->getMemoryVT();
     // If we zero all the possible extended bits, then we can turn this into
     // a zextload if we are running before legalize or the operation is legal.
-    unsigned BitWidth = N1.getValueType().getScalarType().getSizeInBits();
+    unsigned BitWidth = N1.getScalarValueSizeInBits();
     if (DAG.MaskedValueIsZero(N1, APInt::getHighBitsSet(BitWidth,
-                           BitWidth - MemVT.getScalarType().getSizeInBits())) &&
+                           BitWidth - MemVT.getScalarSizeInBits())) &&
         ((!LegalOperations && !LN0->isVolatile()) ||
          TLI.isLoadExtLegal(ISD::ZEXTLOAD, VT, MemVT))) {
       SDValue ExtLoad = DAG.getExtLoad(ISD::ZEXTLOAD, SDLoc(N0), VT,
@@ -3750,15 +3746,13 @@ SDValue DAGCombiner::visitOR(SDNode *N) {
     if (ISD::isBuildVectorAllOnes(N0.getNode()))
       // do not return N0, because undef node may exist in N0
       return DAG.getConstant(
-          APInt::getAllOnesValue(
-              N0.getValueType().getScalarType().getSizeInBits()),
-          SDLoc(N), N0.getValueType());
+          APInt::getAllOnesValue(N0.getScalarValueSizeInBits()), SDLoc(N),
+          N0.getValueType());
     if (ISD::isBuildVectorAllOnes(N1.getNode()))
       // do not return N1, because undef node may exist in N1
       return DAG.getConstant(
-          APInt::getAllOnesValue(
-              N1.getValueType().getScalarType().getSizeInBits()),
-          SDLoc(N), N1.getValueType());
+          APInt::getAllOnesValue(N1.getScalarValueSizeInBits()), SDLoc(N),
+          N1.getValueType());
 
     // fold (or (shuf A, V_0, MA), (shuf B, V_0, MB)) -> (shuf A, B, Mask)
     // Do this only if the resulting shuffle is legal.
@@ -4517,18 +4511,22 @@ SDValue DAGCombiner::visitSHL(SDNode *N) {
       N0.getOperand(0).getOpcode() == ISD::SHL) {
     SDValue N0Op0 = N0.getOperand(0);
     if (ConstantSDNode *N0Op0C1 = isConstOrConstSplat(N0Op0.getOperand(1))) {
-      uint64_t c1 = N0Op0C1->getZExtValue();
-      uint64_t c2 = N1C->getZExtValue();
+      APInt c1 = N0Op0C1->getAPIntValue();
+      APInt c2 = N1C->getAPIntValue();
+      zeroExtendToMatch(c1, c2, 1 /* Overflow Bit */);
+
       EVT InnerShiftVT = N0Op0.getValueType();
       uint64_t InnerShiftSize = InnerShiftVT.getScalarSizeInBits();
-      if (c2 >= OpSizeInBits - InnerShiftSize) {
+      if (c2.uge(OpSizeInBits - InnerShiftSize)) {
         SDLoc DL(N0);
-        if (c1 + c2 >= OpSizeInBits)
+        APInt Sum = c1 + c2;
+        if (Sum.uge(OpSizeInBits))
           return DAG.getConstant(0, DL, VT);
-        return DAG.getNode(ISD::SHL, DL, VT,
-                           DAG.getNode(N0.getOpcode(), DL, VT,
-                                       N0Op0->getOperand(0)),
-                           DAG.getConstant(c1 + c2, DL, N1.getValueType()));
+
+        return DAG.getNode(
+            ISD::SHL, DL, VT,
+            DAG.getNode(N0.getOpcode(), DL, VT, N0Op0->getOperand(0)),
+            DAG.getConstant(Sum.getZExtValue(), DL, N1.getValueType()));
       }
     }
   }
@@ -4540,8 +4538,8 @@ SDValue DAGCombiner::visitSHL(SDNode *N) {
       N0.getOperand(0).getOpcode() == ISD::SRL) {
     SDValue N0Op0 = N0.getOperand(0);
     if (ConstantSDNode *N0Op0C1 = isConstOrConstSplat(N0Op0.getOperand(1))) {
-      uint64_t c1 = N0Op0C1->getZExtValue();
-      if (c1 < VT.getScalarSizeInBits()) {
+      if (N0Op0C1->getAPIntValue().ult(VT.getScalarSizeInBits())) {
+        uint64_t c1 = N0Op0C1->getZExtValue();
         uint64_t c2 = N1C->getZExtValue();
         if (c1 == c2) {
           SDValue NewOp0 = N0.getOperand(0);
@@ -4645,7 +4643,7 @@ SDValue DAGCombiner::visitSRA(SDNode *N) {
   SDValue N0 = N->getOperand(0);
   SDValue N1 = N->getOperand(1);
   EVT VT = N0.getValueType();
-  unsigned OpSizeInBits = VT.getScalarType().getSizeInBits();
+  unsigned OpSizeInBits = VT.getScalarSizeInBits();
 
   // fold vector ops
   ConstantSDNode *N1C = dyn_cast<ConstantSDNode>(N1);
@@ -4797,7 +4795,7 @@ SDValue DAGCombiner::visitSRL(SDNode *N) {
   SDValue N0 = N->getOperand(0);
   SDValue N1 = N->getOperand(1);
   EVT VT = N0.getValueType();
-  unsigned OpSizeInBits = VT.getScalarType().getSizeInBits();
+  unsigned OpSizeInBits = VT.getScalarSizeInBits();
 
   // fold vector ops
   ConstantSDNode *N1C = dyn_cast<ConstantSDNode>(N1);
@@ -4853,7 +4851,7 @@ SDValue DAGCombiner::visitSRL(SDNode *N) {
     uint64_t c2 = N1C->getZExtValue();
     EVT InnerShiftVT = N0.getOperand(0).getValueType();
     EVT ShiftCountVT = N0.getOperand(0)->getOperand(1).getValueType();
-    uint64_t InnerShiftSize = InnerShiftVT.getScalarType().getSizeInBits();
+    uint64_t InnerShiftSize = InnerShiftVT.getScalarSizeInBits();
     // This is only valid if the OpSizeInBits + c1 = size of inner shift.
     if (c1 + OpSizeInBits == InnerShiftSize) {
       SDLoc DL(N0);
@@ -5253,6 +5251,22 @@ SDValue DAGCombiner::visitSELECT(SDNode *N) {
         if (SDValue Combined = visitORLike(N0, N2_0, N))
           return DAG.getNode(ISD::SELECT, SDLoc(N), N1.getValueType(), Combined,
                              N1, N2_2);
+      }
+    }
+  }
+
+  // select (xor Cond, 1), X, Y -> select Cond, Y, X
+  // select (xor Cond, 0), X, Y -> selext Cond, X, Y
+  if (VT0 == MVT::i1) {
+    if (N0->getOpcode() == ISD::XOR) {
+      if (auto *C = dyn_cast<ConstantSDNode>(N0->getOperand(1))) {
+        SDValue Cond0 = N0->getOperand(0);
+        if (C->isOne())
+          return DAG.getNode(ISD::SELECT, SDLoc(N), N1.getValueType(),
+                             Cond0, N2, N1);
+        else
+          return DAG.getNode(ISD::SELECT, SDLoc(N), N1.getValueType(),
+                             Cond0, N1, N2);
       }
     }
   }
@@ -5691,7 +5705,7 @@ SDValue DAGCombiner::visitVSELECT(SDNode *N) {
       EVT VT = LHS.getValueType();
       SDValue Shift = DAG.getNode(
           ISD::SRA, DL, VT, LHS,
-          DAG.getConstant(VT.getScalarType().getSizeInBits() - 1, DL, VT));
+          DAG.getConstant(VT.getScalarSizeInBits() - 1, DL, VT));
       SDValue Add = DAG.getNode(ISD::ADD, DL, VT, LHS, Shift);
       AddToWorklist(Shift.getNode());
       AddToWorklist(Add.getNode());
@@ -5846,7 +5860,7 @@ static SDNode *tryToFoldExtendOfConstant(SDNode *N, const TargetLowering &TLI,
 
   // We can fold this node into a build_vector.
   unsigned VTBits = SVT.getSizeInBits();
-  unsigned EVTBits = N0->getValueType(0).getScalarType().getSizeInBits();
+  unsigned EVTBits = N0->getValueType(0).getScalarSizeInBits();
   SmallVector<SDValue, 8> Elts;
   unsigned NumElts = VT.getVectorNumElements();
   SDLoc DL(N);
@@ -6081,9 +6095,9 @@ SDValue DAGCombiner::visitSIGN_EXTEND(SDNode *N) {
     // See if the value being truncated is already sign extended.  If so, just
     // eliminate the trunc/sext pair.
     SDValue Op = N0.getOperand(0);
-    unsigned OpBits   = Op.getValueType().getScalarType().getSizeInBits();
-    unsigned MidBits  = N0.getValueType().getScalarType().getSizeInBits();
-    unsigned DestBits = VT.getScalarType().getSizeInBits();
+    unsigned OpBits   = Op.getScalarValueSizeInBits();
+    unsigned MidBits  = N0.getScalarValueSizeInBits();
+    unsigned DestBits = VT.getScalarSizeInBits();
     unsigned NumSignBits = DAG.ComputeNumSignBits(Op);
 
     if (OpBits == DestBits) {
@@ -6244,7 +6258,7 @@ SDValue DAGCombiner::visitSIGN_EXTEND(SDNode *N) {
     // sext(setcc x, y, cc) -> (select (setcc x, y, cc), T, 0)
     // Here, T can be 1 or -1, depending on the type of the setcc and
     // getBooleanContents().
-    unsigned SetCCWidth = N0.getValueType().getScalarSizeInBits();
+    unsigned SetCCWidth = N0.getScalarValueSizeInBits();
 
     SDLoc DL(N);
     // To determine the "true" side of the select, we need to know the high bit
@@ -6571,7 +6585,7 @@ SDValue DAGCombiner::visitZERO_EXTEND(SDNode *N) {
       // elements we can use a matching integer vector type and then
       // truncate/sign extend.
       EVT MatchingElementType = EVT::getIntegerVT(
-          *DAG.getContext(), N00VT.getScalarType().getSizeInBits());
+          *DAG.getContext(), N00VT.getScalarSizeInBits());
       EVT MatchingVectorType = EVT::getVectorVT(
           *DAG.getContext(), MatchingElementType, N00VT.getVectorNumElements());
       SDValue VsetCC =
@@ -6601,8 +6615,8 @@ SDValue DAGCombiner::visitZERO_EXTEND(SDNode *N) {
       SDValue InnerZExt = N0.getOperand(0);
       // If the original shl may be shifting out bits, do not perform this
       // transformation.
-      unsigned KnownZeroBits = InnerZExt.getValueType().getSizeInBits() -
-        InnerZExt.getOperand(0).getValueType().getSizeInBits();
+      unsigned KnownZeroBits = InnerZExt.getValueSizeInBits() -
+        InnerZExt.getOperand(0).getValueSizeInBits();
       if (ShAmtVal > KnownZeroBits)
         return SDValue();
     }
@@ -6863,7 +6877,7 @@ SDValue DAGCombiner::ReduceLoadWidth(SDNode *N) {
       if ((ShAmt & (EVTBits-1)) == 0) {
         N0 = N0.getOperand(0);
         // Is the load width a multiple of size of VT?
-        if ((N0.getValueType().getSizeInBits() & (EVTBits-1)) != 0)
+        if ((N0.getValueSizeInBits() & (EVTBits-1)) != 0)
           return SDValue();
       }
 
@@ -6995,8 +7009,8 @@ SDValue DAGCombiner::visitSIGN_EXTEND_INREG(SDNode *N) {
   SDValue N1 = N->getOperand(1);
   EVT VT = N->getValueType(0);
   EVT EVT = cast<VTSDNode>(N1)->getVT();
-  unsigned VTBits = VT.getScalarType().getSizeInBits();
-  unsigned EVTBits = EVT.getScalarType().getSizeInBits();
+  unsigned VTBits = VT.getScalarSizeInBits();
+  unsigned EVTBits = EVT.getScalarSizeInBits();
 
   if (N0.isUndef())
     return DAG.getUNDEF(VT);
@@ -7020,7 +7034,7 @@ SDValue DAGCombiner::visitSIGN_EXTEND_INREG(SDNode *N) {
   // if x is small enough.
   if (N0.getOpcode() == ISD::SIGN_EXTEND || N0.getOpcode() == ISD::ANY_EXTEND) {
     SDValue N00 = N0.getOperand(0);
-    if (N00.getValueType().getScalarType().getSizeInBits() <= EVTBits &&
+    if (N00.getScalarValueSizeInBits() <= EVTBits &&
         (!LegalOperations || TLI.isOperationLegal(ISD::SIGN_EXTEND, VT)))
       return DAG.getNode(ISD::SIGN_EXTEND, SDLoc(N), VT, N00, N1);
   }
@@ -7572,7 +7586,7 @@ SDValue DAGCombiner::visitBITCAST(SDNode *N) {
   if (N0.getOpcode() == ISD::FCOPYSIGN && N0.getNode()->hasOneUse() &&
       isa<ConstantFPSDNode>(N0.getOperand(0)) &&
       VT.isInteger() && !VT.isVector()) {
-    unsigned OrigXWidth = N0.getOperand(1).getValueType().getSizeInBits();
+    unsigned OrigXWidth = N0.getOperand(1).getValueSizeInBits();
     EVT IntXVT = EVT::getIntegerVT(*DAG.getContext(), OrigXWidth);
     if (isTypeLegal(IntXVT)) {
       SDValue X = DAG.getBitcast(IntXVT, N0.getOperand(1));
@@ -9370,7 +9384,7 @@ SDValue DAGCombiner::visitFNEG(SDNode *N) {
       if (N0.getValueType().isVector()) {
         // For a vector, get a mask such as 0x80... per scalar element
         // and splat it.
-        SignMask = APInt::getSignBit(N0.getValueType().getScalarSizeInBits());
+        SignMask = APInt::getSignBit(N0.getScalarValueSizeInBits());
         SignMask = APInt::getSplat(IntVT.getSizeInBits(), SignMask);
       } else {
         // For a scalar, just generate 0x80...
@@ -9475,7 +9489,7 @@ SDValue DAGCombiner::visitFABS(SDNode *N) {
       if (N0.getValueType().isVector()) {
         // For a vector, get a mask such as 0x7f... per scalar element
         // and splat it.
-        SignMask = ~APInt::getSignBit(N0.getValueType().getScalarSizeInBits());
+        SignMask = ~APInt::getSignBit(N0.getScalarValueSizeInBits());
         SignMask = APInt::getSplat(IntVT.getSizeInBits(), SignMask);
       } else {
         // For a scalar, just generate 0x7f...
@@ -12138,11 +12152,9 @@ SDValue DAGCombiner::visitSTORE(SDNode *N) {
     // See if we can simplify the input to this truncstore with knowledge that
     // only the low bits are being used.  For example:
     // "truncstore (or (shl x, 8), y), i8"  -> "truncstore y, i8"
-    SDValue Shorter =
-      GetDemandedBits(Value,
-                      APInt::getLowBitsSet(
-                        Value.getValueType().getScalarType().getSizeInBits(),
-                        ST->getMemoryVT().getScalarType().getSizeInBits()));
+    SDValue Shorter = GetDemandedBits(
+        Value, APInt::getLowBitsSet(Value.getScalarValueSizeInBits(),
+                                    ST->getMemoryVT().getScalarSizeInBits()));
     AddToWorklist(Value.getNode());
     if (Shorter.getNode())
       return DAG.getTruncStore(Chain, SDLoc(N), Shorter,
@@ -12150,10 +12162,10 @@ SDValue DAGCombiner::visitSTORE(SDNode *N) {
 
     // Otherwise, see if we can simplify the operation with
     // SimplifyDemandedBits, which only works if the value has a single use.
-    if (SimplifyDemandedBits(Value,
-                        APInt::getLowBitsSet(
-                          Value.getValueType().getScalarType().getSizeInBits(),
-                          ST->getMemoryVT().getScalarType().getSizeInBits())))
+    if (SimplifyDemandedBits(
+            Value,
+            APInt::getLowBitsSet(Value.getScalarValueSizeInBits(),
+                                 ST->getMemoryVT().getScalarSizeInBits())))
       return SDValue(N, 0);
   }
 
@@ -12279,7 +12291,7 @@ SDValue DAGCombiner::splitMergedValStore(StoreSDNode *ST) {
     return SDValue();
 
   // Match shift amount to HalfValBitSize.
-  unsigned HalfValBitSize = Val.getValueType().getSizeInBits() / 2;
+  unsigned HalfValBitSize = Val.getValueSizeInBits() / 2;
   ConstantSDNode *ShAmt = dyn_cast<ConstantSDNode>(Op1.getOperand(1));
   if (!ShAmt || ShAmt->getAPIntValue() != HalfValBitSize)
     return SDValue();
@@ -12288,10 +12300,10 @@ SDValue DAGCombiner::splitMergedValStore(StoreSDNode *ST) {
   // to i64.
   if (Lo.getOpcode() != ISD::ZERO_EXTEND || !Lo.hasOneUse() ||
       !Lo.getOperand(0).getValueType().isScalarInteger() ||
-      Lo.getOperand(0).getValueType().getSizeInBits() > HalfValBitSize ||
+      Lo.getOperand(0).getValueSizeInBits() > HalfValBitSize ||
       Hi.getOpcode() != ISD::ZERO_EXTEND || !Hi.hasOneUse() ||
       !Hi.getOperand(0).getValueType().isScalarInteger() ||
-      Hi.getOperand(0).getValueType().getSizeInBits() > HalfValBitSize)
+      Hi.getOperand(0).getValueSizeInBits() > HalfValBitSize)
     return SDValue();
 
   if (!TLI.isMultiStoresCheaperThanBitsMerge(Lo.getOperand(0),
@@ -12865,9 +12877,220 @@ SDValue DAGCombiner::reduceBuildVecConvertToConvertBuildVec(SDNode *N) {
   return DAG.getNode(Opcode, dl, VT, BV);
 }
 
-SDValue DAGCombiner::visitBUILD_VECTOR(SDNode *N) {
-  unsigned NumInScalars = N->getNumOperands();
+// If Vec holds a reference to a non-null node, return Vec.
+// Otherwise, return either a zero or an undef node of the appropriate type.
+static SDValue getRightHandValue(SelectionDAG &DAG, SDLoc DL, SDValue Vec,
+                                 EVT VT, bool Zero) {
+  if (Vec.getNode())
+    return Vec;
+
+  if (Zero)
+    return VT.isInteger() ? DAG.getConstant(0, DL, VT)
+                          : DAG.getConstantFP(0.0, DL, VT);
+
+  return DAG.getUNDEF(VT);
+}
+
+// Check to see if this is a BUILD_VECTOR of a bunch of EXTRACT_VECTOR_ELT
+// operations.  If so, and if the EXTRACT_VECTOR_ELT vector inputs come from
+// at most two distinct vectors, turn this into a shuffle node.
+// TODO: Support more than two inputs by constructing a tree of shuffles.
+SDValue DAGCombiner::reduceBuildVecToShuffle(SDNode *N) {
   SDLoc dl(N);
+  EVT VT = N->getValueType(0);
+
+  // Only type-legal BUILD_VECTOR nodes are converted to shuffle nodes.
+  if (!isTypeLegal(VT))
+    return SDValue();
+
+  // May only combine to shuffle after legalize if shuffle is legal.
+  if (LegalOperations && !TLI.isOperationLegal(ISD::VECTOR_SHUFFLE, VT))
+    return SDValue();
+
+  SDValue VecIn1, VecIn2;
+  bool UsesZeroVector = false;
+  unsigned NumElems = N->getNumOperands();
+
+  // Record, for each element of newly built vector, which input it uses.
+  // 0 stands for the zero vector, 1 and 2 for the two input vectors, and -1
+  // for undef.
+  SmallVector<int, 8> VectorMask;
+  for (unsigned i = 0; i != NumElems; ++i) {
+    SDValue Op = N->getOperand(i);
+
+    if (Op.isUndef()) {
+      VectorMask.push_back(-1);
+      continue;
+    }
+
+    // See if we can combine this into a blend with a zero vector.
+    if (!VecIn2.getNode() && (isNullConstant(Op) || isNullFPConstant(Op))) {
+      UsesZeroVector = true;
+      VectorMask.push_back(0);
+      continue;
+    }
+
+    // Not an undef or zero. If the input is something other than an
+    // EXTRACT_VECTOR_ELT with a constant index, bail out.
+    if (Op.getOpcode() != ISD::EXTRACT_VECTOR_ELT ||
+        !isa<ConstantSDNode>(Op.getOperand(1)))
+      return SDValue();
+
+    // We only allow up to two distinct input vectors.
+    SDValue ExtractedFromVec = Op.getOperand(0);
+    if (ExtractedFromVec == VecIn1) {
+      VectorMask.push_back(1);
+      continue;
+    }
+    if (ExtractedFromVec == VecIn2) {
+      VectorMask.push_back(2);
+      continue;
+    }
+
+    if (!VecIn1.getNode()) {
+      VecIn1 = ExtractedFromVec;
+      VectorMask.push_back(1);
+    } else if (!VecIn2.getNode() && !UsesZeroVector) {
+      VecIn2 = ExtractedFromVec;
+      VectorMask.push_back(2);
+    } else {
+      return SDValue();
+    }
+  }
+
+  // If we didn't find at least one input vector, bail out.
+  if (!VecIn1.getNode())
+    return SDValue();
+
+  EVT InVT1 = VecIn1.getValueType();
+  EVT InVT2 = VecIn2.getNode() ? VecIn2.getValueType() : InVT1;
+  unsigned Vec2Offset = InVT1.getVectorNumElements();
+  unsigned ShuffleNumElems = NumElems;
+
+  MVT IdxTy = TLI.getVectorIdxTy(DAG.getDataLayout());
+  SDValue ZeroIdx = DAG.getConstant(0, dl, IdxTy);
+
+  // We can't generate a shuffle node with mismatched input and output types.
+  // Try to make the types match.
+  // TODO: Should this fire if InVT1/InVT2 are not legal types, or should
+  // we let legalization run its course first?
+  if (InVT1 != VT || InVT2 != VT) {
+    // Both inputs and the output must have the same base element type.
+    EVT ElemType = VT.getVectorElementType();
+    if (ElemType != InVT1.getVectorElementType() ||
+        ElemType != InVT2.getVectorElementType())
+      return SDValue();
+
+    // TODO: Canonicalize this so that if the vectors have different lengths,
+    // VecIn1 is always longer.
+
+    // The element types match, now figure out the lengths.
+    if (InVT1.getSizeInBits() * 2 == VT.getSizeInBits() && InVT1 == InVT2) {
+      // If both input vectors are exactly half the size of the output, concat
+      // them. If we have only one (non-zero) input, concat it with undef.
+      VecIn1 = DAG.getNode(ISD::CONCAT_VECTORS, dl, VT, VecIn1,
+                           getRightHandValue(DAG, dl, VecIn2, InVT1, false));
+      VecIn2 = SDValue();
+      // If we have one "real" input and are blending with zero, we need the
+      // zero elements to come from the second input, not the undef part of the
+      // first input.
+      if (UsesZeroVector)
+        Vec2Offset = NumElems;
+    } else if (InVT1.getSizeInBits() == VT.getSizeInBits() * 2) {
+      if (!TLI.isExtractSubvectorCheap(VT, NumElems))
+        return SDValue();
+
+      if (UsesZeroVector)
+        return SDValue();
+
+      if (!VecIn2.getNode()) {
+        // If we only have one input vector, and it's twice the size of the
+        // output, split it in two.        
+        VecIn2 = DAG.getNode(ISD::EXTRACT_SUBVECTOR, dl, VT, VecIn1,
+                             DAG.getConstant(NumElems, dl, IdxTy));
+        VecIn1 = DAG.getNode(ISD::EXTRACT_SUBVECTOR, dl, VT, VecIn1, ZeroIdx);
+        // Since we now have shorter input vectors, adjust the offset of the
+        // second vector's start.
+        Vec2Offset = NumElems;
+      } else if (InVT2.getSizeInBits() <= InVT1.getSizeInBits()) {
+        // VecIn1 is wider than the output, and we have another, possibly
+        // smaller input. Pad the smaller input with undefs, shuffle at the
+        // input vector width, and extract the output.
+
+        // The shuffle type is different than VT, so check legality again.
+        if (LegalOperations &&
+            !TLI.isOperationLegal(ISD::VECTOR_SHUFFLE, InVT1))
+          return SDValue();
+
+        if (InVT1 != InVT2)
+          VecIn2 = DAG.getNode(ISD::INSERT_SUBVECTOR, dl, InVT1,
+                               DAG.getUNDEF(InVT1), VecIn2, ZeroIdx);
+        ShuffleNumElems = NumElems * 2;
+      }
+    } else {
+      // TODO: Support cases where the length mismatch isn't exactly by a
+      // factor of 2.
+      return SDValue();
+    }
+  }
+
+  // Initialize mask to undef.
+  SmallVector<int, 8> Mask(ShuffleNumElems, -1);
+
+  // Only need to run up to the number of elements actually used, not the
+  // total number of elements in the shuffle - if we are shuffling a wider
+  // vector, the high lanes should be set to undef.
+  for (unsigned i = 0; i != NumElems; ++i) {
+    if (VectorMask[i] == -1)
+      continue;
+
+    // If we are trying to blend with zero, we need to take a zero from the
+    // correct position in the second input.
+    if (VectorMask[i] == 0) {
+      Mask[i] = Vec2Offset + i;
+      continue;
+    }
+
+    SDValue Extract = N->getOperand(i);
+    unsigned ExtIndex =
+        cast<ConstantSDNode>(Extract.getOperand(1))->getZExtValue();
+
+    if (VectorMask[i] == 1) {
+      Mask[i] = ExtIndex;
+      continue;
+    }
+
+    assert(VectorMask[i] == 2 && "Expected input to be from second vector");
+    Mask[i] = Vec2Offset + ExtIndex;
+  }
+
+  // Avoid introducing illegal shuffles with zero.
+  // TODO: This doesn't actually do anything smart at the moment.
+  // We should either delete this, or check legality for all the shuffles
+  // we create.
+  if (UsesZeroVector && !TLI.isVectorClearMaskLegal(Mask, VT))
+    return SDValue();
+
+  // The type the input vectors may have changed above.
+  InVT1 = VecIn1.getValueType();
+
+  // If we already have a VecIn2, it should have the same type as VecIn1.
+  // If we don't, get an undef/zero vector of the appropriate type.
+  VecIn2 = getRightHandValue(DAG, dl, VecIn2, InVT1, UsesZeroVector);
+  assert(InVT1 == VecIn2.getValueType() && "Unexpected second input type.");
+
+  // Return the new VECTOR_SHUFFLE node.
+  SDValue Ops[2];
+  Ops[0] = VecIn1;
+  Ops[1] = VecIn2;
+  SDValue Shuffle = DAG.getVectorShuffle(InVT1, dl, Ops[0], Ops[1], Mask);
+  if (ShuffleNumElems > NumElems)
+    Shuffle = DAG.getNode(ISD::EXTRACT_SUBVECTOR, dl, VT, Shuffle, ZeroIdx);
+
+  return Shuffle;
+}
+
+SDValue DAGCombiner::visitBUILD_VECTOR(SDNode *N) {
   EVT VT = N->getValueType(0);
 
   // A vector built entirely of undefs is undef.
@@ -12880,161 +13103,8 @@ SDValue DAGCombiner::visitBUILD_VECTOR(SDNode *N) {
   if (SDValue V = reduceBuildVecConvertToConvertBuildVec(N))
     return V;
 
-  // Check to see if this is a BUILD_VECTOR of a bunch of EXTRACT_VECTOR_ELT
-  // operations.  If so, and if the EXTRACT_VECTOR_ELT vector inputs come from
-  // at most two distinct vectors, turn this into a shuffle node.
-
-  // Only type-legal BUILD_VECTOR nodes are converted to shuffle nodes.
-  if (!isTypeLegal(VT))
-    return SDValue();
-
-  // May only combine to shuffle after legalize if shuffle is legal.
-  if (LegalOperations && !TLI.isOperationLegal(ISD::VECTOR_SHUFFLE, VT))
-    return SDValue();
-
-  SDValue VecIn1, VecIn2;
-  bool UsesZeroVector = false;
-  for (unsigned i = 0; i != NumInScalars; ++i) {
-    SDValue Op = N->getOperand(i);
-    // Ignore undef inputs.
-    if (Op.isUndef()) continue;
-
-    // See if we can combine this build_vector into a blend with a zero vector.
-    if (!VecIn2.getNode() && (isNullConstant(Op) || isNullFPConstant(Op))) {
-      UsesZeroVector = true;
-      continue;
-    }
-
-    // If this input is something other than a EXTRACT_VECTOR_ELT with a
-    // constant index, bail out.
-    if (Op.getOpcode() != ISD::EXTRACT_VECTOR_ELT ||
-        !isa<ConstantSDNode>(Op.getOperand(1))) {
-      VecIn1 = VecIn2 = SDValue(nullptr, 0);
-      break;
-    }
-
-    // We allow up to two distinct input vectors.
-    SDValue ExtractedFromVec = Op.getOperand(0);
-    if (ExtractedFromVec == VecIn1 || ExtractedFromVec == VecIn2)
-      continue;
-
-    if (!VecIn1.getNode()) {
-      VecIn1 = ExtractedFromVec;
-    } else if (!VecIn2.getNode() && !UsesZeroVector) {
-      VecIn2 = ExtractedFromVec;
-    } else {
-      // Too many inputs.
-      VecIn1 = VecIn2 = SDValue(nullptr, 0);
-      break;
-    }
-  }
-
-  // If everything is good, we can make a shuffle operation.
-  if (VecIn1.getNode()) {
-    unsigned InNumElements = VecIn1.getValueType().getVectorNumElements();
-    SmallVector<int, 8> Mask;
-    for (unsigned i = 0; i != NumInScalars; ++i) {
-      unsigned Opcode = N->getOperand(i).getOpcode();
-      if (Opcode == ISD::UNDEF) {
-        Mask.push_back(-1);
-        continue;
-      }
-
-      // Operands can also be zero.
-      if (Opcode != ISD::EXTRACT_VECTOR_ELT) {
-        assert(UsesZeroVector &&
-               (Opcode == ISD::Constant || Opcode == ISD::ConstantFP) &&
-               "Unexpected node found!");
-        Mask.push_back(NumInScalars+i);
-        continue;
-      }
-
-      // If extracting from the first vector, just use the index directly.
-      SDValue Extract = N->getOperand(i);
-      SDValue ExtVal = Extract.getOperand(1);
-      unsigned ExtIndex = cast<ConstantSDNode>(ExtVal)->getZExtValue();
-      if (Extract.getOperand(0) == VecIn1) {
-        Mask.push_back(ExtIndex);
-        continue;
-      }
-
-      // Otherwise, use InIdx + InputVecSize
-      Mask.push_back(InNumElements + ExtIndex);
-    }
-
-    // Avoid introducing illegal shuffles with zero.
-    if (UsesZeroVector && !TLI.isVectorClearMaskLegal(Mask, VT))
-      return SDValue();
-
-    // We can't generate a shuffle node with mismatched input and output types.
-    // Attempt to transform a single input vector to the correct type.
-    if ((VT != VecIn1.getValueType())) {
-      // If the input vector type has a different base type to the output
-      // vector type, bail out.
-      EVT VTElemType = VT.getVectorElementType();
-      if ((VecIn1.getValueType().getVectorElementType() != VTElemType) ||
-          (VecIn2.getNode() &&
-           (VecIn2.getValueType().getVectorElementType() != VTElemType)))
-        return SDValue();
-
-      // If the input vector is too small, widen it.
-      // We only support widening of vectors which are half the size of the
-      // output registers. For example XMM->YMM widening on X86 with AVX.
-      EVT VecInT = VecIn1.getValueType();
-      if (VecInT.getSizeInBits() * 2 == VT.getSizeInBits()) {
-        // If we only have one small input, widen it by adding undef values.
-        if (!VecIn2.getNode())
-          VecIn1 = DAG.getNode(ISD::CONCAT_VECTORS, dl, VT, VecIn1,
-                               DAG.getUNDEF(VecIn1.getValueType()));
-        else if (VecIn1.getValueType() == VecIn2.getValueType()) {
-          // If we have two small inputs of the same type, try to concat them.
-          VecIn1 = DAG.getNode(ISD::CONCAT_VECTORS, dl, VT, VecIn1, VecIn2);
-          VecIn2 = SDValue(nullptr, 0);
-        } else
-          return SDValue();
-      } else if (VecInT.getSizeInBits() == VT.getSizeInBits() * 2) {
-        // If the input vector is too large, try to split it.
-        // We don't support having two input vectors that are too large.
-        // If the zero vector was used, we can not split the vector,
-        // since we'd need 3 inputs.
-        if (UsesZeroVector || VecIn2.getNode())
-          return SDValue();
-
-        if (!TLI.isExtractSubvectorCheap(VT, VT.getVectorNumElements()))
-          return SDValue();
-
-        // Try to replace VecIn1 with two extract_subvectors
-        // No need to update the masks, they should still be correct.
-        VecIn2 = DAG.getNode(
-            ISD::EXTRACT_SUBVECTOR, dl, VT, VecIn1,
-            DAG.getConstant(VT.getVectorNumElements(), dl,
-                            TLI.getVectorIdxTy(DAG.getDataLayout())));
-        VecIn1 = DAG.getNode(
-            ISD::EXTRACT_SUBVECTOR, dl, VT, VecIn1,
-            DAG.getConstant(0, dl, TLI.getVectorIdxTy(DAG.getDataLayout())));
-      } else
-        return SDValue();
-    }
-
-    if (UsesZeroVector)
-      VecIn2 = VT.isInteger() ? DAG.getConstant(0, dl, VT) :
-                                DAG.getConstantFP(0.0, dl, VT);
-    else
-      // If VecIn2 is unused then change it to undef.
-      VecIn2 = VecIn2.getNode() ? VecIn2 : DAG.getUNDEF(VT);
-
-    // Check that we were able to transform all incoming values to the same
-    // type.
-    if (VecIn2.getValueType() != VecIn1.getValueType() ||
-        VecIn1.getValueType() != VT)
-          return SDValue();
-
-    // Return the new VECTOR_SHUFFLE node.
-    SDValue Ops[2];
-    Ops[0] = VecIn1;
-    Ops[1] = VecIn2;
-    return DAG.getVectorShuffle(VT, dl, Ops[0], Ops[1], Mask);
-  }
+  if (SDValue V = reduceBuildVecToShuffle(N))
+    return V;
 
   return SDValue();
 }
@@ -13380,8 +13450,8 @@ SDValue DAGCombiner::visitEXTRACT_SUBVECTOR(SDNode* N) {
       // Into:
       //    indices are equal or bit offsets are equal => V1
       //    otherwise => (extract_subvec V1, ExtIdx)
-      if (InsIdx->getZExtValue() * SmallVT.getScalarType().getSizeInBits() ==
-          ExtIdx->getZExtValue() * NVT.getScalarType().getSizeInBits())
+      if (InsIdx->getZExtValue() * SmallVT.getScalarSizeInBits() ==
+          ExtIdx->getZExtValue() * NVT.getScalarSizeInBits())
         return DAG.getBitcast(NVT, V->getOperand(1));
       return DAG.getNode(
           ISD::EXTRACT_SUBVECTOR, dl, NVT,

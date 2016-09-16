@@ -257,8 +257,6 @@ class BitcodeReader : public GVMaterializer {
   std::vector<std::pair<Function*, unsigned> > FunctionPrologues;
   std::vector<std::pair<Function*, unsigned> > FunctionPersonalityFns;
 
-  SmallVector<Instruction*, 64> InstsWithTBAATag;
-
   bool HasSeenOldLoopTags = false;
 
   /// The set of attributes by index.  Index zero in the file is for null, and
@@ -2679,14 +2677,35 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
         return error("Invalid record");
 
       IsDistinct = Record[0];
-      MetadataList.assignValue(
-          GET_OR_DISTINCT(DIGlobalVariable,
-                          (Context, getMDOrNull(Record[1]),
-                           getMDString(Record[2]), getMDString(Record[3]),
-                           getMDOrNull(Record[4]), Record[5],
-                           getDITypeRefOrNull(Record[6]), Record[7], Record[8],
-                           getMDOrNull(Record[9]), getMDOrNull(Record[10]))),
-          NextMetadataNo++);
+
+      // Upgrade old metadata, which stored a global variable reference or a
+      // ConstantInt here.
+      Metadata *Expr = getMDOrNull(Record[9]);
+      GlobalVariable *Attach = nullptr;
+      if (auto *CMD = dyn_cast_or_null<ConstantAsMetadata>(Expr)) {
+        if (auto *GV = dyn_cast<GlobalVariable>(CMD->getValue())) {
+          Attach = GV;
+          Expr = nullptr;
+        } else if (auto *CI = dyn_cast<ConstantInt>(CMD->getValue())) {
+          Expr = DIExpression::get(Context,
+                                   {dwarf::DW_OP_constu, CI->getZExtValue(),
+                                    dwarf::DW_OP_stack_value});
+        } else {
+          Expr = nullptr;
+        }
+      }
+
+      DIGlobalVariable *DGV = GET_OR_DISTINCT(
+          DIGlobalVariable,
+          (Context, getMDOrNull(Record[1]), getMDString(Record[2]),
+           getMDString(Record[3]), getMDOrNull(Record[4]), Record[5],
+           getDITypeRefOrNull(Record[6]), Record[7], Record[8], Expr,
+           getMDOrNull(Record[10])));
+      MetadataList.assignValue(DGV, NextMetadataNo++);
+
+      if (Attach)
+        Attach->addDebugInfo(DGV);
+
       break;
     }
     case bitc::METADATA_LOCAL_VAR: {
@@ -4404,11 +4423,11 @@ std::error_code BitcodeReader::parseMetadataAttachment(Function &F) {
         if (HasSeenOldLoopTags && I->second == LLVMContext::MD_loop)
           MD = upgradeInstructionLoopAttachment(*MD);
 
-        Inst->setMetadata(I->second, MD);
         if (I->second == LLVMContext::MD_tbaa) {
-          InstsWithTBAATag.push_back(Inst);
-          continue;
+          assert(!MD->isTemporary() && "should load MDs before attachments");
+          MD = UpgradeTBAANode(*MD);
         }
+        Inst->setMetadata(I->second, MD);
       }
       break;
     }
@@ -5820,11 +5839,6 @@ std::error_code BitcodeReader::materializeModule() {
   // promised above).
   if (!BasicBlockFwdRefs.empty())
     return error("Never resolved function from blockaddress");
-
-  // Upgrading intrinsic calls before TBAA can cause TBAA metadata to be lost,
-  // to prevent this instructions with TBAA tags should be upgraded first.
-  for (unsigned I = 0, E = InstsWithTBAATag.size(); I < E; I++)
-    UpgradeInstWithTBAATag(InstsWithTBAATag[I]);
 
   // Upgrade any intrinsic calls that slipped through (should not happen!) and
   // delete the old functions to clean up. We can't do this unless the entire

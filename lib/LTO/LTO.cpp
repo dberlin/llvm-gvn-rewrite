@@ -337,6 +337,8 @@ Error LTO::addRegularLTO(std::unique_ptr<InputFile> Input,
     addSymbolToGlobalRes(Obj.get(), Used, Sym, Res, 0);
 
     GlobalValue *GV = Obj->getSymbolGV(Sym.I->getRawDataRefImpl());
+    if (Sym.getFlags() & object::BasicSymbolRef::SF_Undefined)
+      continue;
     if (Res.Prevailing && GV) {
       Keep.push_back(GV);
       switch (GV->getLinkage()) {
@@ -350,13 +352,14 @@ Error LTO::addRegularLTO(std::unique_ptr<InputFile> Input,
         break;
       }
     }
-    // Common resolution: collect the maximum size/alignment.
-    // FIXME: right now we ignore the prevailing information, it is not clear
-    // what is the "right" behavior here.
+    // Common resolution: collect the maximum size/alignment over all commons.
+    // We also record if we see an instance of a common as prevailing, so that
+    // if none is prevailing we can ignore it later.
     if (Sym.getFlags() & object::BasicSymbolRef::SF_Common) {
       auto &CommonRes = RegularLTO.Commons[Sym.getIRName()];
       CommonRes.Size = std::max(CommonRes.Size, Sym.getCommonSize());
       CommonRes.Align = std::max(CommonRes.Align, Sym.getCommonAlignment());
+      CommonRes.Prevailing |= Res.Prevailing;
     }
 
     // FIXME: use proposed local attribute for FinalDefinitionInLinkageUnit.
@@ -407,11 +410,15 @@ unsigned LTO::getMaxTasks() const {
 }
 
 Error LTO::run(AddOutputFn AddOutput) {
+  // Save the status of having a regularLTO combined module, as
+  // this is needed for generating the ThinLTO Task ID, and
+  // the CombinedModule will be moved at the end of runRegularLTO.
+  bool HasRegularLTO = RegularLTO.CombinedModule != nullptr;
   // Invoke regular LTO if there was a regular LTO module to start with.
-  if (RegularLTO.CombinedModule)
+  if (HasRegularLTO)
     if (auto E = runRegularLTO(AddOutput))
       return E;
-  return runThinLTO(AddOutput);
+  return runThinLTO(AddOutput, HasRegularLTO);
 }
 
 Error LTO::runRegularLTO(AddOutputFn AddOutput) {
@@ -419,6 +426,9 @@ Error LTO::runRegularLTO(AddOutputFn AddOutput) {
   // all the prevailing when adding the inputs, and we apply it here.
   const DataLayout &DL = RegularLTO.CombinedModule->getDataLayout();
   for (auto &I : RegularLTO.Commons) {
+    if (!I.second.Prevailing)
+      // Don't do anything if no instance of this common was prevailing.
+      continue;
     GlobalVariable *OldGV = RegularLTO.CombinedModule->getNamedGlobal(I.first);
     if (OldGV && DL.getTypeAllocSize(OldGV->getValueType()) == I.second.Size) {
       // Don't create a new global if the type is already correct, just make
@@ -690,7 +700,7 @@ ThinBackend lto::createWriteIndexesThinBackend(std::string OldPrefix,
   };
 }
 
-Error LTO::runThinLTO(AddOutputFn AddOutput) {
+Error LTO::runThinLTO(AddOutputFn AddOutput, bool HasRegularLTO) {
   if (ThinLTO.ModuleMap.empty())
     return Error();
 
@@ -747,9 +757,8 @@ Error LTO::runThinLTO(AddOutputFn AddOutput) {
   // ParallelCodeGenParallelismLevel if an LTO module is present, as tasks 0
   // through ParallelCodeGenParallelismLevel-1 are reserved for parallel code
   // generation partitions.
-  unsigned Task = RegularLTO.CombinedModule
-                      ? RegularLTO.ParallelCodeGenParallelismLevel
-                      : 0;
+  unsigned Task =
+      HasRegularLTO ? RegularLTO.ParallelCodeGenParallelismLevel : 0;
   unsigned Partition = 1;
 
   for (auto &Mod : ThinLTO.ModuleMap) {

@@ -227,6 +227,10 @@ public:
                             symbol_iterator(Obj->symbol_end()));
   }
 
+  StringRef getDataLayoutStr() const {
+    return Obj->getModule().getDataLayoutStr();
+  }
+
   StringRef getSourceFileName() const {
     return Obj->getModule().getSourceFileName();
   }
@@ -311,6 +315,8 @@ private:
     struct CommonResolution {
       uint64_t Size = 0;
       unsigned Align = 0;
+      /// Record if at least one instance of the common was marked as prevailing
+      bool Prevailing = false;
     };
     std::map<std::string, CommonResolution> Commons;
 
@@ -381,7 +387,7 @@ private:
                    ArrayRef<SymbolResolution> Res);
 
   Error runRegularLTO(AddOutputFn AddOutput);
-  Error runThinLTO(AddOutputFn AddOutput);
+  Error runThinLTO(AddOutputFn AddOutput, bool HasRegularLTO);
 
   mutable bool CalledGetMaxTasks = false;
 };
