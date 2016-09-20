@@ -151,6 +151,11 @@ getELFKindForNamedSection(StringRef Name, SectionKind K) {
 
 
 static unsigned getELFSectionType(StringRef Name, SectionKind K) {
+  // Use SHT_NOTE for section whose name starts with ".note" to allow
+  // emitting ELF notes from C variable declaration.
+  // See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=77609
+  if (Name.startswith(".note"))
+    return ELF::SHT_NOTE;
 
   if (Name == ".init_array")
     return ELF::SHT_INIT_ARRAY;
@@ -296,7 +301,7 @@ selectELFSectionForGlobal(MCContext &Ctx, const GlobalValue *GV,
 
   if (EmitUniqueSection && UniqueSectionNames) {
     Name.push_back('.');
-    TM.getNameWithPrefix(Name, GV, Mang, true);
+    Mang.getNameWithPrefix(Name, GV, false);
   }
   unsigned UniqueID = MCContext::GenericSectionID;
   if (EmitUniqueSection && !UniqueSectionNames) {
@@ -812,6 +817,13 @@ static bool canUsePrivateLabel(const MCAsmInfo &AsmInfo,
 void TargetLoweringObjectFileMachO::getNameWithPrefix(
     SmallVectorImpl<char> &OutName, const GlobalValue *GV,
     const TargetMachine &TM) const {
+  if (!GV->hasPrivateLinkage()) {
+    // Simple case: If GV is not private, it is not important to find out if
+    // private labels are legal in this case or not.
+    getMangler().getNameWithPrefix(OutName, GV, false);
+    return;
+  }
+
   SectionKind GVKind = TargetLoweringObjectFile::getKindForGlobal(GV, TM);
   const MCSection *TheSection = SectionForGlobal(GV, GVKind, TM);
   bool CannotUsePrivateLabel =

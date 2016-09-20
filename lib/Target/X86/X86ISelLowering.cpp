@@ -350,7 +350,7 @@ X86TargetLowering::X86TargetLowering(const X86TargetMachine &TM,
   // If we don't have F16C support, then lower half float conversions
   // into library calls.
   if (Subtarget.useSoftFloat() ||
-      (!Subtarget.hasF16C() && !Subtarget.hasVLX())) {
+      (!Subtarget.hasF16C() && !Subtarget.hasAVX512())) {
     setOperationAction(ISD::FP16_TO_FP, MVT::f32, Expand);
     setOperationAction(ISD::FP_TO_FP16, MVT::f32, Expand);
   }
@@ -20867,9 +20867,12 @@ static SDValue LowerXALUO(SDValue Op, SelectionDAG &DAG) {
     SDValue Sum = DAG.getNode(X86ISD::UMUL, DL, VTs, LHS, RHS);
 
     SDValue SetCC =
-      DAG.getNode(X86ISD::SETCC, DL, N->getValueType(1),
+      DAG.getNode(X86ISD::SETCC, DL, MVT::i8,
                   DAG.getConstant(X86::COND_O, DL, MVT::i32),
                   SDValue(Sum.getNode(), 2));
+
+    if (N->getValueType(1) == MVT::i1)
+      SetCC = DAG.getNode(ISD::TRUNCATE, DL, MVT::i1, SetCC);
 
     return DAG.getNode(ISD::MERGE_VALUES, DL, N->getVTList(), Sum, SetCC);
   }
@@ -20880,9 +20883,12 @@ static SDValue LowerXALUO(SDValue Op, SelectionDAG &DAG) {
   SDValue Sum = DAG.getNode(BaseOp, DL, VTs, LHS, RHS);
 
   SDValue SetCC =
-    DAG.getNode(X86ISD::SETCC, DL, N->getValueType(1),
+    DAG.getNode(X86ISD::SETCC, DL, MVT::i8,
                 DAG.getConstant(Cond, DL, MVT::i32),
                 SDValue(Sum.getNode(), 1));
+
+  if (N->getValueType(1) == MVT::i1)
+    SetCC = DAG.getNode(ISD::TRUNCATE, DL, MVT::i1, SetCC);
 
   return DAG.getNode(ISD::MERGE_VALUES, DL, N->getVTList(), Sum, SetCC);
 }
