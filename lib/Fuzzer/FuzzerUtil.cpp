@@ -246,7 +246,7 @@ bool ParseDictionaryFile(const std::string &Text, std::vector<Unit> *Units) {
 }
 
 void SleepSeconds(int Seconds) {
-  std::this_thread::sleep_for(std::chrono::seconds(Seconds));
+  sleep(Seconds);  // Use C API to avoid coverage from instrumented libc++.
 }
 
 int GetPid() { return getpid(); }
@@ -292,6 +292,18 @@ size_t GetPeakRSSMb() {
   }
   assert(0 && "GetPeakRSSMb() is not implemented for your platform");
   return 0;
+}
+
+void PrintPC(const char *SymbolizedFMT, const char *FallbackFMT, uintptr_t PC) {
+  if (EF->__sanitizer_symbolize_pc) {
+    char PcDescr[1024];
+    EF->__sanitizer_symbolize_pc(reinterpret_cast<void*>(PC),
+                                 SymbolizedFMT, PcDescr, sizeof(PcDescr));
+    PcDescr[sizeof(PcDescr) - 1] = 0;  // Just in case.
+    Printf("%s", PcDescr);
+  } else {
+    Printf(FallbackFMT, PC);
+  }
 }
 
 }  // namespace fuzzer

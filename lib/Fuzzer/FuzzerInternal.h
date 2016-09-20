@@ -108,6 +108,7 @@ void PrintHexArray(const uint8_t *Data, size_t Size,
 void PrintASCII(const uint8_t *Data, size_t Size, const char *PrintAfter = "");
 void PrintASCII(const Unit &U, const char *PrintAfter = "");
 void PrintASCII(const Word &W, const char *PrintAfter = "");
+void PrintPC(const char *SymbolizedFMT, const char *FallbackFMT, uintptr_t PC);
 std::string Hash(const Unit &U);
 void SetTimer(int Seconds);
 void SetSigSegvHandler();
@@ -243,6 +244,7 @@ struct FuzzingOptions {
   bool OutputCSV = false;
   bool PrintNewCovPcs = false;
   bool PrintFinalStats = false;
+  bool PrintCoverage = false;
   bool DetectLeaks = true;
   bool TruncateUnits = false;
   bool PruneCorpus = true;
@@ -358,8 +360,8 @@ private:
 // See TracePC.cpp
 class TracePC {
  public:
-  void HandleTrace(uint8_t *guard, uintptr_t PC);
-  void HandleInit(uint8_t *start, uint8_t *stop);
+  void HandleTrace(uintptr_t *guard, uintptr_t PC);
+  void HandleInit(uintptr_t *start, uintptr_t *stop);
   void HandleCallerCallee(uintptr_t Caller, uintptr_t Callee);
   size_t GetTotalCoverage() { return TotalCoverage; }
   void SetUseCounters(bool UC) { UseCounters = UC; }
@@ -374,6 +376,19 @@ class TracePC {
     return Res;
   }
 
+  void Reset() {
+    TotalCoverage = 0;
+    TotalCounterBits = 0;
+    NumNewPCs = 0;
+    CounterMap.Reset();
+    TotalCoverageMap.Reset();
+    ResetGuards();
+  }
+
+  void PrintModuleInfo();
+
+  void PrintCoverage();
+
 private:
   bool UseCounters = false;
   size_t TotalCoverage = 0;
@@ -384,7 +399,22 @@ private:
   size_t NumNewPCs = 0;
   void AddNewPC(uintptr_t PC) { NewPCs[(NumNewPCs++) % kMaxNewPCs] = PC; }
 
-  uint8_t *Start, *Stop;
+  void ResetGuards();
+
+  struct Module {
+    uintptr_t *Start, *Stop;
+  };
+
+  Module Modules[4096];
+  size_t NumModules = 0;
+  size_t NumGuards = 0;
+
+  static const size_t kNumCounters = 1 << 14;
+  uint8_t Counters[kNumCounters];
+
+  static const size_t kNumPCs = 1 << 20;
+  uintptr_t PCs[kNumPCs];
+
   ValueBitMap CounterMap;
   ValueBitMap TotalCoverageMap;
 };
