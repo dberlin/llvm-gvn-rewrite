@@ -844,11 +844,11 @@ bool NVPTXAsmPrinter::doInitialization(Module &M) {
   // We need to call the parent's one explicitly.
   //bool Result = AsmPrinter::doInitialization(M);
 
-  // Initialize TargetLoweringObjectFile.
+  // Initialize TargetLoweringObjectFile since we didn't do in
+  // AsmPrinter::doInitialization either right above or where it's commented out
+  // below.
   const_cast<TargetLoweringObjectFile &>(getObjFileLowering())
       .Initialize(OutContext, TM);
-
-  Mang = new Mangler();
 
   // Emit header before any dwarf directives are emitted below.
   emitHeader(M, OS1, STI);
@@ -2380,6 +2380,6 @@ std::string LineReader::readLine(unsigned lineNum) {
 
 // Force static initialization.
 extern "C" void LLVMInitializeNVPTXAsmPrinter() {
-  RegisterAsmPrinter<NVPTXAsmPrinter> X(TheNVPTXTarget32);
-  RegisterAsmPrinter<NVPTXAsmPrinter> Y(TheNVPTXTarget64);
+  RegisterAsmPrinter<NVPTXAsmPrinter> X(getTheNVPTXTarget32());
+  RegisterAsmPrinter<NVPTXAsmPrinter> Y(getTheNVPTXTarget64());
 }

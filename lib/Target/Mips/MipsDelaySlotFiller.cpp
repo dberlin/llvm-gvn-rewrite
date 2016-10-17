@@ -79,8 +79,7 @@ static cl::opt<CompactBranchPolicy> MipsCompactBranchPolicy(
   cl::values(
     clEnumValN(CB_Never, "never", "Do not use compact branches if possible."),
     clEnumValN(CB_Optimal, "optimal", "Use compact branches where appropiate (default)."),
-    clEnumValN(CB_Always, "always", "Always use compact branches if possible."),
-    clEnumValEnd
+    clEnumValN(CB_Always, "always", "Always use compact branches if possible.")
   )
 );
 
@@ -192,9 +191,7 @@ namespace {
     Filler(TargetMachine &tm)
       : MachineFunctionPass(ID), TM(tm) { }
 
-    const char *getPassName() const override {
-      return "Mips Delay Slot Filler";
-    }
+    StringRef getPassName() const override { return "Mips Delay Slot Filler"; }
 
     bool runOnMachineFunction(MachineFunction &F) override {
       bool Changed = false;

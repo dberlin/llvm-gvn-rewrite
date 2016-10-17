@@ -175,6 +175,16 @@ void MachineOperand::ChangeToMCSymbol(MCSymbol *Sym) {
   Contents.Sym = Sym;
 }
 
+void MachineOperand::ChangeToFrameIndex(int Idx) {
+  assert((!isReg() || !isTied()) &&
+         "Cannot change a tied operand into a FrameIndex");
+
+  removeRegFromUses();
+
+  OpKind = MO_FrameIndex;
+  setIndex(Idx);
+}
+
 /// ChangeToRegister - Replace this operand with a new register operand of
 /// the specified value.  If an operand is known to be an register already,
 /// the setReg method should be used.
@@ -527,7 +537,10 @@ MachinePointerInfo MachinePointerInfo::getStack(MachineFunction &MF,
 MachineMemOperand::MachineMemOperand(MachinePointerInfo ptrinfo, Flags f,
                                      uint64_t s, unsigned int a,
                                      const AAMDNodes &AAInfo,
-                                     const MDNode *Ranges)
+                                     const MDNode *Ranges,
+                                     SynchronizationScope SynchScope,
+                                     AtomicOrdering Ordering,
+                                     AtomicOrdering FailureOrdering)
     : PtrInfo(ptrinfo), Size(s), FlagVals(f), BaseAlignLog2(Log2_32(a) + 1),
       AAInfo(AAInfo), Ranges(Ranges) {
   assert((PtrInfo.V.isNull() || PtrInfo.V.is<const PseudoSourceValue*>() ||
@@ -535,6 +548,13 @@ MachineMemOperand::MachineMemOperand(MachinePointerInfo ptrinfo, Flags f,
          "invalid pointer value");
   assert(getBaseAlignment() == a && "Alignment is not a power of 2!");
   assert((isLoad() || isStore()) && "Not a load/store!");
+
+  AtomicInfo.SynchScope = static_cast<unsigned>(SynchScope);
+  assert(getSynchScope() == SynchScope && "Value truncated");
+  AtomicInfo.Ordering = static_cast<unsigned>(Ordering);
+  assert(getOrdering() == Ordering && "Value truncated");
+  AtomicInfo.FailureOrdering = static_cast<unsigned>(FailureOrdering);
+  assert(getFailureOrdering() == FailureOrdering && "Value truncated");
 }
 
 /// Profile - Gather unique data for the object.
@@ -1285,8 +1305,8 @@ bool MachineInstr::hasRegisterImplicitUseOperand(unsigned Reg) const {
 /// findRegisterUseOperandIdx() - Returns the MachineOperand that is a use of
 /// the specific register or -1 if it is not found. It further tightens
 /// the search criteria to a use that kills the register if isKill is true.
-int MachineInstr::findRegisterUseOperandIdx(unsigned Reg, bool isKill,
-                                          const TargetRegisterInfo *TRI) const {
+int MachineInstr::findRegisterUseOperandIdx(
+    unsigned Reg, bool isKill, const TargetRegisterInfo *TRI) const {
   for (unsigned i = 0, e = getNumOperands(); i != e; ++i) {
     const MachineOperand &MO = getOperand(i);
     if (!MO.isReg() || !MO.isUse())
@@ -1294,11 +1314,9 @@ int MachineInstr::findRegisterUseOperandIdx(unsigned Reg, bool isKill,
     unsigned MOReg = MO.getReg();
     if (!MOReg)
       continue;
-    if (MOReg == Reg ||
-        (TRI &&
-         TargetRegisterInfo::isPhysicalRegister(MOReg) &&
-         TargetRegisterInfo::isPhysicalRegister(Reg) &&
-         TRI->isSubRegister(MOReg, Reg)))
+    if (MOReg == Reg || (TRI && TargetRegisterInfo::isPhysicalRegister(MOReg) &&
+                         TargetRegisterInfo::isPhysicalRegister(Reg) &&
+                         TRI->isSubRegister(MOReg, Reg)))
       if (!isKill || MO.isKill())
         return i;
   }

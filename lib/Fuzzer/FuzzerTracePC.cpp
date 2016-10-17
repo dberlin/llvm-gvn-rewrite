@@ -7,46 +7,284 @@
 //
 //===----------------------------------------------------------------------===//
 // Trace PCs.
-// This module implements __sanitizer_cov_trace_pc, a callback required
-// for -fsanitize-coverage=trace-pc instrumentation.
+// This module implements __sanitizer_cov_trace_pc_guard[_init],
+// the callback required for -fsanitize-coverage=trace-pc-guard instrumentation.
 //
 //===----------------------------------------------------------------------===//
 
-#include "FuzzerInternal.h"
+#include "FuzzerCorpus.h"
+#include "FuzzerDefs.h"
+#include "FuzzerDictionary.h"
+#include "FuzzerTracePC.h"
+#include "FuzzerValueBitMap.h"
 
 namespace fuzzer {
 
-static size_t PreviouslyComputedPCHash;
-static ValueBitMap CurrentPCMap;
+TracePC TPC;
 
-// Merges CurrentPCMap into M, returns the number of new bits.
-size_t PCMapMergeFromCurrent(ValueBitMap &M) {
-  if (!PreviouslyComputedPCHash)
-    return 0;
-  PreviouslyComputedPCHash = 0;
-  return M.MergeFrom(CurrentPCMap);
+void TracePC::HandleTrace(uint32_t *Guard, uintptr_t PC) {
+  uint32_t Idx = *Guard;
+  if (!Idx) return;
+  uint8_t *CounterPtr = &Counters[Idx % kNumCounters];
+  uint8_t Counter = *CounterPtr;
+  if (Counter == 0) {
+    if (!PCs[Idx % kNumPCs]) {
+      AddNewPCID(Idx);
+      TotalPCCoverage++;
+      PCs[Idx % kNumPCs] = PC;
+    }
+  }
+  if (UseCounters) {
+    if (Counter < 128)
+      *CounterPtr = Counter + 1;
+    else
+      *Guard = 0;
+  } else {
+    *CounterPtr = 1;
+    *Guard = 0;
+  }
 }
 
-static void HandlePC(uint32_t PC) {
-  // We take 12 bits of PC and mix it with the previous PCs.
-  uintptr_t Next = (PreviouslyComputedPCHash << 5) ^ (PC & 4095);
-  CurrentPCMap.AddValue(Next);
-  PreviouslyComputedPCHash = Next;
+void TracePC::HandleInit(uint32_t *Start, uint32_t *Stop) {
+  if (Start == Stop || *Start) return;
+  assert(NumModules < sizeof(Modules) / sizeof(Modules[0]));
+  for (uint32_t *P = Start; P < Stop; P++)
+    *P = ++NumGuards;
+  Modules[NumModules].Start = Start;
+  Modules[NumModules].Stop = Stop;
+  NumModules++;
+}
+
+void TracePC::PrintModuleInfo() {
+  Printf("INFO: Loaded %zd modules (%zd guards): ", NumModules, NumGuards);
+  for (size_t i = 0; i < NumModules; i++)
+    Printf("[%p, %p), ", Modules[i].Start, Modules[i].Stop);
+  Printf("\n");
+}
+
+void TracePC::ResetGuards() {
+  uint32_t N = 0;
+  for (size_t M = 0; M < NumModules; M++)
+    for (uint32_t *X = Modules[M].Start, *End = Modules[M].Stop; X < End; X++)
+      *X = ++N;
+  assert(N == NumGuards);
+}
+
+size_t TracePC::FinalizeTrace(InputCorpus *C, size_t InputSize, bool Shrink) {
+  if (!UsingTracePcGuard()) return 0;
+  size_t Res = 0;
+  const size_t Step = 8;
+  assert(reinterpret_cast<uintptr_t>(Counters) % Step == 0);
+  size_t N = Min(kNumCounters, NumGuards + 1);
+  N = (N + Step - 1) & ~(Step - 1);  // Round up.
+  for (size_t Idx = 0; Idx < N; Idx += Step) {
+    uint64_t Bundle = *reinterpret_cast<uint64_t*>(&Counters[Idx]);
+    if (!Bundle) continue;
+    for (size_t i = Idx; i < Idx + Step; i++) {
+      uint8_t Counter = (Bundle >> (i * 8)) & 0xff;
+      if (!Counter) continue;
+      Counters[i] = 0;
+      unsigned Bit = 0;
+      /**/ if (Counter >= 128) Bit = 7;
+      else if (Counter >= 32) Bit = 6;
+      else if (Counter >= 16) Bit = 5;
+      else if (Counter >= 8) Bit = 4;
+      else if (Counter >= 4) Bit = 3;
+      else if (Counter >= 3) Bit = 2;
+      else if (Counter >= 2) Bit = 1;
+      size_t Feature = (i * 8 + Bit);
+      if (C->AddFeature(Feature, InputSize, Shrink))
+        Res++;
+    }
+  }
+  if (UseValueProfile)
+    ValueProfileMap.ForEach([&](size_t Idx) {
+      if (C->AddFeature(NumGuards + Idx, InputSize, Shrink))
+        Res++;
+    });
+  return Res;
+}
+
+void TracePC::HandleCallerCallee(uintptr_t Caller, uintptr_t Callee) {
+  const uintptr_t kBits = 12;
+  const uintptr_t kMask = (1 << kBits) - 1;
+  uintptr_t Idx = (Caller & kMask) | ((Callee & kMask) << kBits);
+  HandleValueProfile(Idx);
+}
+
+void TracePC::PrintCoverage() {
+  Printf("COVERAGE:\n");
+  for (size_t i = 0; i < Min(NumGuards + 1, kNumPCs); i++) {
+    if (PCs[i])
+      PrintPC("COVERED: %p %F %L\n", "COVERED: %p\n", PCs[i]);
+  }
+}
+
+// Value profile.
+// We keep track of various values that affect control flow.
+// These values are inserted into a bit-set-based hash map.
+// Every new bit in the map is treated as a new coverage.
+//
+// For memcmp/strcmp/etc the interesting value is the length of the common
+// prefix of the parameters.
+// For cmp instructions the interesting value is a XOR of the parameters.
+// The interesting value is mixed up with the PC and is then added to the map.
+
+void TracePC::AddValueForMemcmp(void *caller_pc, const void *s1, const void *s2,
+                              size_t n) {
+  if (!n) return;
+  size_t Len = std::min(n, (size_t)32);
+  const uint8_t *A1 = reinterpret_cast<const uint8_t *>(s1);
+  const uint8_t *A2 = reinterpret_cast<const uint8_t *>(s2);
+  size_t I = 0;
+  for (; I < Len; I++)
+    if (A1[I] != A2[I])
+      break;
+  size_t PC = reinterpret_cast<size_t>(caller_pc);
+  size_t Idx = I;
+  // if (I < Len)
+  //  Idx += __builtin_popcountl((A1[I] ^ A2[I])) - 1;
+  TPC.HandleValueProfile((PC & 4095) | (Idx << 12));
+}
+
+void TracePC::AddValueForStrcmp(void *caller_pc, const char *s1, const char *s2,
+                              size_t n) {
+  if (!n) return;
+  size_t Len = std::min(n, (size_t)32);
+  const uint8_t *A1 = reinterpret_cast<const uint8_t *>(s1);
+  const uint8_t *A2 = reinterpret_cast<const uint8_t *>(s2);
+  size_t I = 0;
+  for (; I < Len; I++)
+    if (A1[I] != A2[I] || A1[I] == 0)
+      break;
+  size_t PC = reinterpret_cast<size_t>(caller_pc);
+  size_t Idx = I;
+  // if (I < Len && A1[I])
+  //  Idx += __builtin_popcountl((A1[I] ^ A2[I])) - 1;
+  TPC.HandleValueProfile((PC & 4095) | (Idx << 12));
+}
+
+template <class T>
+ATTRIBUTE_TARGET_POPCNT
+#ifdef __clang__  // g++ can't handle this __attribute__ here :(
+__attribute__((always_inline))
+#endif  // __clang__
+void TracePC::HandleCmp(void *PC, T Arg1, T Arg2) {
+  uintptr_t PCuint = reinterpret_cast<uintptr_t>(PC);
+  uint64_t ArgXor = Arg1 ^ Arg2;
+  uint64_t ArgDistance = __builtin_popcountl(ArgXor) + 1; // [1,65]
+  uintptr_t Idx = ((PCuint & 4095) + 1) * ArgDistance;
+  TORCInsert(ArgXor, Arg1, Arg2);
+  HandleValueProfile(Idx);
+}
+
+void TracePC::ProcessTORC(Dictionary *Dict, const uint8_t *Data, size_t Size) {
+  TORCToDict(TORC8, Dict, Data, Size);
+  TORCToDict(TORC4, Dict, Data, Size);
+}
+
+template <class T>
+void TracePC::TORCToDict(const TableOfRecentCompares<T, kTORCSize> &TORC,
+                         Dictionary *Dict, const uint8_t *Data, size_t Size) {
+  ScopedDoingMyOwnMemmem scoped_doing_my_own_memmem;
+  for (size_t i = 0; i < TORC.kSize; i++) {
+    T A[2] = {TORC.Table[i][0], TORC.Table[i][1]};
+    if (!A[0] && !A[1]) continue;
+    for (int j = 0; j < 2; j++)
+      TORCToDict(Dict, A[j], A[!j], Data, Size);
+  }
+}
+
+template <class T>
+void TracePC::TORCToDict(Dictionary *Dict, T FindInData, T Substitute,
+                         const uint8_t *Data, size_t Size) {
+  if (FindInData == Substitute) return;
+  if (sizeof(T) == 4) {
+    uint16_t HigherBytes = Substitute >> sizeof(T) * 4;
+    if (HigherBytes == 0 || HigherBytes == 0xffff)
+      TORCToDict(Dict, static_cast<uint16_t>(FindInData),
+                 static_cast<uint16_t>(Substitute), Data, Size);
+  }
+  const size_t DataSize = sizeof(T);
+  const uint8_t *End = Data + Size;
+  int Attempts = 3;
+  for (int DoSwap = 0; DoSwap <= 1; DoSwap++) {
+    for (const uint8_t *Cur = Data; Cur < End && Attempts--; Cur++) {
+      Cur = (uint8_t *)memmem(Cur, End - Cur, &FindInData, DataSize);
+      if (!Cur)
+        break;
+      size_t Pos = Cur - Data;
+      Word W(reinterpret_cast<uint8_t *>(&Substitute), sizeof(Substitute));
+      DictionaryEntry DE(W, Pos);
+      // TODO: evict all entries from Dic if it's full.
+      Dict->push_back(DE);
+      // Printf("Dict[%zd] TORC%zd %llx => %llx pos %zd\n", Dict->size(),
+      // sizeof(T),
+      //       (uint64_t)FindInData, (uint64_t)Substitute, Pos);
+    }
+    FindInData = Bswap(FindInData);
+    Substitute = Bswap(Substitute);
+  }
 }
 
 } // namespace fuzzer
 
 extern "C" {
 __attribute__((visibility("default")))
-void __sanitizer_cov_trace_pc() {
-  fuzzer::HandlePC(static_cast<uint32_t>(
-      reinterpret_cast<uintptr_t>(__builtin_return_address(0))));
+void __sanitizer_cov_trace_pc_guard(uint32_t *Guard) {
+  uintptr_t PC = (uintptr_t)__builtin_return_address(0);
+  fuzzer::TPC.HandleTrace(Guard, PC);
 }
 
 __attribute__((visibility("default")))
-void __sanitizer_cov_trace_pc_indir(int *) {
-  // Stub to allow linking with code built with
-  // -fsanitize=indirect-calls,trace-pc.
-  // This isn't used currently.
+void __sanitizer_cov_trace_pc_guard_init(uint32_t *Start, uint32_t *Stop) {
+  fuzzer::TPC.HandleInit(Start, Stop);
 }
+
+__attribute__((visibility("default")))
+void __sanitizer_cov_trace_pc_indir(uintptr_t Callee) {
+  uintptr_t PC = (uintptr_t)__builtin_return_address(0);
+  fuzzer::TPC.HandleCallerCallee(PC, Callee);
 }
+
+__attribute__((visibility("default")))
+void __sanitizer_cov_trace_cmp8(uint64_t Arg1, uint64_t Arg2) {
+  fuzzer::TPC.HandleCmp(__builtin_return_address(0), Arg1, Arg2);
+}
+__attribute__((visibility("default")))
+void __sanitizer_cov_trace_cmp4(uint32_t Arg1, uint32_t Arg2) {
+  fuzzer::TPC.HandleCmp(__builtin_return_address(0), Arg1, Arg2);
+}
+__attribute__((visibility("default")))
+void __sanitizer_cov_trace_cmp2(uint16_t Arg1, uint16_t Arg2) {
+  fuzzer::TPC.HandleCmp(__builtin_return_address(0), Arg1, Arg2);
+}
+__attribute__((visibility("default")))
+void __sanitizer_cov_trace_cmp1(uint8_t Arg1, uint8_t Arg2) {
+  fuzzer::TPC.HandleCmp(__builtin_return_address(0), Arg1, Arg2);
+}
+
+__attribute__((visibility("default")))
+void __sanitizer_cov_trace_switch(uint64_t Val, uint64_t *Cases) {
+  uint64_t N = Cases[0];
+  uint64_t *Vals = Cases + 2;
+  char *PC = (char*)__builtin_return_address(0);
+  for (size_t i = 0; i < N; i++)
+    if (Val != Vals[i])
+      fuzzer::TPC.HandleCmp(PC + i, Val, Vals[i]);
+}
+
+__attribute__((visibility("default")))
+void __sanitizer_cov_trace_div4(uint32_t Val) {
+  fuzzer::TPC.HandleCmp(__builtin_return_address(0), Val, (uint32_t)0);
+}
+__attribute__((visibility("default")))
+void __sanitizer_cov_trace_div8(uint64_t Val) {
+  fuzzer::TPC.HandleCmp(__builtin_return_address(0), Val, (uint64_t)0);
+}
+__attribute__((visibility("default")))
+void __sanitizer_cov_trace_gep(uintptr_t Idx) {
+  fuzzer::TPC.HandleCmp(__builtin_return_address(0), Idx, (uintptr_t)0);
+}
+
+}  // extern "C"

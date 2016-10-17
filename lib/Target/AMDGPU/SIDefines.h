@@ -43,7 +43,8 @@ enum {
   SGPRSpill = 1 << 24,
   VOPAsmPrefer32Bit = 1 << 25,
   Gather4 = 1 << 26,
-  DisableWQM = 1 << 27
+  DisableWQM = 1 << 27,
+  SOPK_ZEXT = 1 << 28
 };
 }
 
@@ -106,6 +107,15 @@ namespace SIOutMods {
     MUL2 = 1,
     MUL4 = 2,
     DIV2 = 3
+  };
+}
+
+namespace VGPRIndexMode {
+  enum {
+    SRC0_ENABLE = 1 << 0,
+    SRC1_ENABLE = 1 << 1,
+    SRC2_ENABLE = 1 << 2,
+    DST_ENABLE = 1 << 3
   };
 }
 
@@ -218,6 +228,26 @@ enum WidthMinusOne { // WidthMinusOne, (5) [15:11]
 };
 
 } // namespace Hwreg
+
+namespace SDWA {
+
+enum SdwaSel {
+  BYTE_0 = 0,
+  BYTE_1 = 1,
+  BYTE_2 = 2,
+  BYTE_3 = 3,
+  WORD_0 = 4,
+  WORD_1 = 5,
+  DWORD = 6,
+};
+
+enum DstUnused {
+  UNUSED_PAD = 0,
+  UNUSED_SEXT = 1,
+  UNUSED_PRESERVE = 2,
+};
+
+} // namespace SDWA
 } // namespace AMDGPU
 } // namespace llvm
 

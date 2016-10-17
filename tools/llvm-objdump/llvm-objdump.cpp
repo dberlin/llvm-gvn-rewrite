@@ -188,8 +188,7 @@ cl::opt<bool> PrintFaultMaps("fault-map-section",
 
 cl::opt<DIDumpType> llvm::DwarfDumpType(
     "dwarf", cl::init(DIDT_Null), cl::desc("Dump of dwarf debug sections:"),
-    cl::values(clEnumValN(DIDT_Frames, "frames", ".debug_frame"),
-               clEnumValEnd));
+    cl::values(clEnumValN(DIDT_Frames, "frames", ".debug_frame")));
 
 cl::opt<bool> PrintSource(
     "source",
@@ -688,6 +687,7 @@ static std::error_code getRelocationValueString(const ELFObjectFile<ELFT> *Obj,
     }
     break;
   case ELF::EM_LANAI:
+  case ELF::EM_AVR:
   case ELF::EM_AARCH64: {
     std::string fmtbuf;
     raw_string_ostream fmt(fmtbuf);
@@ -1096,8 +1096,10 @@ static void DisassembleObject(const ObjectFile *Obj, bool InlineRelocs) {
   std::unique_ptr<const MCInstrInfo> MII(TheTarget->createMCInstrInfo());
   if (!MII)
     report_fatal_error("error: no instruction info for target " + TripleName);
-  std::unique_ptr<const MCObjectFileInfo> MOFI(new MCObjectFileInfo);
-  MCContext Ctx(AsmInfo.get(), MRI.get(), MOFI.get());
+  MCObjectFileInfo MOFI;
+  MCContext Ctx(AsmInfo.get(), MRI.get(), &MOFI);
+  // FIXME: for now initialize MCObjectFileInfo with default values
+  MOFI.InitMCObjectFileInfo(Triple(TripleName), false, CodeModel::Default, Ctx);
 
   std::unique_ptr<MCDisassembler> DisAsm(
     TheTarget->createMCDisassembler(*STI, Ctx));
@@ -1227,6 +1229,18 @@ static void DisassembleObject(const ObjectFile *Obj, bool InlineRelocs) {
 
     std::sort(DataMappingSymsAddr.begin(), DataMappingSymsAddr.end());
     std::sort(TextMappingSymsAddr.begin(), TextMappingSymsAddr.end());
+
+    if (Obj->isELF() && Obj->getArch() == Triple::amdgcn) {
+      // AMDGPU disassembler uses symbolizer for printing labels
+      std::unique_ptr<MCRelocationInfo> RelInfo(
+        TheTarget->createMCRelocationInfo(TripleName, Ctx));
+      if (RelInfo) {
+        std::unique_ptr<MCSymbolizer> Symbolizer(
+          TheTarget->createMCSymbolizer(
+            TripleName, nullptr, nullptr, &Symbols, &Ctx, std::move(RelInfo)));
+        DisAsm->setSymbolizer(std::move(Symbolizer));
+      }
+    }
 
     // Make a list of all the relocations for this section.
     std::vector<RelocationRef> Rels;
@@ -1877,27 +1891,18 @@ static void printFaultMaps(const ObjectFile *Obj) {
   outs() << FMP;
 }
 
-static void printPrivateFileHeaders(const ObjectFile *o) {
+static void printPrivateFileHeaders(const ObjectFile *o, bool onlyFirst) {
   if (o->isELF())
-    printELFFileHeader(o);
-  else if (o->isCOFF())
-    printCOFFFileHeader(o);
-  else if (o->isMachO()) {
+    return printELFFileHeader(o);
+  if (o->isCOFF())
+    return printCOFFFileHeader(o);
+  if (o->isMachO()) {
     printMachOFileHeader(o);
-    printMachOLoadCommands(o);
-  } else
-    report_fatal_error("Invalid/Unsupported object file format");
-}
-
-static void printFirstPrivateFileHeader(const ObjectFile *o) {
-  if (o->isELF())
-    printELFFileHeader(o);
-  else if (o->isCOFF())
-    printCOFFFileHeader(o);
-  else if (o->isMachO())
-    printMachOFileHeader(o);
-  else
-    report_fatal_error("Invalid/Unsupported object file format");
+    if (!onlyFirst)
+      printMachOLoadCommands(o);
+    return;
+  }
+  report_fatal_error("Invalid/Unsupported object file format");
 }
 
 static void DumpObject(const ObjectFile *o, const Archive *a = nullptr) {
@@ -1924,10 +1929,8 @@ static void DumpObject(const ObjectFile *o, const Archive *a = nullptr) {
     PrintSymbolTable(o, ArchiveName);
   if (UnwindInfo)
     PrintUnwindInfo(o);
-  if (PrivateHeaders)
-    printPrivateFileHeaders(o);
-  if (FirstPrivateHeader)
-    printFirstPrivateFileHeader(o);
+  if (PrivateHeaders || FirstPrivateHeader)
+    printPrivateFileHeaders(o, FirstPrivateHeader);
   if (ExportsTrie)
     printExportsTrie(o);
   if (Rebase)

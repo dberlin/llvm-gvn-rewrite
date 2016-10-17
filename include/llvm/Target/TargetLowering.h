@@ -61,6 +61,7 @@ namespace llvm {
   class MCSymbol;
   template<typename T> class SmallVectorImpl;
   class DataLayout;
+  struct TargetRecip;
   class TargetRegisterClass;
   class TargetLibraryInfo;
   class TargetLoweringObjectFile;
@@ -189,9 +190,6 @@ public:
   virtual MVT getVectorIdxTy(const DataLayout &DL) const {
     return getPointerTy(DL);
   }
-
-  /// Return true if the select operation is expensive for this target.
-  bool isSelectExpensive() const { return SelectIsExpensive; }
 
   virtual bool isSelectSupported(SelectSupportKind /*kind*/) const {
     return true;
@@ -540,6 +538,12 @@ public:
       }
     }
   }
+
+  /// Return the reciprocal estimate code generation preferences for this target
+  /// after potentially overriding settings using the function's attributes.
+  /// FIXME: Like all unsafe-math target settings, this should really be an
+  /// instruction-level attribute/metadata/FMF.
+  TargetRecip getTargetRecipForFunc(MachineFunction &MF) const;
 
   /// Vector types are broken down into some number of legal first class types.
   /// For example, EVT::v8f32 maps to 2 EVT::v4f32 with Altivec or SSE1, or 8
@@ -1022,11 +1026,14 @@ public:
     return UseUnderscoreLongJmp;
   }
 
-  /// Return integer threshold on number of blocks to use jump tables rather
-  /// than if sequence.
-  int getMinimumJumpTableEntries() const {
+  /// Return lower limit for number of blocks in a jump table.
+  unsigned getMinimumJumpTableEntries() const {
     return MinimumJumpTableEntries;
   }
+
+  /// Return upper limit for number of entries in a jump table.
+  /// Zero if no limit.
+  unsigned getMaximumJumpTableSize() const;
 
   /// If a physical register, this specifies the register that
   /// llvm.savestack/llvm.restorestack should save and restore.
@@ -1107,8 +1114,12 @@ public:
   /// Should be used only when getIRStackGuard returns nullptr.
   virtual Value *getSSPStackGuardCheck(const Module &M) const;
 
-  /// If the target has a standard location for the unsafe stack pointer,
-  /// returns the address of that location. Otherwise, returns nullptr.
+protected:
+  Value *getDefaultSafeStackPointerLocation(IRBuilder<> &IRB,
+                                            bool UseTLS) const;
+
+public:
+  /// Returns the target-specific address of the unsafe stack pointer.
   virtual Value *getSafeStackPointerLocation(IRBuilder<> &IRB) const;
 
   /// Returns true if a cast between SrcAS and DestAS is a noop.
@@ -1353,22 +1364,19 @@ protected:
     UseUnderscoreLongJmp = Val;
   }
 
-  /// Indicate the number of blocks to generate jump tables rather than if
-  /// sequence.
-  void setMinimumJumpTableEntries(int Val) {
+  /// Indicate the minimum number of blocks to generate jump tables.
+  void setMinimumJumpTableEntries(unsigned Val) {
     MinimumJumpTableEntries = Val;
   }
+
+  /// Indicate the maximum number of entries in jump tables.
+  /// Set to zero to generate unlimited jump tables.
+  void setMaximumJumpTableSize(unsigned);
 
   /// If set to a physical register, this specifies the register that
   /// llvm.savestack/llvm.restorestack should save and restore.
   void setStackPointerRegisterToSaveRestore(unsigned R) {
     StackPointerRegisterToSaveRestore = R;
-  }
-
-  /// Tells the code generator not to expand operations into sequences that use
-  /// the select operations if possible.
-  void setSelectIsExpensive(bool isExpensive = true) {
-    SelectIsExpensive = isExpensive;
   }
 
   /// Tells the code generator that the target has multiple (allocatable)
@@ -1410,15 +1418,6 @@ protected:
   void addRegisterClass(MVT VT, const TargetRegisterClass *RC) {
     assert((unsigned)VT.SimpleTy < array_lengthof(RegClassForVT));
     RegClassForVT[VT.SimpleTy] = RC;
-  }
-
-  /// Remove all register classes.
-  void clearRegisterClasses() {
-    std::fill(std::begin(RegClassForVT), std::end(RegClassForVT), nullptr);
-  }
-
-  /// \brief Remove all operation actions.
-  void clearOperationActions() {
   }
 
   /// Return the largest legal super-reg register class of the register class
@@ -1748,11 +1747,6 @@ public:
   /// In other words, unless the target performs a post-isel load combining,
   /// this information should not be provided because it will generate more
   /// loads.
-  virtual bool hasPairedLoad(Type * /*LoadedType*/,
-                             unsigned & /*RequiredAligment*/) const {
-    return false;
-  }
-
   virtual bool hasPairedLoad(EVT /*LoadedType*/,
                              unsigned & /*RequiredAligment*/) const {
     return false;
@@ -1901,10 +1895,6 @@ public:
 
 private:
   const TargetMachine &TM;
-
-  /// Tells the code generator not to expand operations into sequences that use
-  /// the select operations if possible.
-  bool SelectIsExpensive;
 
   /// Tells the code generator that the target has multiple (allocatable)
   /// condition registers that can be used to store the results of comparisons
@@ -2168,6 +2158,7 @@ protected:
   /// sequence of memory operands that is recognized by PrologEpilogInserter.
   MachineBasicBlock *emitPatchPoint(MachineInstr &MI,
                                     MachineBasicBlock *MBB) const;
+  TargetRecip ReciprocalEstimates;
 };
 
 /// This class defines information used to lower LLVM code to legal SelectionDAG
@@ -2180,6 +2171,8 @@ class TargetLowering : public TargetLoweringBase {
   void operator=(const TargetLowering&) = delete;
 
 public:
+  struct DAGCombinerInfo;
+
   /// NOTE: The TargetMachine owns TLOF.
   explicit TargetLowering(const TargetMachine &TM);
 
@@ -2292,6 +2285,16 @@ public:
     /// generalized for targets with other types of implicit widening casts.
     bool ShrinkDemandedOp(SDValue Op, unsigned BitWidth, const APInt &Demanded,
                           const SDLoc &dl);
+
+    /// Helper for SimplifyDemandedBits that can simplify an operation with
+    /// multiple uses.  This function uses TLI.SimplifyDemandedBits to
+    /// simplify Operand \p OpIdx of \p User and then updated \p User with
+    /// the simplified version.  No other uses of \p OpIdx are updated.
+    /// If \p User is the only user of \p OpIdx, this function behaves exactly
+    /// like TLI.SimplifyDemandedBits except that it also updates the DAG by
+    /// calling DCI.CommitTargetLoweringOpt.
+    bool SimplifyDemandedBits(SDNode *User, unsigned OpIdx,
+                              const APInt &Demanded, DAGCombinerInfo &DCI);
   };
 
   /// Look at Op.  At this point, we know that only the DemandedMask bits of the
@@ -2301,9 +2304,17 @@ public:
   /// expression and return a mask of KnownOne and KnownZero bits for the
   /// expression (used to simplify the caller).  The KnownZero/One bits may only
   /// be accurate for those bits in the DemandedMask.
+  /// \p AssumeSingleUse When this paramater is true, this function will
+  ///    attempt to simplify \p Op even if there are multiple uses.
+  ///    Callers are responsible for correctly updating the DAG based on the
+  ///    results of this function, because simply replacing replacing TLO.Old
+  ///    with TLO.New will be incorrect when this paramater is true and TLO.Old
+  ///    has multiple uses.
   bool SimplifyDemandedBits(SDValue Op, const APInt &DemandedMask,
                             APInt &KnownZero, APInt &KnownOne,
-                            TargetLoweringOpt &TLO, unsigned Depth = 0) const;
+                            TargetLoweringOpt &TLO,
+                            unsigned Depth = 0,
+                            bool AssumeSingleUse = false) const;
 
   /// Determine which of the bits specified in Mask are known to be either zero
   /// or one and return them in the KnownZero/KnownOne bitsets.
@@ -2338,7 +2349,6 @@ public:
     bool isCalledByLegalizer() const { return CalledByLegalizer; }
 
     void AddToWorklist(SDNode *N);
-    void RemoveFromWorklist(SDNode *N);
     SDValue CombineTo(SDNode *N, ArrayRef<SDValue> To, bool AddTo = true);
     SDValue CombineTo(SDNode *N, SDValue Res, bool AddTo = true);
     SDValue CombineTo(SDNode *N, SDValue Res0, SDValue Res1, bool AddTo = true);

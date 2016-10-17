@@ -3,7 +3,7 @@
 ; This file checks that the translation from llvm IR to generic MachineInstr
 ; is correct.
 target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
-target triple = "aarch64-apple-ios"
+target triple = "aarch64--"
 
 ; Tests for add.
 ; CHECK-LABEL: name: addi64
@@ -538,6 +538,18 @@ define void @test_i1_memops(i1* %addr) {
 ; CHECK: G_STORE [[TST]](s1), [[ADDR]](p0)
 define void @int_comparison(i32 %a, i32 %b, i1* %addr) {
   %res = icmp ne i32 %a, %b
+  store i1 %res, i1* %addr
+  ret void
+}
+
+; CHECK-LABEL: name: ptr_comparison
+; CHECK: [[LHS:%[0-9]+]](p0) = COPY %x0
+; CHECK: [[RHS:%[0-9]+]](p0) = COPY %x1
+; CHECK: [[ADDR:%[0-9]+]](p0) = COPY %x2
+; CHECK: [[TST:%[0-9]+]](s1) = G_ICMP intpred(eq), [[LHS]](p0), [[RHS]]
+; CHECK: G_STORE [[TST]](s1), [[ADDR]](p0)
+define void @ptr_comparison(i8* %a, i8* %b, i1* %addr) {
+  %res = icmp eq i8* %a, %b
   store i1 %res, i1* %addr
   ret void
 }

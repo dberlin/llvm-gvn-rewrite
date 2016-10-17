@@ -85,6 +85,7 @@ AMDGPUSubtarget::AMDGPUSubtarget(const Triple &TT, StringRef GPU, StringRef FS,
     FP64Denormals(false),
     FPExceptions(false),
     FlatForGlobal(false),
+    UnalignedScratchAccess(false),
     UnalignedBufferAccess(false),
 
     EnableXNACK(false),
@@ -107,6 +108,8 @@ AMDGPUSubtarget::AMDGPUSubtarget(const Triple &TT, StringRef GPU, StringRef FS,
     SGPRInitBug(false),
     HasSMemRealTime(false),
     Has16BitInsts(false),
+    HasMovrel(false),
+    HasVGPRIndexMode(false),
     FlatAddressSpace(false),
 
     R600ALUInst(false),
@@ -295,6 +298,15 @@ void SISubtarget::overrideSchedPolicy(MachineSchedPolicy &Policy,
 
 bool SISubtarget::isVGPRSpillingEnabled(const Function& F) const {
   return EnableVGPRSpilling || !AMDGPU::isShader(F.getCallingConv());
+}
+
+unsigned SISubtarget::getKernArgSegmentSize(unsigned ExplicitArgBytes) const {
+  unsigned ImplicitBytes = getImplicitArgNumBytes();
+  if (ImplicitBytes == 0)
+    return ExplicitArgBytes;
+
+  unsigned Alignment = getAlignmentForImplicitArgPtr();
+  return alignTo(ExplicitArgBytes, Alignment) + ImplicitBytes;
 }
 
 unsigned SISubtarget::getOccupancyWithNumSGPRs(unsigned SGPRs) const {

@@ -612,8 +612,7 @@ private:
   MemoryAccess *findDominatingDef(BasicBlock *, enum InsertionPlace);
   void removeFromLookups(MemoryAccess *);
 
-  void placePHINodes(const SmallPtrSetImpl<BasicBlock *> &,
-                     const SmallPtrSetImpl<BasicBlock *> &);
+  void placePHINodes(const SmallPtrSetImpl<BasicBlock *> &);
   MemoryAccess *renameBlock(BasicBlock *, MemoryAccess *);
   void renamePass(DomTreeNode *, MemoryAccess *IncomingVal,
                   SmallPtrSet<BasicBlock *, 16> &Visited);
@@ -974,6 +973,10 @@ inline upward_defs_iterator upward_defs_begin(const MemoryAccessPair &Pair) {
 }
 
 inline upward_defs_iterator upward_defs_end() { return upward_defs_iterator(); }
+
+// Return true when MD may alias MU, return false otherwise.
+bool defClobbersUseOrDef(MemoryDef *MD, const MemoryUseOrDef *MU,
+                         AliasAnalysis &AA);
 
 } // end namespace llvm
 

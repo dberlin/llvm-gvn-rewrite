@@ -67,6 +67,12 @@ def FeatureUnalignedBufferAccess : SubtargetFeature<"unaligned-buffer-access",
   "Support unaligned global loads and stores"
 >;
 
+def FeatureUnalignedScratchAccess : SubtargetFeature<"unaligned-scratch-access",
+  "UnalignedScratchAccess",
+  "true",
+  "Support unaligned scratch loads and stores"
+>;
+
 def FeatureXNACK : SubtargetFeature<"xnack",
   "EnableXNACK",
   "true",
@@ -122,6 +128,7 @@ def FeatureISAVersion7_0_0 : SubtargetFeatureISAVersion <7,0,0>;
 def FeatureISAVersion7_0_1 : SubtargetFeatureISAVersion <7,0,1>;
 def FeatureISAVersion8_0_0 : SubtargetFeatureISAVersion <8,0,0>;
 def FeatureISAVersion8_0_1 : SubtargetFeatureISAVersion <8,0,1>;
+def FeatureISAVersion8_0_2 : SubtargetFeatureISAVersion <8,0,2>;
 def FeatureISAVersion8_0_3 : SubtargetFeatureISAVersion <8,0,3>;
 
 class SubtargetFeatureLocalMemorySize <int Value> : SubtargetFeature<
@@ -165,6 +172,18 @@ def Feature16BitInsts : SubtargetFeature<"16-bit-insts",
   "Has16BitInsts",
   "true",
   "Has i16/f16 instructions"
+>;
+
+def FeatureMovrel : SubtargetFeature<"movrel",
+  "HasMovrel",
+  "true",
+  "Has v_movrel*_b32 instructions"
+>;
+
+def FeatureVGPRIndexMode : SubtargetFeature<"vgpr-index-mode",
+  "HasVGPRIndexMode",
+  "true",
+  "Has VGPR mode register indexing"
 >;
 
 //===------------------------------------------------------------===//
@@ -294,20 +313,20 @@ def FeatureNorthernIslands : SubtargetFeatureGeneration<"NORTHERN_ISLANDS",
 def FeatureSouthernIslands : SubtargetFeatureGeneration<"SOUTHERN_ISLANDS",
   [FeatureFP64, FeatureLocalMemorySize32768,
   FeatureWavefrontSize64, FeatureGCN, FeatureGCN1Encoding,
-  FeatureLDSBankCount32]
+  FeatureLDSBankCount32, FeatureMovrel]
 >;
 
 def FeatureSeaIslands : SubtargetFeatureGeneration<"SEA_ISLANDS",
   [FeatureFP64, FeatureLocalMemorySize65536,
   FeatureWavefrontSize64, FeatureGCN, FeatureFlatAddressSpace,
-  FeatureGCN1Encoding, FeatureCIInsts]
+  FeatureGCN1Encoding, FeatureCIInsts, FeatureMovrel]
 >;
 
 def FeatureVolcanicIslands : SubtargetFeatureGeneration<"VOLCANIC_ISLANDS",
   [FeatureFP64, FeatureLocalMemorySize65536,
    FeatureWavefrontSize64, FeatureFlatAddressSpace, FeatureGCN,
    FeatureGCN3Encoding, FeatureCIInsts, Feature16BitInsts,
-   FeatureSMemRealTime
+   FeatureSMemRealTime, FeatureVGPRIndexMode, FeatureMovrel
   ]
 >;
 
@@ -347,6 +366,10 @@ def AMDGPUAsmParser : AsmParser {
   // Some of the R600 registers have the same name, so this crashes.
   // For example T0_XYZW and T0_XY both have the asm name T0.
   let ShouldEmitMatchRegisterName = 0;
+}
+
+def AMDGPUAsmWriter : AsmWriter {
+  int PassSubtarget = 1;
 }
 
 def AMDGPUAsmVariants {
@@ -390,6 +413,7 @@ def AMDGPU : Target {
                                 VOP3AsmParserVariant,
                                 SDWAAsmParserVariant,
                                 DPPAsmParserVariant];
+  let AssemblyWriters = [AMDGPUAsmWriter];
 }
 
 // Dummy Instruction itineraries for pseudo instructions

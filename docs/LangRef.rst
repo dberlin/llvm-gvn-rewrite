@@ -2834,6 +2834,9 @@ bits. Any output bit can have a zero or one depending on the input bits.
     Safe:
       %A = -1
       %B = 0
+    Safe:
+      %A = %X  ;; By choosing undef as 0
+      %B = %X  ;; By choosing undef as -1
     Unsafe:
       %A = undef
       %B = undef
@@ -9291,6 +9294,32 @@ Note that calling this intrinsic does not prevent function inlining or
 other aggressive transformations, so the value returned may not be that
 of the obvious source-language caller.
 
+'``llvm.addressofreturnaddress``' Intrinsic
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Syntax:
+"""""""
+
+::
+
+      declare i8  *@llvm.addressofreturnaddress()
+
+Overview:
+"""""""""
+
+The '``llvm.addressofreturnaddress``' intrinsic returns a target-specific
+pointer to the place in the stack frame where the return address of the
+current function is stored.
+
+Semantics:
+""""""""""
+
+Note that calling this intrinsic does not prevent function inlining or
+other aggressive transformations, so the value returned may not be that
+of the obvious source-language caller.
+
+This intrinsic is only implemented for x86.
+
 '``llvm.frameaddress``' Intrinsic
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -9494,8 +9523,8 @@ Syntax:
       declare i32 @llvm.get.dynamic.area.offset.i32()
       declare i64 @llvm.get.dynamic.area.offset.i64()
 
-      Overview:
-      """""""""
+Overview:
+"""""""""
 
       The '``llvm.get.dynamic.area.offset.*``' intrinsic family is used to
       get the offset from native stack pointer to the address of the most
@@ -9700,6 +9729,37 @@ cause the ``-instrprof`` pass to generate the appropriate data
 structures and the code to increment the appropriate value, in a
 format that can be written out by a compiler runtime and consumed via
 the ``llvm-profdata`` tool.
+
+'``llvm.instrprof_increment_step``' Intrinsic
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Syntax:
+"""""""
+
+::
+
+      declare void @llvm.instrprof_increment_step(i8* <name>, i64 <hash>,
+                                                  i32 <num-counters>,
+                                                  i32 <index>, i64 <step>)
+
+Overview:
+"""""""""
+
+The '``llvm.instrprof_increment_step``' intrinsic is an extension to
+the '``llvm.instrprof_increment``' intrinsic with an additional fifth
+argument to specify the step of the increment.
+
+Arguments:
+""""""""""
+The first four arguments are the same as '``llvm.instrprof_increment``'
+instrinsic.
+
+The last argument specifies the value of the increment of the counter variable.
+
+Semantics:
+""""""""""
+See description of '``llvm.instrprof_increment``' instrinsic.
+
 
 '``llvm.instrprof_value_profile``' Intrinsic
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

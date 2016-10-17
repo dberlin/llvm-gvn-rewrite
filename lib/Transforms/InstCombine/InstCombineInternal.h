@@ -258,14 +258,8 @@ public:
   Instruction *visitIntToPtr(IntToPtrInst &CI);
   Instruction *visitBitCast(BitCastInst &CI);
   Instruction *visitAddrSpaceCast(AddrSpaceCastInst &CI);
-  Instruction *FoldSelectOpOp(SelectInst &SI, Instruction *TI, Instruction *FI);
-  Instruction *FoldSelectIntoOp(SelectInst &SI, Value *, Value *);
-  Instruction *FoldSPFofSPF(Instruction *Inner, SelectPatternFlavor SPF1,
-                            Value *A, Value *B, Instruction &Outer,
-                            SelectPatternFlavor SPF2, Value *C);
   Instruction *FoldItoFPtoI(Instruction &FI);
   Instruction *visitSelectInst(SelectInst &SI);
-  Instruction *visitSelectInstWithICmp(SelectInst &SI, ICmpInst *ICI);
   Instruction *visitCallInst(CallInst &CI);
   Instruction *visitInvokeInst(InvokeInst &II);
 
@@ -548,16 +542,16 @@ private:
                                             ConstantInt *AndCst = nullptr);
   Instruction *foldFCmpIntToFPConst(FCmpInst &I, Instruction *LHSI,
                                     Constant *RHSC);
-  Instruction *foldICmpCstShrConst(ICmpInst &I, Value *Op, Value *A,
-                                   ConstantInt *CI1, ConstantInt *CI2);
-  Instruction *foldICmpCstShlConst(ICmpInst &I, Value *Op, Value *A,
-                                   ConstantInt *CI1, ConstantInt *CI2);
   Instruction *foldICmpAddOpConst(Instruction &ICI, Value *X, ConstantInt *CI,
                                   ICmpInst::Predicate Pred);
   Instruction *foldICmpWithCastAndCast(ICmpInst &ICI);
 
   Instruction *foldICmpUsingKnownBits(ICmpInst &Cmp);
+  Instruction *foldICmpWithConstant(ICmpInst &Cmp);
   Instruction *foldICmpInstWithConstant(ICmpInst &Cmp);
+  Instruction *foldICmpInstWithConstantNotInt(ICmpInst &Cmp);
+  Instruction *foldICmpBinOp(ICmpInst &Cmp);
+  Instruction *foldICmpEquality(ICmpInst &Cmp);
 
   Instruction *foldICmpTruncConstant(ICmpInst &Cmp, Instruction *Trunc,
                                      const APInt *C);
@@ -585,11 +579,24 @@ private:
                                      const APInt *C1);
   Instruction *foldICmpAndShift(ICmpInst &Cmp, BinaryOperator *And,
                                 const APInt *C1, const APInt *C2);
+  Instruction *foldICmpShrConstConst(ICmpInst &I, Value *ShAmt, const APInt &C1,
+                                     const APInt &C2);
+  Instruction *foldICmpShlConstConst(ICmpInst &I, Value *ShAmt, const APInt &C1,
+                                     const APInt &C2);
 
   Instruction *foldICmpBinOpEqualityWithConstant(ICmpInst &Cmp,
                                                  BinaryOperator *BO,
                                                  const APInt *C);
   Instruction *foldICmpIntrinsicWithConstant(ICmpInst &ICI, const APInt *C);
+
+  // Helpers of visitSelectInst().
+  Instruction *foldSelectExtConst(SelectInst &Sel);
+  Instruction *foldSelectOpOp(SelectInst &SI, Instruction *TI, Instruction *FI);
+  Instruction *foldSelectIntoOp(SelectInst &SI, Value *, Value *);
+  Instruction *foldSPFofSPF(Instruction *Inner, SelectPatternFlavor SPF1,
+                            Value *A, Value *B, Instruction &Outer,
+                            SelectPatternFlavor SPF2, Value *C);
+  Instruction *foldSelectInstWithICmp(SelectInst &SI, ICmpInst *ICI);
 
   Instruction *OptAndOp(Instruction *Op, ConstantInt *OpRHS,
                         ConstantInt *AndRHS, BinaryOperator &TheAnd);

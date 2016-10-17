@@ -13,6 +13,10 @@
 #include "AMDKernelCodeT.h"
 #include "llvm/IR/CallingConv.h"
 
+#define GET_INSTRINFO_OPERAND_ENUM
+#include "AMDGPUGenInstrInfo.inc"
+#undef GET_INSTRINFO_OPERAND_ENUM
+
 namespace llvm {
 
 class FeatureBitset;
@@ -25,6 +29,9 @@ class MCSection;
 class MCSubtargetInfo;
 
 namespace AMDGPU {
+
+LLVM_READONLY
+int16_t getNamedOperandIdx(uint16_t Opcode, uint16_t NamedIdx);
 
 struct IsaVersion {
   unsigned Major;
@@ -68,6 +75,60 @@ std::pair<int, int> getIntegerPairAttribute(const Function &F,
                                             StringRef Name,
                                             std::pair<int, int> Default,
                                             bool OnlyFirstRequired = false);
+
+/// \returns Waitcnt bit mask for given isa \p Version.
+unsigned getWaitcntBitMask(IsaVersion Version);
+
+/// \returns Vmcnt bit mask for given isa \p Version.
+unsigned getVmcntBitMask(IsaVersion Version);
+
+/// \returns Expcnt bit mask for given isa \p Version.
+unsigned getExpcntBitMask(IsaVersion Version);
+
+/// \returns Lgkmcnt bit mask for given isa \p Version.
+unsigned getLgkmcntBitMask(IsaVersion Version);
+
+/// \returns Decoded Vmcnt from given \p Waitcnt for given isa \p Version.
+unsigned decodeVmcnt(IsaVersion Version, unsigned Waitcnt);
+
+/// \returns Decoded Expcnt from given \p Waitcnt for given isa \p Version.
+unsigned decodeExpcnt(IsaVersion Version, unsigned Waitcnt);
+
+/// \returns Decoded Lgkmcnt from given \p Waitcnt for given isa \p Version.
+unsigned decodeLgkmcnt(IsaVersion Version, unsigned Waitcnt);
+
+/// \brief Decodes Vmcnt, Expcnt and Lgkmcnt from given \p Waitcnt for given isa
+/// \p Version, and writes decoded values into \p Vmcnt, \p Expcnt and
+/// \p Lgkmcnt respectively.
+///
+/// \details \p Vmcnt, \p Expcnt and \p Lgkmcnt are decoded as follows:
+///     \p Vmcnt = \p Waitcnt[3:0]
+///     \p Expcnt = \p Waitcnt[6:4]
+///     \p Lgkmcnt = \p Waitcnt[11:8]
+void decodeWaitcnt(IsaVersion Version, unsigned Waitcnt,
+                   unsigned &Vmcnt, unsigned &Expcnt, unsigned &Lgkmcnt);
+
+/// \returns \p Waitcnt with encoded \p Vmcnt for given isa \p Version.
+unsigned encodeVmcnt(IsaVersion Version, unsigned Waitcnt, unsigned Vmcnt);
+
+/// \returns \p Waitcnt with encoded \p Expcnt for given isa \p Version.
+unsigned encodeExpcnt(IsaVersion Version, unsigned Waitcnt, unsigned Expcnt);
+
+/// \returns \p Waitcnt with encoded \p Lgkmcnt for given isa \p Version.
+unsigned encodeLgkmcnt(IsaVersion Version, unsigned Waitcnt, unsigned Lgkmcnt);
+
+/// \brief Encodes \p Vmcnt, \p Expcnt and \p Lgkmcnt into Waitcnt for given isa
+/// \p Version.
+///
+/// \details \p Vmcnt, \p Expcnt and \p Lgkmcnt are encoded as follows:
+///     Waitcnt[3:0]  = \p Vmcnt
+///     Waitcnt[6:4]  = \p Expcnt
+///     Waitcnt[11:8] = \p Lgkmcnt
+///
+/// \returns Waitcnt with encoded \p Vmcnt, \p Expcnt and \p Lgkmcnt for given
+/// isa \p Version.
+unsigned encodeWaitcnt(IsaVersion Version,
+                       unsigned Vmcnt, unsigned Expcnt, unsigned Lgkmcnt);
 
 unsigned getInitialPSInputAddr(const Function &F);
 

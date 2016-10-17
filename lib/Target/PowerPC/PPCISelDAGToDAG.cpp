@@ -215,7 +215,7 @@ namespace {
 
     void InsertVRSaveCode(MachineFunction &MF);
 
-    const char *getPassName() const override {
+    StringRef getPassName() const override {
       return "PowerPC DAG->DAG Pattern Instruction Selection";
     }
 
@@ -633,6 +633,13 @@ static unsigned getInt64CountDirect(int64_t Imm) {
   // If no shift, we're done.
   if (!Shift) return Result;
 
+  // If Hi word == Lo word,
+  // we can use rldimi to insert the Lo word into Hi word.
+  if ((unsigned)(Imm & 0xFFFFFFFF) == Remainder) {
+    ++Result;
+    return Result;
+  }
+
   // Shift for next step if the upper 32-bits were not zero.
   if (Imm)
     ++Result;
@@ -730,6 +737,14 @@ static SDNode *getInt64Direct(SelectionDAG *CurDAG, const SDLoc &dl,
 
   // If no shift, we're done.
   if (!Shift) return Result;
+
+  // If Hi word == Lo word,
+  // we can use rldimi to insert the Lo word into Hi word.
+  if ((unsigned)(Imm & 0xFFFFFFFF) == Remainder) {
+    SDValue Ops[] =
+      { SDValue(Result, 0), SDValue(Result, 0), getI32Imm(Shift), getI32Imm(0)};
+    return CurDAG->getMachineNode(PPC::RLDIMI, dl, MVT::i64, Ops);
+  }
 
   // Shift for next step if the upper 32-bits were not zero.
   if (Imm) {
@@ -1659,9 +1674,12 @@ class BitPermutationSelector {
 
       unsigned NumRLInsts = 0;
       bool FirstBG = true;
+      bool MoreBG = false;
       for (auto &BG : BitGroups) {
-        if (!MatchingBG(BG))
+        if (!MatchingBG(BG)) {
+          MoreBG = true;
           continue;
+        }
         NumRLInsts +=
           SelectRotMask64Count(BG.RLAmt, BG.Repl32, BG.StartIdx, BG.EndIdx,
                                !FirstBG);
@@ -1679,7 +1697,10 @@ class BitPermutationSelector {
       // because that exposes more opportunities for CSE.
       if (NumAndInsts > NumRLInsts)
         continue;
-      if (Use32BitInsts && NumAndInsts == NumRLInsts)
+      // When merging multiple bit groups, instruction or is used.
+      // But when rotate is used, rldimi can inert the rotated value into any
+      // register, so instruction or can be avoided.
+      if ((Use32BitInsts || MoreBG) && NumAndInsts == NumRLInsts)
         continue;
 
       DEBUG(dbgs() << "\t\t\t\tusing masking\n");
@@ -3200,7 +3221,7 @@ SDValue PPCDAGToDAGISel::combineToCMPB(SDNode *N) {
           Op0.getOperand(1) == Op1.getOperand(1) && CC == ISD::SETEQ &&
           isa<ConstantSDNode>(Op0.getOperand(1))) {
 
-        unsigned Bits = Op0.getValueType().getSizeInBits();
+        unsigned Bits = Op0.getValueSizeInBits();
         if (b != Bits/8-1)
           return false;
         if (Op0.getConstantOperandVal(1) != Bits-8)
@@ -3228,9 +3249,9 @@ SDValue PPCDAGToDAGISel::combineToCMPB(SDNode *N) {
 
         // Now we need to make sure that the upper bytes are known to be
         // zero.
-        unsigned Bits = Op0.getValueType().getSizeInBits();
-        if (!CurDAG->MaskedValueIsZero(Op0,
-              APInt::getHighBitsSet(Bits, Bits - (b+1)*8)))
+        unsigned Bits = Op0.getValueSizeInBits();
+        if (!CurDAG->MaskedValueIsZero(
+                Op0, APInt::getHighBitsSet(Bits, Bits - (b + 1) * 8)))
           return false;
 
         LHS = Op0.getOperand(0);
@@ -3263,7 +3284,7 @@ SDValue PPCDAGToDAGISel::combineToCMPB(SDNode *N) {
     } else if (Op.getOpcode() == ISD::SRL) {
       if (!isa<ConstantSDNode>(Op.getOperand(1)))
         return false;
-      unsigned Bits = Op.getValueType().getSizeInBits();
+      unsigned Bits = Op.getValueSizeInBits();
       if (b != Bits/8-1)
         return false;
       if (Op.getConstantOperandVal(1) != Bits-8)

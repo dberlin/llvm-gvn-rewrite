@@ -26,9 +26,9 @@ namespace llvm {
 class CallLowering;
 class DataLayout;
 class InstructionSelector;
+class LegalizerInfo;
 class MachineFunction;
 class MachineInstr;
-class MachineLegalizer;
 class RegisterBankInfo;
 class SDep;
 class SUnit;
@@ -71,6 +71,8 @@ public:
 
   virtual ~TargetSubtargetInfo();
 
+  virtual bool isXRaySupported() const { return false; }
+
   // Interfaces to the major aspects of target machine information:
   //
   // -- Instruction opcode and operand information
@@ -105,9 +107,7 @@ public:
     return nullptr;
   }
 
-  virtual const MachineLegalizer *getMachineLegalizer() const {
-    return nullptr;
-  }
+  virtual const LegalizerInfo *getLegalizerInfo() const { return nullptr; }
 
   /// getRegisterInfo - If register information is available, return it.  If
   /// not, return null.

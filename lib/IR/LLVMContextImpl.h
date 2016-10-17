@@ -33,6 +33,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/Dwarf.h"
+#include "llvm/Support/YAMLTraits.h"
 #include <vector>
 
 namespace llvm {
@@ -758,23 +759,23 @@ template <> struct MDNodeKeyImpl<DIGlobalVariable> {
   Metadata *Type;
   bool IsLocalToUnit;
   bool IsDefinition;
-  Metadata *Variable;
+  Metadata *Expr;
   Metadata *StaticDataMemberDeclaration;
 
   MDNodeKeyImpl(Metadata *Scope, MDString *Name, MDString *LinkageName,
                 Metadata *File, unsigned Line, Metadata *Type,
-                bool IsLocalToUnit, bool IsDefinition, Metadata *Variable,
+                bool IsLocalToUnit, bool IsDefinition, Metadata *Expr,
                 Metadata *StaticDataMemberDeclaration)
       : Scope(Scope), Name(Name), LinkageName(LinkageName), File(File),
         Line(Line), Type(Type), IsLocalToUnit(IsLocalToUnit),
-        IsDefinition(IsDefinition), Variable(Variable),
+        IsDefinition(IsDefinition), Expr(Expr),
         StaticDataMemberDeclaration(StaticDataMemberDeclaration) {}
   MDNodeKeyImpl(const DIGlobalVariable *N)
       : Scope(N->getRawScope()), Name(N->getRawName()),
         LinkageName(N->getRawLinkageName()), File(N->getRawFile()),
         Line(N->getLine()), Type(N->getRawType()),
         IsLocalToUnit(N->isLocalToUnit()), IsDefinition(N->isDefinition()),
-        Variable(N->getRawVariable()),
+        Expr(N->getRawExpr()),
         StaticDataMemberDeclaration(N->getRawStaticDataMemberDeclaration()) {}
 
   bool isKeyOf(const DIGlobalVariable *RHS) const {
@@ -783,13 +784,13 @@ template <> struct MDNodeKeyImpl<DIGlobalVariable> {
            File == RHS->getRawFile() && Line == RHS->getLine() &&
            Type == RHS->getRawType() && IsLocalToUnit == RHS->isLocalToUnit() &&
            IsDefinition == RHS->isDefinition() &&
-           Variable == RHS->getRawVariable() &&
+           Expr == RHS->getRawExpr() &&
            StaticDataMemberDeclaration ==
                RHS->getRawStaticDataMemberDeclaration();
   }
   unsigned getHashValue() const {
     return hash_combine(Scope, Name, LinkageName, File, Line, Type,
-                        IsLocalToUnit, IsDefinition, Variable,
+                        IsLocalToUnit, IsDefinition, Expr,
                         StaticDataMemberDeclaration);
   }
 };
@@ -1043,14 +1044,17 @@ public:
   void *DiagnosticContext;
   bool RespectDiagnosticFilters;
   bool DiagnosticHotnessRequested;
+  std::unique_ptr<yaml::Output> DiagnosticsOutputFile;
 
   LLVMContext::YieldCallbackTy YieldCallback;
   void *YieldOpaqueHandle;
 
-  typedef DenseMap<APInt, ConstantInt *, DenseMapAPIntKeyInfo> IntMapTy;
+  typedef DenseMap<APInt, std::unique_ptr<ConstantInt>, DenseMapAPIntKeyInfo>
+      IntMapTy;
   IntMapTy IntConstants;
 
-  typedef DenseMap<APFloat, ConstantFP *, DenseMapAPFloatKeyInfo> FPMapTy;
+  typedef DenseMap<APFloat, std::unique_ptr<ConstantFP>, DenseMapAPFloatKeyInfo>
+      FPMapTy;
   FPMapTy FPConstants;
 
   FoldingSet<AttributeImpl> AttrsSet;
@@ -1076,7 +1080,7 @@ public:
   // them on context teardown.
   std::vector<MDNode *> DistinctMDNodes;
 
-  DenseMap<Type*, ConstantAggregateZero*> CAZConstants;
+  DenseMap<Type *, std::unique_ptr<ConstantAggregateZero>> CAZConstants;
 
   typedef ConstantUniqueMap<ConstantArray> ArrayConstantsTy;
   ArrayConstantsTy ArrayConstants;
@@ -1086,11 +1090,11 @@ public:
   
   typedef ConstantUniqueMap<ConstantVector> VectorConstantsTy;
   VectorConstantsTy VectorConstants;
-  
-  DenseMap<PointerType*, ConstantPointerNull*> CPNConstants;
 
-  DenseMap<Type*, UndefValue*> UVConstants;
-  
+  DenseMap<PointerType *, std::unique_ptr<ConstantPointerNull>> CPNConstants;
+
+  DenseMap<Type *, std::unique_ptr<UndefValue>> UVConstants;
+
   StringMap<ConstantDataSequential*> CDSConstants;
 
   DenseMap<std::pair<const Function *, const BasicBlock *>, BlockAddress *>

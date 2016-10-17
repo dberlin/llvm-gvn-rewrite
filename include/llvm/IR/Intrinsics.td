@@ -290,6 +290,7 @@ def int_gcwrite : Intrinsic<[],
 //===--------------------- Code Generator Intrinsics ----------------------===//
 //
 def int_returnaddress : Intrinsic<[llvm_ptr_ty], [llvm_i32_ty], [IntrNoMem]>;
+def int_addressofreturnaddress : Intrinsic<[llvm_ptr_ty], [], [IntrNoMem]>;
 def int_frameaddress  : Intrinsic<[llvm_ptr_ty], [llvm_i32_ty], [IntrNoMem]>;
 def int_read_register  : Intrinsic<[llvm_anyint_ty], [llvm_metadata_ty],
                                    [IntrReadMem], "llvm.read_register">;
@@ -344,6 +345,12 @@ def int_stackguard : Intrinsic<[llvm_ptr_ty], [], []>;
 def int_instrprof_increment : Intrinsic<[],
                                         [llvm_ptr_ty, llvm_i64_ty,
                                          llvm_i32_ty, llvm_i32_ty],
+                                        []>;
+
+// A counter increment with step for instrumentation based profiling.
+def int_instrprof_increment_step : Intrinsic<[],
+                                        [llvm_ptr_ty, llvm_i64_ty,
+                                         llvm_i32_ty, llvm_i32_ty, llvm_i64_ty],
                                         []>;
 
 // A call to profile runtime for value profiling of target expressions

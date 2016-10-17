@@ -39,6 +39,10 @@ static cl::opt<std::string> OptPipeline("opt-pipeline",
                                         cl::desc("Optimizer Pipeline"),
                                         cl::value_desc("pipeline"));
 
+static cl::opt<std::string> AAPipeline("aa-pipeline",
+                                       cl::desc("Alias Analysis Pipeline"),
+                                       cl::value_desc("aapipeline"));
+
 static cl::opt<bool> SaveTemps("save-temps", cl::desc("Save temporary files"));
 
 static cl::opt<bool>
@@ -91,22 +95,6 @@ template <typename T> static T check(ErrorOr<T> E, std::string Msg) {
   return T();
 }
 
-namespace {
-// Define the LTOOutput handling
-class LTOOutput : public lto::NativeObjectOutput {
-  std::string Path;
-
-public:
-  LTOOutput(std::string Path) : Path(std::move(Path)) {}
-  std::unique_ptr<raw_pwrite_stream> getStream() override {
-    std::error_code EC;
-    auto S = llvm::make_unique<raw_fd_ostream>(Path, EC, sys::fs::F_None);
-    check(EC, Path);
-    return std::move(S);
-  }
-};
-}
-
 int main(int argc, char **argv) {
   InitializeAllTargets();
   InitializeAllTargetMCs();
@@ -154,6 +142,7 @@ int main(int argc, char **argv) {
 
   // Run a custom pipeline, if asked for.
   Conf.OptPipeline = OptPipeline;
+  Conf.AAPipeline = AAPipeline;
 
   ThinBackend Backend;
   if (ThinLTODistributedIndexes)
@@ -169,6 +158,12 @@ int main(int argc, char **argv) {
         check(InputFile::create(MB->getMemBufferRef()), F);
 
     std::vector<SymbolResolution> Res;
+    // FIXME: Workaround PR30396 which means that a symbol can appear
+    // more than once if it is defined in module-level assembly and
+    // has a GV declaration. Keep track of the resolutions found in this
+    // file and remove them from the CommandLineResolutions map afterwards,
+    // so that we don't flag the second one as missing.
+    std::map<std::string, SymbolResolution> CurrentFileSymResolutions;
     for (const InputFile::Symbol &Sym : Input->symbols()) {
       auto I = CommandLineResolutions.find({F, Sym.getName()});
       if (I == CommandLineResolutions.end()) {
@@ -177,8 +172,15 @@ int main(int argc, char **argv) {
         HasErrors = true;
       } else {
         Res.push_back(I->second);
-        CommandLineResolutions.erase(I);
+        CurrentFileSymResolutions[Sym.getName()] = I->second;
       }
+    }
+    for (auto I : CurrentFileSymResolutions) {
+#ifndef NDEBUG
+      auto NumErased =
+#endif
+          CommandLineResolutions.erase({F, I.first});
+      assert(NumErased > 0);
     }
 
     if (HasErrors)
@@ -198,23 +200,28 @@ int main(int argc, char **argv) {
   if (HasErrors)
     return 1;
 
-  auto AddOutput =
-      [&](size_t Task) -> std::unique_ptr<lto::NativeObjectOutput> {
+  auto AddStream =
+      [&](size_t Task) -> std::unique_ptr<lto::NativeObjectStream> {
     std::string Path = OutputFilename + "." + utostr(Task);
-    if (CacheDir.empty())
-      return llvm::make_unique<LTOOutput>(std::move(Path));
 
-    return llvm::make_unique<CacheObjectOutput>(
-        CacheDir, [Path](std::string EntryPath) {
-          // Load the entry from the cache now.
-          auto ReloadedBufferOrErr = MemoryBuffer::getFile(EntryPath);
-          if (auto EC = ReloadedBufferOrErr.getError())
-            report_fatal_error(Twine("Can't reload cached file '") + EntryPath +
-                               "': " + EC.message() + "\n");
-
-          *LTOOutput(Path).getStream() << (*ReloadedBufferOrErr)->getBuffer();
-        });
+    std::error_code EC;
+    auto S = llvm::make_unique<raw_fd_ostream>(Path, EC, sys::fs::F_None);
+    check(EC, Path);
+    return llvm::make_unique<lto::NativeObjectStream>(std::move(S));
   };
 
-  check(Lto.run(AddOutput), "LTO::run failed");
+  auto AddFile = [&](size_t Task, StringRef Path) {
+    auto ReloadedBufferOrErr = MemoryBuffer::getFile(Path);
+    if (auto EC = ReloadedBufferOrErr.getError())
+      report_fatal_error(Twine("Can't reload cached file '") + Path + "': " +
+                         EC.message() + "\n");
+
+    *AddStream(Task)->OS << (*ReloadedBufferOrErr)->getBuffer();
+  };
+
+  NativeObjectCache Cache;
+  if (!CacheDir.empty())
+    Cache = localCache(CacheDir, AddFile);
+
+  check(Lto.run(AddStream, Cache), "LTO::run failed");
 }

@@ -2271,9 +2271,9 @@ Instruction *InstCombiner::visitSwitchInst(SwitchInst &SI) {
           SI.getContext(), C.getCaseValue()->getValue().trunc(NewWidth)));
   }
 
+  Value *Op0 = nullptr;
   ConstantInt *AddRHS = nullptr;
-  if (match(Cond, m_Add(m_Value(), m_ConstantInt(AddRHS)))) {
-    Instruction *I = cast<Instruction>(Cond);
+  if (match(Cond, m_Add(m_Value(Op0), m_ConstantInt(AddRHS)))) {
     // Change 'switch (X+4) case 1:' into 'switch (X) case -3'.
     for (SwitchInst::CaseIt i = SI.case_begin(), e = SI.case_end(); i != e;
          ++i) {
@@ -2289,8 +2289,9 @@ Instruction *InstCombiner::visitSwitchInst(SwitchInst &SI) {
              "Result of expression should be constant");
       i.setValue(cast<ConstantInt>(NewCaseVal));
     }
-    SI.setCondition(I->getOperand(0));
-    Worklist.Add(I);
+    SI.setCondition(Op0);
+    if (auto *CondI = dyn_cast<Instruction>(Cond))
+      Worklist.Add(CondI);
     return &SI;
   }
 
@@ -2859,13 +2860,14 @@ bool InstCombiner::run() {
 
     // In general, it is possible for computeKnownBits to determine all bits in
     // a value even when the operands are not all constants.
-    if (ExpensiveCombines && !I->use_empty() && I->getType()->isIntegerTy()) {
-      unsigned BitWidth = I->getType()->getScalarSizeInBits();
+    Type *Ty = I->getType();
+    if (ExpensiveCombines && !I->use_empty() && Ty->isIntOrIntVectorTy()) {
+      unsigned BitWidth = Ty->getScalarSizeInBits();
       APInt KnownZero(BitWidth, 0);
       APInt KnownOne(BitWidth, 0);
       computeKnownBits(I, KnownZero, KnownOne, /*Depth*/0, I);
       if ((KnownZero | KnownOne).isAllOnesValue()) {
-        Constant *C = ConstantInt::get(I->getContext(), KnownOne);
+        Constant *C = ConstantInt::get(Ty, KnownOne);
         DEBUG(dbgs() << "IC: ConstFold (all bits known) to: " << *C <<
                         " from: " << *I << '\n');
 
