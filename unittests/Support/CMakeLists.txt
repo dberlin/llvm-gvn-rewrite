@@ -19,6 +19,7 @@ add_llvm_unittest(SupportTests
   ErrorTest.cpp
   ErrorOrTest.cpp
   FileOutputBufferTest.cpp
+  Host.cpp
   LEB128Test.cpp
   LineIteratorTest.cpp
   LockFileManagerTest.cpp
@@ -39,6 +40,7 @@ add_llvm_unittest(SupportTests
   StringPool.cpp
   SwapByteOrderTest.cpp
   TargetParserTest.cpp
+  Threading.cpp
   ThreadLocalTest.cpp
   ThreadPool.cpp
   TimerTest.cpp
@@ -52,6 +54,7 @@ add_llvm_unittest(SupportTests
   raw_ostream_test.cpp
   raw_pwrite_stream_test.cpp
   raw_sha1_ostream_test.cpp
+  xxhashTest.cpp
   )
 
 # ManagedStatic.cpp uses <pthread>.

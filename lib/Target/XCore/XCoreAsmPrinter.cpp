@@ -58,9 +58,7 @@ namespace {
                              std::unique_ptr<MCStreamer> Streamer)
         : AsmPrinter(TM, std::move(Streamer)), MCInstLowering(*this) {}
 
-    const char *getPassName() const override {
-      return "XCore Assembly Printer";
-    }
+    StringRef getPassName() const override { return "XCore Assembly Printer"; }
 
     void printInlineJT(const MachineInstr *MI, int opNum, raw_ostream &O,
                        const std::string &directive = ".jmptable");
@@ -299,5 +297,5 @@ void XCoreAsmPrinter::EmitInstruction(const MachineInstr *MI) {
 
 // Force static initialization.
 extern "C" void LLVMInitializeXCoreAsmPrinter() { 
-  RegisterAsmPrinter<XCoreAsmPrinter> X(TheXCoreTarget);
+  RegisterAsmPrinter<XCoreAsmPrinter> X(getTheXCoreTarget());
 }

@@ -8,7 +8,10 @@ set(TracePCTests
   CounterTest
   CallerCalleeTest
   NullDerefTest
-  MinimizeCorpusTest
+  ShrinkControlFlowTest
+  ShrinkValueProfileTest
+  SwitchTest
+  Switch2Test
   FullCoverageSetTest
   )
 

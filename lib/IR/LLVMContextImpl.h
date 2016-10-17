@@ -33,6 +33,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/Dwarf.h"
+#include "llvm/Support/YAMLTraits.h"
 #include <vector>
 
 namespace llvm {
@@ -1043,14 +1044,17 @@ public:
   void *DiagnosticContext;
   bool RespectDiagnosticFilters;
   bool DiagnosticHotnessRequested;
+  std::unique_ptr<yaml::Output> DiagnosticsOutputFile;
 
   LLVMContext::YieldCallbackTy YieldCallback;
   void *YieldOpaqueHandle;
 
-  typedef DenseMap<APInt, ConstantInt *, DenseMapAPIntKeyInfo> IntMapTy;
+  typedef DenseMap<APInt, std::unique_ptr<ConstantInt>, DenseMapAPIntKeyInfo>
+      IntMapTy;
   IntMapTy IntConstants;
 
-  typedef DenseMap<APFloat, ConstantFP *, DenseMapAPFloatKeyInfo> FPMapTy;
+  typedef DenseMap<APFloat, std::unique_ptr<ConstantFP>, DenseMapAPFloatKeyInfo>
+      FPMapTy;
   FPMapTy FPConstants;
 
   FoldingSet<AttributeImpl> AttrsSet;
@@ -1076,7 +1080,7 @@ public:
   // them on context teardown.
   std::vector<MDNode *> DistinctMDNodes;
 
-  DenseMap<Type*, ConstantAggregateZero*> CAZConstants;
+  DenseMap<Type *, std::unique_ptr<ConstantAggregateZero>> CAZConstants;
 
   typedef ConstantUniqueMap<ConstantArray> ArrayConstantsTy;
   ArrayConstantsTy ArrayConstants;
@@ -1086,11 +1090,11 @@ public:
   
   typedef ConstantUniqueMap<ConstantVector> VectorConstantsTy;
   VectorConstantsTy VectorConstants;
-  
-  DenseMap<PointerType*, ConstantPointerNull*> CPNConstants;
 
-  DenseMap<Type*, UndefValue*> UVConstants;
-  
+  DenseMap<PointerType *, std::unique_ptr<ConstantPointerNull>> CPNConstants;
+
+  DenseMap<Type *, std::unique_ptr<UndefValue>> UVConstants;
+
   StringMap<ConstantDataSequential*> CDSConstants;
 
   DenseMap<std::pair<const Function *, const BasicBlock *>, BlockAddress *>

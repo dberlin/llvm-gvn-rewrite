@@ -890,6 +890,7 @@ def CallImmAddr  : Predicate<"Subtarget->isLegalToCallImmediateAddr()">;
 def FavorMemIndirectCall  : Predicate<"!Subtarget->callRegIndirect()">;
 def NotSlowIncDec : Predicate<"!Subtarget->slowIncDec()">;
 def HasFastMem32 : Predicate<"!Subtarget->isUnalignedMem32Slow()">;
+def HasFastLZCNT : Predicate<"Subtarget->hasFastLZCNT()">;
 def HasMFence    : Predicate<"Subtarget->hasMFence()">;
 
 //===----------------------------------------------------------------------===//
@@ -2629,6 +2630,12 @@ def : MnemonicAlias<"repnz", "repne">;
 def : MnemonicAlias<"ret", "retw", "att">, Requires<[In16BitMode]>;
 def : MnemonicAlias<"ret", "retl", "att">, Requires<[In32BitMode]>;
 def : MnemonicAlias<"ret", "retq", "att">, Requires<[In64BitMode]>;
+
+// Apply 'ret' behavior to 'retn'
+def : MnemonicAlias<"retn", "retw", "att">, Requires<[In16BitMode]>;
+def : MnemonicAlias<"retn", "retl", "att">, Requires<[In32BitMode]>;
+def : MnemonicAlias<"retn", "retq", "att">, Requires<[In64BitMode]>;
+def : MnemonicAlias<"retn", "ret", "intel">;
 
 def : MnemonicAlias<"sal", "shl", "intel">;
 def : MnemonicAlias<"salb", "shlb", "att">;

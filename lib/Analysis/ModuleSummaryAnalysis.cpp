@@ -18,6 +18,7 @@
 #include "llvm/Analysis/BranchProbabilityInfo.h"
 #include "llvm/Analysis/IndirectCallPromotionAnalysis.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/IR/CallSite.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/InstIterator.h"
@@ -63,8 +64,20 @@ static void findRefEdges(const User *CurUser, DenseSet<const Value *> &RefEdges,
   }
 }
 
+static CalleeInfo::HotnessType getHotness(uint64_t ProfileCount,
+                                          ProfileSummaryInfo *PSI) {
+  if (!PSI)
+    return CalleeInfo::HotnessType::Unknown;
+  if (PSI->isHotCount(ProfileCount))
+    return CalleeInfo::HotnessType::Hot;
+  if (PSI->isColdCount(ProfileCount))
+    return CalleeInfo::HotnessType::Cold;
+  return CalleeInfo::HotnessType::None;
+}
+
 static void computeFunctionSummary(ModuleSummaryIndex &Index, const Module &M,
-                                   const Function &F, BlockFrequencyInfo *BFI) {
+                                   const Function &F, BlockFrequencyInfo *BFI,
+                                   ProfileSummaryInfo *PSI) {
   // Summary not currently supported for anonymous functions, they must
   // be renamed.
   if (!F.hasName())
@@ -88,16 +101,30 @@ static void computeFunctionSummary(ModuleSummaryIndex &Index, const Module &M,
       auto CS = ImmutableCallSite(&I);
       if (!CS)
         continue;
+      auto *CalledValue = CS.getCalledValue();
       auto *CalledFunction = CS.getCalledFunction();
+      // Check if this is an alias to a function. If so, get the
+      // called aliasee for the checks below.
+      if (auto *GA = dyn_cast<GlobalAlias>(CalledValue)) {
+        assert(!CalledFunction && "Expected null called function in callsite for alias");
+        CalledFunction = dyn_cast<Function>(GA->getBaseObject());
+      }
       // Check if this is a direct call to a known function.
       if (CalledFunction) {
         // Skip nameless and intrinsics.
         if (!CalledFunction->hasName() || CalledFunction->isIntrinsic())
           continue;
         auto ScaledCount = BFI ? BFI->getBlockProfileCount(&BB) : None;
+        // Use the original CalledValue, in case it was an alias. We want
+        // to record the call edge to the alias in that case. Eventually
+        // an alias summary will be created to associate the alias and
+        // aliasee.
         auto *CalleeId =
-            M.getValueSymbolTable().lookup(CalledFunction->getName());
-        CallGraphEdges[CalleeId] += (ScaledCount ? ScaledCount.getValue() : 0);
+            M.getValueSymbolTable().lookup(CalledValue->getName());
+
+        auto Hotness = ScaledCount ? getHotness(ScaledCount.getValue(), PSI)
+                                   : CalleeInfo::HotnessType::Unknown;
+        CallGraphEdges[CalleeId].updateHotness(Hotness);
       } else {
         const auto *CI = dyn_cast<CallInst>(&I);
         // Skip inline assembly calls.
@@ -113,7 +140,8 @@ static void computeFunctionSummary(ModuleSummaryIndex &Index, const Module &M,
             ICallAnalysis.getPromotionCandidatesForInstruction(
                 &I, NumVals, TotalCount, NumCandidates);
         for (auto &Candidate : CandidateProfileData)
-          IndirectCallEdges[Candidate.Value] += Candidate.Count;
+          IndirectCallEdges[Candidate.Value].updateHotness(
+              getHotness(Candidate.Count, PSI));
       }
     }
 
@@ -140,7 +168,8 @@ static void computeVariableSummary(ModuleSummaryIndex &Index,
 
 ModuleSummaryIndex llvm::buildModuleSummaryIndex(
     const Module &M,
-    std::function<BlockFrequencyInfo *(const Function &F)> GetBFICallback) {
+    std::function<BlockFrequencyInfo *(const Function &F)> GetBFICallback,
+    ProfileSummaryInfo *PSI) {
   ModuleSummaryIndex Index;
   // Check if the module can be promoted, otherwise just disable importing from
   // it by not emitting any summary.
@@ -165,7 +194,7 @@ ModuleSummaryIndex llvm::buildModuleSummaryIndex(
       BFI = BFIPtr.get();
     }
 
-    computeFunctionSummary(Index, M, F, BFI);
+    computeFunctionSummary(Index, M, F, BFI, PSI);
   }
 
   // Compute summaries for all variables defined in module, and save in the
@@ -182,10 +211,15 @@ char ModuleSummaryIndexAnalysis::PassID;
 
 ModuleSummaryIndex
 ModuleSummaryIndexAnalysis::run(Module &M, ModuleAnalysisManager &AM) {
+  ProfileSummaryInfo &PSI = AM.getResult<ProfileSummaryAnalysis>(M);
   auto &FAM = AM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
-  return buildModuleSummaryIndex(M, [&FAM](const Function &F) {
-    return &FAM.getResult<BlockFrequencyAnalysis>(*const_cast<Function *>(&F));
-  });
+  return buildModuleSummaryIndex(
+      M,
+      [&FAM](const Function &F) {
+        return &FAM.getResult<BlockFrequencyAnalysis>(
+            *const_cast<Function *>(&F));
+      },
+      &PSI);
 }
 
 char ModuleSummaryIndexWrapperPass::ID = 0;
@@ -205,11 +239,15 @@ ModuleSummaryIndexWrapperPass::ModuleSummaryIndexWrapperPass()
 }
 
 bool ModuleSummaryIndexWrapperPass::runOnModule(Module &M) {
-  Index = buildModuleSummaryIndex(M, [this](const Function &F) {
-    return &(this->getAnalysis<BlockFrequencyInfoWrapperPass>(
-                     *const_cast<Function *>(&F))
-                 .getBFI());
-  });
+  auto &PSI = *getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI();
+  Index = buildModuleSummaryIndex(
+      M,
+      [this](const Function &F) {
+        return &(this->getAnalysis<BlockFrequencyInfoWrapperPass>(
+                         *const_cast<Function *>(&F))
+                     .getBFI());
+      },
+      &PSI);
   return false;
 }
 
@@ -221,6 +259,7 @@ bool ModuleSummaryIndexWrapperPass::doFinalization(Module &M) {
 void ModuleSummaryIndexWrapperPass::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesAll();
   AU.addRequired<BlockFrequencyInfoWrapperPass>();
+  AU.addRequired<ProfileSummaryInfoWrapperPass>();
 }
 
 bool llvm::moduleCanBeRenamedForThinLTO(const Module &M) {

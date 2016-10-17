@@ -20,6 +20,10 @@ def isSI : Predicate<"Subtarget->getGeneration() "
 
 def has16BankLDS : Predicate<"Subtarget->getLDSBankCount() == 16">;
 def has32BankLDS : Predicate<"Subtarget->getLDSBankCount() == 32">;
+def HasVGPRIndexMode : Predicate<"Subtarget->hasVGPRIndexMode()">,
+                      AssemblerPredicate<"FeatureVGPRIndexMode">;
+def HasMovrel : Predicate<"Subtarget->hasMovrel()">,
+                AssemblerPredicate<"FeatureMovrel">;
 
 include "VOPInstructions.td"
 include "SOPInstructions.td"
@@ -112,6 +116,27 @@ def GET_GROUPSTATICSIZE : PseudoInstSI <(outs SReg_32:$sdst), (ins),
   [(set SReg_32:$sdst, (int_amdgcn_groupstaticsize))]>;
 } // End let usesCustomInserter = 1, SALU = 1
 
+def S_MOV_B64_term : PseudoInstSI<(outs SReg_64:$dst),
+   (ins SSrc_b64:$src0)> {
+  let SALU = 1;
+  let isAsCheapAsAMove = 1;
+  let isTerminator = 1;
+}
+
+def S_XOR_B64_term : PseudoInstSI<(outs SReg_64:$dst),
+   (ins SSrc_b64:$src0, SSrc_b64:$src1)> {
+  let SALU = 1;
+  let isAsCheapAsAMove = 1;
+  let isTerminator = 1;
+}
+
+def S_ANDN2_B64_term : PseudoInstSI<(outs SReg_64:$dst),
+   (ins SSrc_b64:$src0, SSrc_b64:$src1)> {
+  let SALU = 1;
+  let isAsCheapAsAMove = 1;
+  let isTerminator = 1;
+}
+
 // SI pseudo instructions. These are used by the CFG structurizer pass
 // and should be lowered to ISA instructions prior to codegen.
 
@@ -124,6 +149,8 @@ def SI_MASK_BRANCH : PseudoInstSI <
   let isBarrier = 0;
   let SALU = 1;
   let Uses = [EXEC];
+  let SchedRW = [];
+  let hasNoSchedulingInfo = 1;
 }
 
 let isTerminator = 1 in {
@@ -132,9 +159,9 @@ def SI_IF: CFPseudoInstSI <
   (outs SReg_64:$dst), (ins SReg_64:$vcc, brtarget:$target),
   [(set i64:$dst, (int_amdgcn_if i1:$vcc, bb:$target))], 1, 1> {
   let Constraints = "";
-  let Size = 8;
-  let mayStore = 1;
+  let Size = 12;
   let mayLoad = 1;
+  let mayStore = 1;
   let hasSideEffects = 1;
 }
 
@@ -331,8 +358,9 @@ defm SI_SPILL_V512 : SI_SPILL_VGPR <VReg_512>;
 
 def SI_PC_ADD_REL_OFFSET : SPseudoInstSI <
   (outs SReg_64:$dst),
-  (ins si_ga:$ptr),
-  [(set SReg_64:$dst, (i64 (SIpc_add_rel_offset (tglobaladdr:$ptr))))]> {
+  (ins si_ga:$ptr_lo, si_ga:$ptr_hi),
+  [(set SReg_64:$dst,
+   (i64 (SIpc_add_rel_offset (tglobaladdr:$ptr_lo), (tglobaladdr:$ptr_hi))))]> {
   let Defs = [SCC];
 }
 
@@ -861,12 +889,12 @@ def : Pat <
 
 def : Pat <
   (i1 (trunc i32:$a)),
-  (V_CMP_EQ_I32_e64 (S_AND_B32 (i32 1), $a), 1)
+  (V_CMP_EQ_U32_e64 (S_AND_B32 (i32 1), $a), 1)
 >;
 
 def : Pat <
   (i1 (trunc i64:$a)),
-  (V_CMP_EQ_I32_e64 (S_AND_B32 (i32 1),
+  (V_CMP_EQ_U32_e64 (S_AND_B32 (i32 1),
                     (EXTRACT_SUBREG $a, sub0)), 1)
 >;
 

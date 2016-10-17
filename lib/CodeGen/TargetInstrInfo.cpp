@@ -84,8 +84,8 @@ unsigned TargetInstrInfo::getInlineAsmLength(const char *Str,
     if (*Str == '\n' || strncmp(Str, MAI.getSeparatorString(),
                                 strlen(MAI.getSeparatorString())) == 0) {
       atInsnStart = true;
-    } else if (strncmp(Str, MAI.getCommentString(),
-                       strlen(MAI.getCommentString())) == 0) {
+    } else if (strncmp(Str, MAI.getCommentString().data(),
+                       MAI.getCommentString().size()) == 0) {
       // Stop counting as an instruction after a comment until the next
       // separator.
       atInsnStart = false;
@@ -1098,35 +1098,6 @@ int TargetInstrInfo::computeDefOperandLatency(
 
   // ...operand lookup required
   return -1;
-}
-
-unsigned TargetInstrInfo::computeOperandLatency(
-    const InstrItineraryData *ItinData, const MachineInstr &DefMI,
-    unsigned DefIdx, const MachineInstr *UseMI, unsigned UseIdx) const {
-
-  int DefLatency = computeDefOperandLatency(ItinData, DefMI);
-  if (DefLatency >= 0)
-    return DefLatency;
-
-  assert(ItinData && !ItinData->isEmpty() && "computeDefOperandLatency fail");
-
-  int OperLatency = 0;
-  if (UseMI)
-    OperLatency = getOperandLatency(ItinData, DefMI, DefIdx, *UseMI, UseIdx);
-  else {
-    unsigned DefClass = DefMI.getDesc().getSchedClass();
-    OperLatency = ItinData->getOperandCycle(DefClass, DefIdx);
-  }
-  if (OperLatency >= 0)
-    return OperLatency;
-
-  // No operand latency was found.
-  unsigned InstrLatency = getInstrLatency(ItinData, DefMI);
-
-  // Expected latency is the max of the stage latency and itinerary props.
-  InstrLatency = std::max(InstrLatency,
-                          defaultDefLatency(ItinData->SchedModel, DefMI));
-  return InstrLatency;
 }
 
 bool TargetInstrInfo::getRegSequenceInputs(

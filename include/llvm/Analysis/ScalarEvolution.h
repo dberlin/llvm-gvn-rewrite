@@ -310,7 +310,7 @@ public:
   };
 
   /// Convenient IncrementWrapFlags manipulation methods.
-  static SCEVWrapPredicate::IncrementWrapFlags LLVM_ATTRIBUTE_UNUSED_RESULT
+  LLVM_NODISCARD static SCEVWrapPredicate::IncrementWrapFlags
   clearFlags(SCEVWrapPredicate::IncrementWrapFlags Flags,
              SCEVWrapPredicate::IncrementWrapFlags OffFlags) {
     assert((Flags & IncrementNoWrapMask) == Flags && "Invalid flags value!");
@@ -319,7 +319,7 @@ public:
     return (SCEVWrapPredicate::IncrementWrapFlags)(Flags & ~OffFlags);
   }
 
-  static SCEVWrapPredicate::IncrementWrapFlags LLVM_ATTRIBUTE_UNUSED_RESULT
+  LLVM_NODISCARD static SCEVWrapPredicate::IncrementWrapFlags
   maskFlags(SCEVWrapPredicate::IncrementWrapFlags Flags, int Mask) {
     assert((Flags & IncrementNoWrapMask) == Flags && "Invalid flags value!");
     assert((Mask & IncrementNoWrapMask) == Mask && "Invalid mask value!");
@@ -327,7 +327,7 @@ public:
     return (SCEVWrapPredicate::IncrementWrapFlags)(Flags & Mask);
   }
 
-  static SCEVWrapPredicate::IncrementWrapFlags LLVM_ATTRIBUTE_UNUSED_RESULT
+  LLVM_NODISCARD static SCEVWrapPredicate::IncrementWrapFlags
   setFlags(SCEVWrapPredicate::IncrementWrapFlags Flags,
            SCEVWrapPredicate::IncrementWrapFlags OnFlags) {
     assert((Flags & IncrementNoWrapMask) == Flags && "Invalid flags value!");
@@ -339,7 +339,7 @@ public:
 
   /// Returns the set of SCEVWrapPredicate no wrap flags implied by a
   /// SCEVAddRecExpr.
-  static SCEVWrapPredicate::IncrementWrapFlags
+  LLVM_NODISCARD static SCEVWrapPredicate::IncrementWrapFlags
   getImpliedFlags(const SCEVAddRecExpr *AR, ScalarEvolution &SE);
 
 private:
@@ -432,15 +432,15 @@ public:
 
   /// Convenient NoWrapFlags manipulation that hides enum casts and is
   /// visible in the ScalarEvolution name space.
-  static SCEV::NoWrapFlags LLVM_ATTRIBUTE_UNUSED_RESULT
-  maskFlags(SCEV::NoWrapFlags Flags, int Mask) {
+  LLVM_NODISCARD static SCEV::NoWrapFlags maskFlags(SCEV::NoWrapFlags Flags,
+                                                    int Mask) {
     return (SCEV::NoWrapFlags)(Flags & Mask);
   }
-  static SCEV::NoWrapFlags LLVM_ATTRIBUTE_UNUSED_RESULT
-  setFlags(SCEV::NoWrapFlags Flags, SCEV::NoWrapFlags OnFlags) {
+  LLVM_NODISCARD static SCEV::NoWrapFlags setFlags(SCEV::NoWrapFlags Flags,
+                                                   SCEV::NoWrapFlags OnFlags) {
     return (SCEV::NoWrapFlags)(Flags | OnFlags);
   }
-  static SCEV::NoWrapFlags LLVM_ATTRIBUTE_UNUSED_RESULT
+  LLVM_NODISCARD static SCEV::NoWrapFlags
   clearFlags(SCEV::NoWrapFlags Flags, SCEV::NoWrapFlags OffFlags) {
     return (SCEV::NoWrapFlags)(Flags & ~OffFlags);
   }
@@ -533,7 +533,7 @@ private:
   ValueExprMapType ValueExprMap;
 
   /// Mark predicate values currently being processed by isImpliedCond.
-  DenseSet<Value *> PendingLoopPredicates;
+  SmallPtrSet<Value *, 6> PendingLoopPredicates;
 
   /// Set to true by isLoopBackedgeGuardedByCond when we're walking the set of
   /// conditions dominating the backedge of a loop.
@@ -551,18 +551,35 @@ private:
     const SCEV *ExactNotTaken;
     const SCEV *MaxNotTaken;
 
-    /// A predicate union guard for this ExitLimit. The result is only
-    /// valid if this predicate evaluates to 'true' at run-time.
-    SCEVUnionPredicate Predicate;
+    /// A set of predicate guards for this ExitLimit. The result is only valid
+    /// if all of the predicates in \c Predicates evaluate to 'true' at
+    /// run-time.
+    SmallPtrSet<const SCEVPredicate *, 4> Predicates;
+
+    void addPredicate(const SCEVPredicate *P) {
+      assert(!isa<SCEVUnionPredicate>(P) && "Only add leaf predicates here!");
+      Predicates.insert(P);
+    }
 
     /*implicit*/ ExitLimit(const SCEV *E) : ExactNotTaken(E), MaxNotTaken(E) {}
 
-    ExitLimit(const SCEV *E, const SCEV *M, SCEVUnionPredicate &P)
-        : ExactNotTaken(E), MaxNotTaken(M), Predicate(P) {
+    ExitLimit(
+        const SCEV *E, const SCEV *M,
+        ArrayRef<const SmallPtrSetImpl<const SCEVPredicate *> *> PredSetList)
+        : ExactNotTaken(E), MaxNotTaken(M) {
       assert((isa<SCEVCouldNotCompute>(ExactNotTaken) ||
               !isa<SCEVCouldNotCompute>(MaxNotTaken)) &&
              "Exact is not allowed to be less precise than Max");
+      for (auto *PredSet : PredSetList)
+        for (auto *P : *PredSet)
+          addPredicate(P);
     }
+
+    ExitLimit(const SCEV *E, const SCEV *M,
+              const SmallPtrSetImpl<const SCEVPredicate *> &PredSet)
+        : ExitLimit(E, M, {&PredSet}) {}
+
+    ExitLimit(const SCEV *E, const SCEV *M) : ExitLimit(E, M, None) {}
 
     /// Test whether this ExitLimit contains any computed information, or
     /// whether it's all SCEVCouldNotCompute values.
@@ -1313,6 +1330,11 @@ public:
   /// prematurely via another branch.
   unsigned getSmallConstantTripCount(Loop *L, BasicBlock *ExitingBlock);
 
+  /// Returns the upper bound of the loop trip count as a normal unsigned
+  /// value.
+  /// Returns 0 if the trip count is unknown or not constant.
+  unsigned getSmallConstantMaxTripCount(Loop *L);
+
   /// Returns the largest constant divisor of the trip count of the
   /// loop if it is a single-exit loop and we can compute a small maximum for
   /// that loop.
@@ -1581,9 +1603,9 @@ public:
                                     SCEVUnionPredicate &A);
   /// Tries to convert the \p S expression to an AddRec expression,
   /// adding additional predicates to \p Preds as required.
-  const SCEVAddRecExpr *
-  convertSCEVToAddRecWithPredicates(const SCEV *S, const Loop *L,
-                                    SCEVUnionPredicate &Preds);
+  const SCEVAddRecExpr *convertSCEVToAddRecWithPredicates(
+      const SCEV *S, const Loop *L,
+      SmallPtrSetImpl<const SCEVPredicate *> &Preds);
 
 private:
   /// Compute the backedge taken count knowing the interval difference, the

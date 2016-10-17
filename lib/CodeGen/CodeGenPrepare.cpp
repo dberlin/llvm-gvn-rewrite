@@ -164,7 +164,7 @@ class TypePromotionTransaction;
       }
     bool runOnFunction(Function &F) override;
 
-    const char *getPassName() const override { return "CodeGen Prepare"; }
+    StringRef getPassName() const override { return "CodeGen Prepare"; }
 
     void getAnalysisUsage(AnalysisUsage &AU) const override {
       // FIXME: When we can selectively preserve passes, preserve the domtree.
@@ -926,6 +926,8 @@ static bool SinkCmpExpression(CmpInst *CI, const TargetLowering *TLI) {
       InsertedCmp =
           CmpInst::Create(CI->getOpcode(), CI->getPredicate(),
                           CI->getOperand(0), CI->getOperand(1), "", &*InsertPt);
+      // Propagate the debug info.
+      InsertedCmp->setDebugLoc(CI->getDebugLoc());
     }
 
     // Replace a use of the cmp with a use of the new cmp.
@@ -4268,6 +4270,14 @@ bool CodeGenPrepare::moveExtToFormExtLoad(Instruction *&I) {
   TPT.commit();
   I->removeFromParent();
   I->insertAfter(LI);
+  // CGP does not check if the zext would be speculatively executed when moved
+  // to the same basic block as the load. Preserving its original location would
+  // pessimize the debugging experience, as well as negatively impact the 
+  // quality of sample pgo. We don't want to use "line 0" as that has a
+  // size cost in the line-table section and logically the zext can be seen as
+  // part of the load. Therefore we conservatively reuse the same debug location
+  // for the load and the zext.
+  I->setDebugLoc(LI->getDebugLoc());
   ++NumExtsMoved;
   return true;
 }

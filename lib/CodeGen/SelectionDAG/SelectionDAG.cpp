@@ -1315,7 +1315,9 @@ SDValue SelectionDAG::getConstantPool(const Constant *C, EVT VT,
   assert((TargetFlags == 0 || isTarget) &&
          "Cannot set target flags on target-independent globals");
   if (Alignment == 0)
-    Alignment = getDataLayout().getPrefTypeAlignment(C->getType());
+    Alignment = MF->getFunction()->optForSize()
+                    ? getDataLayout().getABITypeAlignment(C->getType())
+                    : getDataLayout().getPrefTypeAlignment(C->getType());
   unsigned Opc = isTarget ? ISD::TargetConstantPool : ISD::ConstantPool;
   FoldingSetNodeID ID;
   AddNodeIDNode(ID, Opc, getVTList(VT), None);
@@ -2448,6 +2450,26 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
     KnownOne = KnownOne.trunc(BitWidth);
     break;
   }
+  case ISD::EXTRACT_VECTOR_ELT: {
+    // At the moment we keep this simple and skip tracking the specific
+    // element. This way we get the lowest common denominator for all elements
+    // of the vector.
+    // TODO: get information for given vector element
+    const unsigned BitWidth = Op.getValueSizeInBits();
+    const unsigned EltBitWidth = Op.getOperand(0).getScalarValueSizeInBits();
+    // If BitWidth > EltBitWidth the value is anyext:ed. So we do not know
+    // anything about the extended bits.
+    if (BitWidth > EltBitWidth) {
+      KnownZero = KnownZero.trunc(EltBitWidth);
+      KnownOne = KnownOne.trunc(EltBitWidth);
+    }
+    computeKnownBits(Op.getOperand(0), KnownZero, KnownOne, Depth+1);
+    if (BitWidth > EltBitWidth) {
+      KnownZero = KnownZero.zext(BitWidth);
+      KnownOne = KnownOne.zext(BitWidth);
+    }
+    break;
+  }
   case ISD::BSWAP: {
     computeKnownBits(Op.getOperand(0), KnownZero2, KnownOne2, Depth+1);
     KnownZero = KnownZero2.byteSwap();
@@ -2714,6 +2736,20 @@ unsigned SelectionDAG::ComputeNumSignBits(SDValue Op, unsigned Depth) const {
     // If the sign portion ends in our element the subtraction gives correct
     // result. Otherwise it gives either negative or > bitwidth result
     return std::max(std::min(KnownSign - rIndex * BitWidth, BitWidth), 0);
+  }
+  case ISD::EXTRACT_VECTOR_ELT: {
+    // At the moment we keep this simple and skip tracking the specific
+    // element. This way we get the lowest common denominator for all elements
+    // of the vector.
+    // TODO: get information for given vector element
+    const unsigned BitWidth = Op.getValueSizeInBits();
+    const unsigned EltBitWidth = Op.getOperand(0).getScalarValueSizeInBits();
+    // If BitWidth > EltBitWidth the value is anyext:ed, and we do not know
+    // anything about sign bits. But if the sizes match we can derive knowledge
+    // about sign bits from the vector operand.
+    if (BitWidth == EltBitWidth)
+      return ComputeNumSignBits(Op.getOperand(0), Depth+1);
+    break;
   }
   }
 
@@ -4797,10 +4833,7 @@ SDValue SelectionDAG::getMemset(SDValue Chain, const SDLoc &dl, SDValue Dst,
 
 SDValue SelectionDAG::getAtomic(unsigned Opcode, const SDLoc &dl, EVT MemVT,
                                 SDVTList VTList, ArrayRef<SDValue> Ops,
-                                MachineMemOperand *MMO,
-                                AtomicOrdering SuccessOrdering,
-                                AtomicOrdering FailureOrdering,
-                                SynchronizationScope SynchScope) {
+                                MachineMemOperand *MMO) {
   FoldingSetNodeID ID;
   ID.AddInteger(MemVT.getRawBits());
   AddNodeIDNode(ID, Opcode, VTList, Ops);
@@ -4812,21 +4845,12 @@ SDValue SelectionDAG::getAtomic(unsigned Opcode, const SDLoc &dl, EVT MemVT,
   }
 
   auto *N = newSDNode<AtomicSDNode>(Opcode, dl.getIROrder(), dl.getDebugLoc(),
-                                    VTList, MemVT, MMO, SuccessOrdering,
-                                    FailureOrdering, SynchScope);
+                                    VTList, MemVT, MMO);
   createOperands(N, Ops);
 
   CSEMap.InsertNode(N, IP);
   InsertNode(N);
   return SDValue(N, 0);
-}
-
-SDValue SelectionDAG::getAtomic(unsigned Opcode, const SDLoc &dl, EVT MemVT,
-                                SDVTList VTList, ArrayRef<SDValue> Ops,
-                                MachineMemOperand *MMO, AtomicOrdering Ordering,
-                                SynchronizationScope SynchScope) {
-  return getAtomic(Opcode, dl, MemVT, VTList, Ops, MMO, Ordering,
-                   Ordering, SynchScope);
 }
 
 SDValue SelectionDAG::getAtomicCmpSwap(
@@ -4848,26 +4872,23 @@ SDValue SelectionDAG::getAtomicCmpSwap(
   auto Flags = MachineMemOperand::MOVolatile | MachineMemOperand::MOLoad |
                MachineMemOperand::MOStore;
   MachineMemOperand *MMO =
-    MF.getMachineMemOperand(PtrInfo, Flags, MemVT.getStoreSize(), Alignment);
+    MF.getMachineMemOperand(PtrInfo, Flags, MemVT.getStoreSize(), Alignment,
+                            AAMDNodes(), nullptr, SynchScope, SuccessOrdering,
+                            FailureOrdering);
 
-  return getAtomicCmpSwap(Opcode, dl, MemVT, VTs, Chain, Ptr, Cmp, Swp, MMO,
-                          SuccessOrdering, FailureOrdering, SynchScope);
+  return getAtomicCmpSwap(Opcode, dl, MemVT, VTs, Chain, Ptr, Cmp, Swp, MMO);
 }
 
 SDValue SelectionDAG::getAtomicCmpSwap(unsigned Opcode, const SDLoc &dl,
                                        EVT MemVT, SDVTList VTs, SDValue Chain,
                                        SDValue Ptr, SDValue Cmp, SDValue Swp,
-                                       MachineMemOperand *MMO,
-                                       AtomicOrdering SuccessOrdering,
-                                       AtomicOrdering FailureOrdering,
-                                       SynchronizationScope SynchScope) {
+                                       MachineMemOperand *MMO) {
   assert(Opcode == ISD::ATOMIC_CMP_SWAP ||
          Opcode == ISD::ATOMIC_CMP_SWAP_WITH_SUCCESS);
   assert(Cmp.getValueType() == Swp.getValueType() && "Invalid Atomic Op Types");
 
   SDValue Ops[] = {Chain, Ptr, Cmp, Swp};
-  return getAtomic(Opcode, dl, MemVT, VTs, Ops, MMO,
-                   SuccessOrdering, FailureOrdering, SynchScope);
+  return getAtomic(Opcode, dl, MemVT, VTs, Ops, MMO);
 }
 
 SDValue SelectionDAG::getAtomic(unsigned Opcode, const SDLoc &dl, EVT MemVT,
@@ -4893,16 +4914,15 @@ SDValue SelectionDAG::getAtomic(unsigned Opcode, const SDLoc &dl, EVT MemVT,
 
   MachineMemOperand *MMO =
     MF.getMachineMemOperand(MachinePointerInfo(PtrVal), Flags,
-                            MemVT.getStoreSize(), Alignment);
+                            MemVT.getStoreSize(), Alignment, AAMDNodes(),
+                            nullptr, SynchScope, Ordering);
 
-  return getAtomic(Opcode, dl, MemVT, Chain, Ptr, Val, MMO,
-                   Ordering, SynchScope);
+  return getAtomic(Opcode, dl, MemVT, Chain, Ptr, Val, MMO);
 }
 
 SDValue SelectionDAG::getAtomic(unsigned Opcode, const SDLoc &dl, EVT MemVT,
                                 SDValue Chain, SDValue Ptr, SDValue Val,
-                                MachineMemOperand *MMO, AtomicOrdering Ordering,
-                                SynchronizationScope SynchScope) {
+                                MachineMemOperand *MMO) {
   assert((Opcode == ISD::ATOMIC_LOAD_ADD ||
           Opcode == ISD::ATOMIC_LOAD_SUB ||
           Opcode == ISD::ATOMIC_LOAD_AND ||
@@ -4922,18 +4942,17 @@ SDValue SelectionDAG::getAtomic(unsigned Opcode, const SDLoc &dl, EVT MemVT,
   SDVTList VTs = Opcode == ISD::ATOMIC_STORE ? getVTList(MVT::Other) :
                                                getVTList(VT, MVT::Other);
   SDValue Ops[] = {Chain, Ptr, Val};
-  return getAtomic(Opcode, dl, MemVT, VTs, Ops, MMO, Ordering, SynchScope);
+  return getAtomic(Opcode, dl, MemVT, VTs, Ops, MMO);
 }
 
 SDValue SelectionDAG::getAtomic(unsigned Opcode, const SDLoc &dl, EVT MemVT,
                                 EVT VT, SDValue Chain, SDValue Ptr,
-                                MachineMemOperand *MMO, AtomicOrdering Ordering,
-                                SynchronizationScope SynchScope) {
+                                MachineMemOperand *MMO) {
   assert(Opcode == ISD::ATOMIC_LOAD && "Invalid Atomic Op");
 
   SDVTList VTs = getVTList(VT, MVT::Other);
   SDValue Ops[] = {Chain, Ptr};
-  return getAtomic(Opcode, dl, MemVT, VTs, Ops, MMO, Ordering, SynchScope);
+  return getAtomic(Opcode, dl, MemVT, VTs, Ops, MMO);
 }
 
 /// getMergeValues - Create a MERGE_VALUES node from the given operands.
@@ -5313,7 +5332,7 @@ SDValue SelectionDAG::getIndexedStore(SDValue OrigStore, const SDLoc &dl,
 SDValue SelectionDAG::getMaskedLoad(EVT VT, const SDLoc &dl, SDValue Chain,
                                     SDValue Ptr, SDValue Mask, SDValue Src0,
                                     EVT MemVT, MachineMemOperand *MMO,
-                                    ISD::LoadExtType ExtTy) {
+                                    ISD::LoadExtType ExtTy, bool isExpanding) {
 
   SDVTList VTs = getVTList(VT, MVT::Other);
   SDValue Ops[] = { Chain, Ptr, Mask, Src0 };
@@ -5321,7 +5340,7 @@ SDValue SelectionDAG::getMaskedLoad(EVT VT, const SDLoc &dl, SDValue Chain,
   AddNodeIDNode(ID, ISD::MLOAD, VTs, Ops);
   ID.AddInteger(VT.getRawBits());
   ID.AddInteger(getSyntheticNodeSubclassData<MaskedLoadSDNode>(
-      dl.getIROrder(), VTs, ExtTy, MemVT, MMO));
+      dl.getIROrder(), VTs, ExtTy, isExpanding, MemVT, MMO));
   ID.AddInteger(MMO->getPointerInfo().getAddrSpace());
   void *IP = nullptr;
   if (SDNode *E = FindNodeOrInsertPos(ID, dl, IP)) {
@@ -5329,7 +5348,7 @@ SDValue SelectionDAG::getMaskedLoad(EVT VT, const SDLoc &dl, SDValue Chain,
     return SDValue(E, 0);
   }
   auto *N = newSDNode<MaskedLoadSDNode>(dl.getIROrder(), dl.getDebugLoc(), VTs,
-                                        ExtTy, MemVT, MMO);
+                                        ExtTy, isExpanding, MemVT, MMO);
   createOperands(N, Ops);
 
   CSEMap.InsertNode(N, IP);
@@ -5340,7 +5359,7 @@ SDValue SelectionDAG::getMaskedLoad(EVT VT, const SDLoc &dl, SDValue Chain,
 SDValue SelectionDAG::getMaskedStore(SDValue Chain, const SDLoc &dl,
                                      SDValue Val, SDValue Ptr, SDValue Mask,
                                      EVT MemVT, MachineMemOperand *MMO,
-                                     bool isTrunc, bool isCompress) {
+                                     bool IsTruncating, bool IsCompressing) {
   assert(Chain.getValueType() == MVT::Other &&
         "Invalid chain type");
   EVT VT = Val.getValueType();
@@ -5350,7 +5369,7 @@ SDValue SelectionDAG::getMaskedStore(SDValue Chain, const SDLoc &dl,
   AddNodeIDNode(ID, ISD::MSTORE, VTs, Ops);
   ID.AddInteger(VT.getRawBits());
   ID.AddInteger(getSyntheticNodeSubclassData<MaskedStoreSDNode>(
-      dl.getIROrder(), VTs, isTrunc, isCompress, MemVT, MMO));
+      dl.getIROrder(), VTs, IsTruncating, IsCompressing, MemVT, MMO));
   ID.AddInteger(MMO->getPointerInfo().getAddrSpace());
   void *IP = nullptr;
   if (SDNode *E = FindNodeOrInsertPos(ID, dl, IP)) {
@@ -5358,7 +5377,7 @@ SDValue SelectionDAG::getMaskedStore(SDValue Chain, const SDLoc &dl,
     return SDValue(E, 0);
   }
   auto *N = newSDNode<MaskedStoreSDNode>(dl.getIROrder(), dl.getDebugLoc(), VTs,
-                                         isTrunc, isCompress, MemVT, MMO);
+                                         IsTruncating, IsCompressing, MemVT, MMO);
   createOperands(N, Ops);
 
   CSEMap.InsertNode(N, IP);
@@ -5867,43 +5886,10 @@ SDNode *SelectionDAG::SelectNodeTo(SDNode *N, unsigned MachineOpc,
 }
 
 SDNode *SelectionDAG::SelectNodeTo(SDNode *N, unsigned MachineOpc,
-                                   EVT VT1, EVT VT2, EVT VT3, EVT VT4,
-                                   ArrayRef<SDValue> Ops) {
-  SDVTList VTs = getVTList(VT1, VT2, VT3, VT4);
-  return SelectNodeTo(N, MachineOpc, VTs, Ops);
-}
-
-SDNode *SelectionDAG::SelectNodeTo(SDNode *N, unsigned MachineOpc,
-                                   EVT VT1, EVT VT2,
-                                   SDValue Op1) {
-  SDVTList VTs = getVTList(VT1, VT2);
-  SDValue Ops[] = { Op1 };
-  return SelectNodeTo(N, MachineOpc, VTs, Ops);
-}
-
-SDNode *SelectionDAG::SelectNodeTo(SDNode *N, unsigned MachineOpc,
                                    EVT VT1, EVT VT2,
                                    SDValue Op1, SDValue Op2) {
   SDVTList VTs = getVTList(VT1, VT2);
   SDValue Ops[] = { Op1, Op2 };
-  return SelectNodeTo(N, MachineOpc, VTs, Ops);
-}
-
-SDNode *SelectionDAG::SelectNodeTo(SDNode *N, unsigned MachineOpc,
-                                   EVT VT1, EVT VT2,
-                                   SDValue Op1, SDValue Op2,
-                                   SDValue Op3) {
-  SDVTList VTs = getVTList(VT1, VT2);
-  SDValue Ops[] = { Op1, Op2, Op3 };
-  return SelectNodeTo(N, MachineOpc, VTs, Ops);
-}
-
-SDNode *SelectionDAG::SelectNodeTo(SDNode *N, unsigned MachineOpc,
-                                   EVT VT1, EVT VT2, EVT VT3,
-                                   SDValue Op1, SDValue Op2,
-                                   SDValue Op3) {
-  SDVTList VTs = getVTList(VT1, VT2, VT3);
-  SDValue Ops[] = { Op1, Op2, Op3 };
   return SelectNodeTo(N, MachineOpc, VTs, Ops);
 }
 
@@ -6047,19 +6033,6 @@ MachineSDNode *SelectionDAG::getMachineNode(unsigned Opcode, const SDLoc &dl,
 }
 
 MachineSDNode *SelectionDAG::getMachineNode(unsigned Opcode, const SDLoc &dl,
-                                            EVT VT1, EVT VT2) {
-  SDVTList VTs = getVTList(VT1, VT2);
-  return getMachineNode(Opcode, dl, VTs, None);
-}
-
-MachineSDNode *SelectionDAG::getMachineNode(unsigned Opcode, const SDLoc &dl,
-                                            EVT VT1, EVT VT2, SDValue Op1) {
-  SDVTList VTs = getVTList(VT1, VT2);
-  SDValue Ops[] = { Op1 };
-  return getMachineNode(Opcode, dl, VTs, Ops);
-}
-
-MachineSDNode *SelectionDAG::getMachineNode(unsigned Opcode, const SDLoc &dl,
                                             EVT VT1, EVT VT2, SDValue Op1,
                                             SDValue Op2) {
   SDVTList VTs = getVTList(VT1, VT2);
@@ -6103,13 +6076,6 @@ MachineSDNode *SelectionDAG::getMachineNode(unsigned Opcode, const SDLoc &dl,
                                             EVT VT1, EVT VT2, EVT VT3,
                                             ArrayRef<SDValue> Ops) {
   SDVTList VTs = getVTList(VT1, VT2, VT3);
-  return getMachineNode(Opcode, dl, VTs, Ops);
-}
-
-MachineSDNode *SelectionDAG::getMachineNode(unsigned Opcode, const SDLoc &dl,
-                                            EVT VT1, EVT VT2, EVT VT3, EVT VT4,
-                                            ArrayRef<SDValue> Ops) {
-  SDVTList VTs = getVTList(VT1, VT2, VT3, VT4);
   return getMachineNode(Opcode, dl, VTs, Ops);
 }
 

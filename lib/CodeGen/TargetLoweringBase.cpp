@@ -806,7 +806,6 @@ TargetLoweringBase::TargetLoweringBase(const TargetMachine &tm) : TM(tm) {
     = MaxStoresPerMemmoveOptSize = 4;
   UseUnderscoreSetJmp = false;
   UseUnderscoreLongJmp = false;
-  SelectIsExpensive = false;
   HasMultipleConditionRegisters = false;
   HasExtractBitsInsn = false;
   JumpIsExpensive = JumpIsExpensiveOverride;
@@ -838,6 +837,7 @@ TargetLoweringBase::TargetLoweringBase(const TargetMachine &tm) : TM(tm) {
   InitLibcallNames(LibcallRoutineNames, TM.getTargetTriple());
   InitCmpLibcallCCs(CmpLibcallCCs);
   InitLibcallCallingConvs(LibcallCallingConvs);
+  ReciprocalEstimates.set("all", false, 0);
 }
 
 void TargetLoweringBase::initActions() {
@@ -1485,6 +1485,22 @@ MVT::SimpleValueType TargetLoweringBase::getCmpLibcallReturnType() const {
   return MVT::i32; // return the default value
 }
 
+TargetRecip
+TargetLoweringBase::getTargetRecipForFunc(MachineFunction &MF) const {
+  const Function *F = MF.getFunction();
+  StringRef RecipAttrName = "reciprocal-estimates";
+  if (!F->hasFnAttribute(RecipAttrName))
+    return ReciprocalEstimates;
+
+  // Make a copy of the target's default reciprocal codegen settings.
+  TargetRecip Recips = ReciprocalEstimates;
+
+  // Override any settings that are customized for this function.
+  StringRef RecipString = F->getFnAttribute(RecipAttrName).getValueAsString();
+  Recips.set(RecipString);
+  return Recips;
+}
+
 /// getVectorTypeBreakdown - Vector types are broken down into some number of
 /// legal first class types.  For example, MVT::v8f32 maps to 2 MVT::v4f32
 /// with Altivec or SSE1, or 8 promoted MVT::f64 values with the X86 FP stack.
@@ -1751,9 +1767,41 @@ TargetLoweringBase::getTypeLegalizationCost(const DataLayout &DL,
   }
 }
 
+Value *TargetLoweringBase::getDefaultSafeStackPointerLocation(IRBuilder<> &IRB,
+                                                              bool UseTLS) const {
+  // compiler-rt provides a variable with a magic name.  Targets that do not
+  // link with compiler-rt may also provide such a variable.
+  Module *M = IRB.GetInsertBlock()->getParent()->getParent();
+  const char *UnsafeStackPtrVar = "__safestack_unsafe_stack_ptr";
+  auto UnsafeStackPtr =
+      dyn_cast_or_null<GlobalVariable>(M->getNamedValue(UnsafeStackPtrVar));
+
+  Type *StackPtrTy = Type::getInt8PtrTy(M->getContext());
+
+  if (!UnsafeStackPtr) {
+    auto TLSModel = UseTLS ?
+        GlobalValue::InitialExecTLSModel :
+        GlobalValue::NotThreadLocal;
+    // The global variable is not defined yet, define it ourselves.
+    // We use the initial-exec TLS model because we do not support the
+    // variable living anywhere other than in the main executable.
+    UnsafeStackPtr = new GlobalVariable(
+        *M, StackPtrTy, false, GlobalValue::ExternalLinkage, nullptr,
+        UnsafeStackPtrVar, nullptr, TLSModel);
+  } else {
+    // The variable exists, check its type and attributes.
+    if (UnsafeStackPtr->getValueType() != StackPtrTy)
+      report_fatal_error(Twine(UnsafeStackPtrVar) + " must have void* type");
+    if (UseTLS != UnsafeStackPtr->isThreadLocal())
+      report_fatal_error(Twine(UnsafeStackPtrVar) + " must " +
+                         (UseTLS ? "" : "not ") + "be thread-local");
+  }
+  return UnsafeStackPtr;
+}
+
 Value *TargetLoweringBase::getSafeStackPointerLocation(IRBuilder<> &IRB) const {
   if (!TM.getTargetTriple().isAndroid())
-    return nullptr;
+    return getDefaultSafeStackPointerLocation(IRB, true);
 
   // Android provides a libc function to retrieve the address of the current
   // thread's unsafe stack pointer.

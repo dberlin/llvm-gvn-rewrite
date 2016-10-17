@@ -45,7 +45,7 @@ public:
                            std::unique_ptr<MCStreamer> Streamer)
       : AsmPrinter(TM, std::move(Streamer)) {}
 
-  const char *getPassName() const override { return "Lanai Assembly Printer"; }
+  StringRef getPassName() const override { return "Lanai Assembly Printer"; }
 
   void printOperand(const MachineInstr *MI, int OpNum, raw_ostream &O);
   bool PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
@@ -239,5 +239,5 @@ bool LanaiAsmPrinter::isBlockOnlyReachableByFallthrough(
 
 // Force static initialization.
 extern "C" void LLVMInitializeLanaiAsmPrinter() {
-  RegisterAsmPrinter<LanaiAsmPrinter> X(TheLanaiTarget);
+  RegisterAsmPrinter<LanaiAsmPrinter> X(getTheLanaiTarget());
 }

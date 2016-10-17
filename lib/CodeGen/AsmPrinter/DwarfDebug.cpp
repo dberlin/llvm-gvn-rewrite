@@ -86,7 +86,7 @@ DwarfAccelTables("dwarf-accel-tables", cl::Hidden,
                  cl::desc("Output prototype dwarf accelerator tables."),
                  cl::values(clEnumVal(Default, "Default for platform"),
                             clEnumVal(Enable, "Enabled"),
-                            clEnumVal(Disable, "Disabled"), clEnumValEnd),
+                            clEnumVal(Disable, "Disabled")),
                  cl::init(Default));
 
 static cl::opt<DefaultOnOff>
@@ -94,7 +94,7 @@ SplitDwarf("split-dwarf", cl::Hidden,
            cl::desc("Output DWARF5 split debug info."),
            cl::values(clEnumVal(Default, "Default for platform"),
                       clEnumVal(Enable, "Enabled"),
-                      clEnumVal(Disable, "Disabled"), clEnumValEnd),
+                      clEnumVal(Disable, "Disabled")),
            cl::init(Default));
 
 static cl::opt<DefaultOnOff>
@@ -102,7 +102,7 @@ DwarfPubSections("generate-dwarf-pub-sections", cl::Hidden,
                  cl::desc("Generate DWARF pubnames and pubtypes sections"),
                  cl::values(clEnumVal(Default, "Default for platform"),
                             clEnumVal(Enable, "Enabled"),
-                            clEnumVal(Disable, "Disabled"), clEnumValEnd),
+                            clEnumVal(Disable, "Disabled")),
                  cl::init(Default));
 
 enum LinkageNameOption {
@@ -117,8 +117,7 @@ static cl::opt<LinkageNameOption>
                                             "Default for platform"),
                                  clEnumValN(AllLinkageNames, "All", "All"),
                                  clEnumValN(AbstractLinkageNames, "Abstract",
-                                            "Abstract subprograms"),
-                                 clEnumValEnd),
+                                            "Abstract subprograms")),
                       cl::init(DefaultLinkageNames));
 
 static const char *const DWARFGroupName = "DWARF Emission";
@@ -205,7 +204,7 @@ DwarfDebug::DwarfDebug(AsmPrinter *A, Module *M)
     : DebugHandlerBase(A), DebugLocs(A->OutStreamer->isVerboseAsm()),
       InfoHolder(A, "info_string", DIEValueAllocator),
       SkeletonHolder(A, "skel_string", DIEValueAllocator),
-      IsDarwin(Triple(A->getTargetTriple()).isOSDarwin()),
+      IsDarwin(A->TM.getTargetTriple().isOSDarwin()),
       AccelNames(DwarfAccelTable::Atom(dwarf::DW_ATOM_die_offset,
                                        dwarf::DW_FORM_data4)),
       AccelObjC(DwarfAccelTable::Atom(dwarf::DW_ATOM_die_offset,
@@ -215,7 +214,7 @@ DwarfDebug::DwarfDebug(AsmPrinter *A, Module *M)
       AccelTypes(TypeAtoms), DebuggerTuning(DebuggerKind::Default) {
 
   CurFn = nullptr;
-  Triple TT(Asm->getTargetTriple());
+  const Triple &TT = Asm->TM.getTargetTriple();
 
   // Make sure we know our "debugger tuning."  The target option takes
   // precedence; fall back to triple-based defaults.
@@ -1190,7 +1189,8 @@ void DwarfDebug::recordSourceLine(unsigned Line, unsigned Col, const MDNode *S,
     Fn = Scope->getFilename();
     Dir = Scope->getDirectory();
     if (auto *LBF = dyn_cast<DILexicalBlockFile>(Scope))
-      Discriminator = LBF->getDiscriminator();
+      if (DwarfVersion >= 4)
+        Discriminator = LBF->getDiscriminator();
 
     unsigned CUID = Asm->OutStreamer->getContext().getDwarfCompileUnitID();
     Src = static_cast<DwarfCompileUnit &>(*InfoHolder.getUnits()[CUID])

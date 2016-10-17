@@ -53,6 +53,7 @@ public:
     ISAVersion7_0_1,
     ISAVersion8_0_0,
     ISAVersion8_0_1,
+    ISAVersion8_0_2,
     ISAVersion8_0_3
   };
 
@@ -75,6 +76,7 @@ protected:
   bool FP64Denormals;
   bool FPExceptions;
   bool FlatForGlobal;
+  bool UnalignedScratchAccess;
   bool UnalignedBufferAccess;
   bool EnableXNACK;
   bool DebuggerInsertNops;
@@ -98,6 +100,8 @@ protected:
   bool SGPRInitBug;
   bool HasSMemRealTime;
   bool Has16BitInsts;
+  bool HasMovrel;
+  bool HasVGPRIndexMode;
   bool FlatAddressSpace;
   bool R600ALUInst;
   bool CaymanISA;
@@ -272,6 +276,10 @@ public:
 
   bool hasUnalignedBufferAccess() const {
     return UnalignedBufferAccess;
+  }
+
+  bool hasUnalignedScratchAccess() const {
+    return UnalignedScratchAccess;
   }
 
   bool isXNACKEnabled() const {
@@ -500,6 +508,14 @@ public:
     return Has16BitInsts;
   }
 
+  bool hasMovrel() const {
+    return HasMovrel;
+  }
+
+  bool hasVGPRIndexMode() const {
+    return HasVGPRIndexMode;
+  }
+
   bool hasScalarCompareEq64() const {
     return getGeneration() >= VOLCANIC_ISLANDS;
   }
@@ -540,6 +556,12 @@ public:
 
   /// Return the maximum number of waves per SIMD for kernels using \p VGPRs VGPRs
   unsigned getOccupancyWithNumVGPRs(unsigned VGPRs) const;
+
+  /// \returns True if waitcnt instruction is needed before barrier instruction,
+  /// false otherwise.
+  bool needWaitcntBeforeBarrier() const {
+    return true;
+  }
 };
 
 } // End namespace llvm

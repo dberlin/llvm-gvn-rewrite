@@ -105,6 +105,8 @@ public:
   MemoryLocOrCall() : IsCall(false) {}
   MemoryLocOrCall(MemoryUseOrDef *MUD)
       : MemoryLocOrCall(MUD->getMemoryInst()) {}
+  MemoryLocOrCall(const MemoryUseOrDef *MUD)
+      : MemoryLocOrCall(MUD->getMemoryInst()) {}
 
   MemoryLocOrCall(Instruction *Inst) {
     if (ImmutableCallSite(Inst)) {
@@ -169,44 +171,6 @@ template <> struct DenseMapInfo<MemoryLocOrCall> {
     return LHS == RHS;
   }
 };
-}
-
-namespace {
-struct UpwardsMemoryQuery {
-  // True if our original query started off as a call
-  bool IsCall;
-  // The pointer location we started the query with. This will be empty if
-  // IsCall is true.
-  MemoryLocation StartingLoc;
-  // This is the instruction we were querying about.
-  const Instruction *Inst;
-  // The MemoryAccess we actually got called with, used to test local domination
-  const MemoryAccess *OriginalAccess;
-
-  UpwardsMemoryQuery()
-      : IsCall(false), Inst(nullptr), OriginalAccess(nullptr) {}
-
-  UpwardsMemoryQuery(const Instruction *Inst, const MemoryAccess *Access)
-      : IsCall(ImmutableCallSite(Inst)), Inst(Inst), OriginalAccess(Access) {
-    if (!IsCall)
-      StartingLoc = MemoryLocation::get(Inst);
-  }
-};
-
-static bool lifetimeEndsAt(MemoryDef *MD, const MemoryLocation &Loc,
-                           AliasAnalysis &AA) {
-  Instruction *Inst = MD->getMemoryInst();
-  if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(Inst)) {
-    switch (II->getIntrinsicID()) {
-    case Intrinsic::lifetime_start:
-    case Intrinsic::lifetime_end:
-      return AA.isMustAlias(MemoryLocation(II->getArgOperand(1)), Loc);
-    default:
-      return false;
-    }
-  }
-  return false;
-}
 
 enum class Reorderability { Always, IfNoAlias, Never };
 
@@ -246,17 +210,6 @@ static Reorderability getLoadReorderability(const LoadInst *Use,
   if (SeqCstUse || MayClobberIsAcquire)
     return Reorderability::Never;
   return Result;
-}
-
-static bool isUseTriviallyOptimizableToLiveOnEntry(AliasAnalysis &AA,
-                                                   const Instruction *I) {
-  // If the memory can't be changed, then loads of the memory can't be
-  // clobbered.
-  //
-  // FIXME: We should handle invariant groups, as well. It's a bit harder,
-  // because we need to pay close attention to invariant group barriers.
-  return isa<LoadInst>(I) && (I->getMetadata(LLVMContext::MD_invariant_load) ||
-                              AA.pointsToConstantMemory(I));
 }
 
 static bool instructionClobbersQuery(MemoryDef *MD,
@@ -303,7 +256,7 @@ static bool instructionClobbersQuery(MemoryDef *MD,
   return AA.getModRefInfo(DefInst, UseLoc) & MRI_Mod;
 }
 
-static bool instructionClobbersQuery(MemoryDef *MD, MemoryUse *MU,
+static bool instructionClobbersQuery(MemoryDef *MD, const MemoryUseOrDef *MU,
                                      const MemoryLocOrCall &UseMLOC,
                                      AliasAnalysis &AA) {
   // FIXME: This is a temporary hack to allow a single instructionClobbersQuery
@@ -313,6 +266,61 @@ static bool instructionClobbersQuery(MemoryDef *MD, MemoryUse *MU,
                                     AA);
   return instructionClobbersQuery(MD, UseMLOC.getLoc(), MU->getMemoryInst(),
                                   AA);
+}
+
+// Return true when MD may alias MU, return false otherwise.
+bool defClobbersUseOrDef(MemoryDef *MD, const MemoryUseOrDef *MU,
+                         AliasAnalysis &AA) {
+  return instructionClobbersQuery(MD, MU, MemoryLocOrCall(MU), AA);
+}
+}
+
+namespace {
+struct UpwardsMemoryQuery {
+  // True if our original query started off as a call
+  bool IsCall;
+  // The pointer location we started the query with. This will be empty if
+  // IsCall is true.
+  MemoryLocation StartingLoc;
+  // This is the instruction we were querying about.
+  const Instruction *Inst;
+  // The MemoryAccess we actually got called with, used to test local domination
+  const MemoryAccess *OriginalAccess;
+
+  UpwardsMemoryQuery()
+      : IsCall(false), Inst(nullptr), OriginalAccess(nullptr) {}
+
+  UpwardsMemoryQuery(const Instruction *Inst, const MemoryAccess *Access)
+      : IsCall(ImmutableCallSite(Inst)), Inst(Inst), OriginalAccess(Access) {
+    if (!IsCall)
+      StartingLoc = MemoryLocation::get(Inst);
+  }
+};
+
+static bool lifetimeEndsAt(MemoryDef *MD, const MemoryLocation &Loc,
+                           AliasAnalysis &AA) {
+  Instruction *Inst = MD->getMemoryInst();
+  if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(Inst)) {
+    switch (II->getIntrinsicID()) {
+    case Intrinsic::lifetime_start:
+    case Intrinsic::lifetime_end:
+      return AA.isMustAlias(MemoryLocation(II->getArgOperand(1)), Loc);
+    default:
+      return false;
+    }
+  }
+  return false;
+}
+
+static bool isUseTriviallyOptimizableToLiveOnEntry(AliasAnalysis &AA,
+                                                   const Instruction *I) {
+  // If the memory can't be changed, then loads of the memory can't be
+  // clobbered.
+  //
+  // FIXME: We should handle invariant groups, as well. It's a bit harder,
+  // because we need to pay close attention to invariant group barriers.
+  return isa<LoadInst>(I) && (I->getMetadata(LLVMContext::MD_invariant_load) ||
+                              AA.pointsToConstantMemory(I));
 }
 
 /// Cache for our caching MemorySSA walker.
@@ -1348,7 +1356,7 @@ void MemorySSA::OptimizeUses::optimizeUsesInBlock(
       // branch of the dominator tree first. This will guarantee this resets on
       // the smallest set of blocks.
       if (LocInfo.LowerBoundBlock && LocInfo.LowerBoundBlock != BB &&
-          !DT->dominates(LocInfo.LowerBoundBlock, BB)){
+          !DT->dominates(LocInfo.LowerBoundBlock, BB)) {
         // Reset the lower bound of things to check.
         // TODO: Some day we should be able to reset to last kill, rather than
         // 0.
@@ -1455,12 +1463,10 @@ void MemorySSA::OptimizeUses::optimizeUses() {
 }
 
 void MemorySSA::placePHINodes(
-    const SmallPtrSetImpl<BasicBlock *> &DefiningBlocks,
-    const SmallPtrSetImpl<BasicBlock *> &LiveInBlocks) {
+    const SmallPtrSetImpl<BasicBlock *> &DefiningBlocks) {
   // Determine where our MemoryPhi's should go
   ForwardIDFCalculator IDFs(*DT);
   IDFs.setDefiningBlocks(DefiningBlocks);
-  IDFs.setLiveInBlocks(LiveInBlocks);
   SmallVector<BasicBlock *, 32> IDFBlocks;
   IDFs.calculate(IDFBlocks);
 
@@ -1511,40 +1517,7 @@ void MemorySSA::buildMemorySSA() {
     if (Accesses)
       DefUseBlocks.insert(&B);
   }
-
-  // Compute live-in.
-  // Live in is normally defined as "all the blocks on the path from each def to
-  // each of it's uses".
-  // MemoryDef's are implicit uses of previous state, so they are also uses.
-  // This means we don't really have def-only instructions.  The only
-  // MemoryDef's that are not really uses are those that are of the LiveOnEntry
-  // variable (because LiveOnEntry can reach anywhere, and every def is a
-  // must-kill of LiveOnEntry).
-  // In theory, you could precisely compute live-in by using alias-analysis to
-  // disambiguate defs and uses to see which really pair up with which.
-  // In practice, this would be really expensive and difficult. So we simply
-  // assume all defs are also uses that need to be kept live.
-  // Because of this, the end result of this live-in computation will be "the
-  // entire set of basic blocks that reach any use".
-
-  SmallPtrSet<BasicBlock *, 32> LiveInBlocks;
-  SmallVector<BasicBlock *, 64> LiveInBlockWorklist(DefUseBlocks.begin(),
-                                                    DefUseBlocks.end());
-  // Now that we have a set of blocks where a value is live-in, recursively add
-  // predecessors until we find the full region the value is live.
-  while (!LiveInBlockWorklist.empty()) {
-    BasicBlock *BB = LiveInBlockWorklist.pop_back_val();
-
-    // The block really is live in here, insert it into the set.  If already in
-    // the set, then it has already been processed.
-    if (!LiveInBlocks.insert(BB).second)
-      continue;
-
-    // Since the value is live into BB, it is either defined in a predecessor or
-    // live into it to.
-    LiveInBlockWorklist.append(pred_begin(BB), pred_end(BB));
-  }
-  placePHINodes(DefiningBlocks, LiveInBlocks);
+  placePHINodes(DefiningBlocks);
 
   // Now do regular SSA renaming on the MemoryDef/MemoryUse. Visited will get
   // filled in with all blocks.
@@ -2069,8 +2042,8 @@ bool MemorySSAPrinterLegacyPass::runOnFunction(Function &F) {
 
 char MemorySSAAnalysis::PassID;
 
-MemorySSAAnalysis::Result
-MemorySSAAnalysis::run(Function &F, FunctionAnalysisManager &AM) {
+MemorySSAAnalysis::Result MemorySSAAnalysis::run(Function &F,
+                                                 FunctionAnalysisManager &AM) {
   auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
   auto &AA = AM.getResult<AAManager>(F);
   return MemorySSAAnalysis::Result(make_unique<MemorySSA>(F, &AA, &DT));

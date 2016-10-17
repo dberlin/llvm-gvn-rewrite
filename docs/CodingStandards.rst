@@ -83,7 +83,8 @@ Supported C++11 Language and Library Features
 
 While LLVM, Clang, and LLD use C++11, not all features are available in all of
 the toolchains which we support. The set of features supported for use in LLVM
-is the intersection of those supported in MSVC 2013, GCC 4.7, and Clang 3.1.
+is the intersection of those supported in the minimum requirements described
+in the :doc:`GettingStarted` page, section `Software`.
 The ultimate definition of this set is what build bots with those respective
 toolchains accept. Don't argue with the build bots. However, we have some
 guidance below to help you know what to expect.
@@ -1169,7 +1170,7 @@ Here are some examples of good and bad names:
                                 // kind of factories.
   };
 
-  Vehicle MakeVehicle(VehicleType Type) {
+  Vehicle makeVehicle(VehicleType Type) {
     VehicleMaker M;                         // Might be OK if having a short life-span.
     Tire Tmp1 = M.makeTire();               // Bad -- 'Tmp1' provides no information.
     Light Headlight = M.makeLight("head");  // Good -- descriptive.

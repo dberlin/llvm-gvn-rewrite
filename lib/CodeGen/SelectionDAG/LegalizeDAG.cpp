@@ -1019,6 +1019,7 @@ void SelectionDAGLegalize::LegalizeOp(SDNode *Node) {
   case ISD::ADJUST_TRAMPOLINE:
   case ISD::FRAMEADDR:
   case ISD::RETURNADDR:
+  case ISD::ADDROFRETURNADDR:
     // These operations lie about being legal: when they claim to be legal,
     // they should actually be custom-lowered.
     Action = TLI.getOperationAction(Node->getOpcode(), Node->getValueType(0));
@@ -2834,10 +2835,7 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
     SDValue Swap = DAG.getAtomicCmpSwap(
         ISD::ATOMIC_CMP_SWAP, dl, cast<AtomicSDNode>(Node)->getMemoryVT(), VTs,
         Node->getOperand(0), Node->getOperand(1), Zero, Zero,
-        cast<AtomicSDNode>(Node)->getMemOperand(),
-        cast<AtomicSDNode>(Node)->getOrdering(),
-        cast<AtomicSDNode>(Node)->getOrdering(),
-        cast<AtomicSDNode>(Node)->getSynchScope());
+        cast<AtomicSDNode>(Node)->getMemOperand());
     Results.push_back(Swap.getValue(0));
     Results.push_back(Swap.getValue(1));
     break;
@@ -2848,9 +2846,7 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
                                  cast<AtomicSDNode>(Node)->getMemoryVT(),
                                  Node->getOperand(0),
                                  Node->getOperand(1), Node->getOperand(2),
-                                 cast<AtomicSDNode>(Node)->getMemOperand(),
-                                 cast<AtomicSDNode>(Node)->getOrdering(),
-                                 cast<AtomicSDNode>(Node)->getSynchScope());
+                                 cast<AtomicSDNode>(Node)->getMemOperand());
     Results.push_back(Swap.getValue(1));
     break;
   }
@@ -2862,10 +2858,7 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
     SDValue Res = DAG.getAtomicCmpSwap(
         ISD::ATOMIC_CMP_SWAP, dl, cast<AtomicSDNode>(Node)->getMemoryVT(), VTs,
         Node->getOperand(0), Node->getOperand(1), Node->getOperand(2),
-        Node->getOperand(3), cast<MemSDNode>(Node)->getMemOperand(),
-        cast<AtomicSDNode>(Node)->getSuccessOrdering(),
-        cast<AtomicSDNode>(Node)->getFailureOrdering(),
-        cast<AtomicSDNode>(Node)->getSynchScope());
+        Node->getOperand(3), cast<MemSDNode>(Node)->getMemOperand());
 
     SDValue ExtRes = Res;
     SDValue LHS = Res;
@@ -3470,8 +3463,18 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
       // pre-lowered to the correct types. This all depends upon WideVT not
       // being a legal type for the architecture and thus has to be split to
       // two arguments.
-      SDValue Args[] = { LHS, HiLHS, RHS, HiRHS };
-      SDValue Ret = ExpandLibCall(LC, WideVT, Args, 4, isSigned, dl);
+      SDValue Ret;
+      if(DAG.getDataLayout().isLittleEndian()) {
+        // Halves of WideVT are packed into registers in different order
+        // depending on platform endianness. This is usually handled by
+        // the C calling convention, but we can't defer to it in
+        // the legalizer.
+        SDValue Args[] = { LHS, HiLHS, RHS, HiRHS };
+        Ret = ExpandLibCall(LC, WideVT, Args, 4, isSigned, dl);
+      } else {
+        SDValue Args[] = { HiLHS, LHS, HiRHS, RHS };
+        Ret = ExpandLibCall(LC, WideVT, Args, 4, isSigned, dl);
+      }
       BottomHalf = DAG.getNode(ISD::EXTRACT_ELEMENT, dl, VT, Ret,
                                DAG.getIntPtrConstant(0, dl));
       TopHalf = DAG.getNode(ISD::EXTRACT_ELEMENT, dl, VT, Ret,
@@ -4073,10 +4076,11 @@ void SelectionDAGLegalize::PromoteNode(SDNode *Node) {
     }
     Results.push_back(DAG.getNode(ISD::TRUNCATE, dl, OVT, Tmp1));
     break;
+  case ISD::BITREVERSE:
   case ISD::BSWAP: {
     unsigned DiffBits = NVT.getSizeInBits() - OVT.getSizeInBits();
     Tmp1 = DAG.getNode(ISD::ZERO_EXTEND, dl, NVT, Node->getOperand(0));
-    Tmp1 = DAG.getNode(ISD::BSWAP, dl, NVT, Tmp1);
+    Tmp1 = DAG.getNode(Node->getOpcode(), dl, NVT, Tmp1);
     Tmp1 = DAG.getNode(
         ISD::SRL, dl, NVT, Tmp1,
         DAG.getConstant(DiffBits, dl,

@@ -281,7 +281,7 @@ public:
   bool parseIdentifier(StringRef &Res) override;
   void eatToEndOfStatement() override;
 
-  void checkForValidSection() override;
+  bool checkForValidSection() override;
 
   /// }
 
@@ -733,7 +733,7 @@ bool AsmParser::Run(bool NoInitialTextSection, bool NoFinalize) {
   // If we are generating dwarf for assembly source files save the initial text
   // section and generate a .file directive.
   if (getContext().getGenDwarfForAssembly()) {
-    MCSection *Sec = getStreamer().getCurrentSection().first;
+    MCSection *Sec = getStreamer().getCurrentSectionOnly();
     if (!Sec->getBeginSymbol()) {
       MCSymbol *SectionStartSym = getContext().createTempSymbol();
       getStreamer().EmitLabel(SectionStartSym);
@@ -828,12 +828,13 @@ bool AsmParser::Run(bool NoInitialTextSection, bool NoFinalize) {
   return HadError || getContext().hadError();
 }
 
-void AsmParser::checkForValidSection() {
-  if (!ParsingInlineAsm && !getStreamer().getCurrentSection().first) {
-    printError(getTok().getLoc(),
-               "expected section directive before assembly directive");
+bool AsmParser::checkForValidSection() {
+  if (!ParsingInlineAsm && !getStreamer().getCurrentSectionOnly()) {
     Out.InitSections(false);
+    return Error(getTok().getLoc(),
+                 "expected section directive before assembly directive");
   }
+  return false;
 }
 
 /// \brief Throw away the rest of the line for testing purposes.
@@ -923,8 +924,10 @@ bool AsmParser::parsePrimaryExpr(const MCExpr *&Res, SMLoc &EndLoc) {
   case AsmToken::Identifier: {
     StringRef Identifier;
     if (parseIdentifier(Identifier)) {
-      if (FirstTokenKind == AsmToken::Dollar) {
+      // We may have failed but $ may be a valid token.
+      if (getTok().is(AsmToken::Dollar)) {
         if (Lexer.getMAI().getDollarIsPC()) {
+          Lex();
           // This is a '$' reference, which references the current PC.  Emit a
           // temporary label to the streamer and refer to it.
           MCSymbol *Sym = Ctx.createTempSymbol();
@@ -1589,7 +1592,8 @@ bool AsmParser::parseStatement(ParseStatementInfo &Info,
   case AsmToken::Colon: {
     if (!getTargetParser().isLabel(ID))
       break;
-    checkForValidSection();
+    if (checkForValidSection())
+      return true;
 
     // identifier ':'   -> Label.
     Lex();
@@ -1977,7 +1981,8 @@ bool AsmParser::parseStatement(ParseStatementInfo &Info,
 
   if (ParsingInlineAsm && (IDVal == "even"))
     Info.AsmRewrites->emplace_back(AOK_EVEN, IDLoc, 4);
-  checkForValidSection();
+  if (checkForValidSection())
+    return true;
 
   // Canonicalize the opcode to lower case.
   std::string OpcodeStr = IDVal.lower();
@@ -2009,7 +2014,7 @@ bool AsmParser::parseStatement(ParseStatementInfo &Info,
   // directive for the instruction.
   if (!ParseHadError && getContext().getGenDwarfForAssembly() &&
       getContext().getGenDwarfSectionSyms().count(
-          getStreamer().getCurrentSection().first)) {
+          getStreamer().getCurrentSectionOnly())) {
     unsigned Line;
     if (ActiveMacros.empty())
       Line = SrcMgr.FindLineNumber(IDLoc, CurBuffer);
@@ -2604,14 +2609,19 @@ bool AsmParser::parseIdentifier(StringRef &Res) {
     SMLoc PrefixLoc = getLexer().getLoc();
 
     // Consume the prefix character, and check for a following identifier.
-    Lexer.Lex(); // Lexer's Lex guarantees consecutive token.
-    if (Lexer.isNot(AsmToken::Identifier))
+
+    AsmToken Buf[1];
+    Lexer.peekTokens(Buf, false);
+
+    if (Buf[0].isNot(AsmToken::Identifier))
       return true;
 
     // We have a '$' or '@' followed by an identifier, make sure they are adjacent.
-    if (PrefixLoc.getPointer() + 1 != getTok().getLoc().getPointer())
+    if (PrefixLoc.getPointer() + 1 != Buf[0].getLoc().getPointer())
       return true;
 
+    // eat $ or @
+    Lexer.Lex(); // Lexer's Lex guarantees consecutive token.
     // Construct the joined identifier and consume the token.
     Res =
         StringRef(PrefixLoc.getPointer(), getTok().getIdentifier().size() + 1);
@@ -2707,7 +2717,8 @@ bool AsmParser::parseEscapedString(std::string &Data) {
 ///   ::= ( .ascii | .asciz | .string ) [ "string" ( , "string" )* ]
 bool AsmParser::parseDirectiveAscii(StringRef IDVal, bool ZeroTerminated) {
   if (getLexer().isNot(AsmToken::EndOfStatement)) {
-    checkForValidSection();
+    if (checkForValidSection())
+      return true;
 
     while (true) {
       std::string Data;
@@ -2781,7 +2792,8 @@ bool AsmParser::parseDirectiveReloc(SMLoc DirectiveLoc) {
 ///  ::= (.byte | .short | ... ) [ expression (, expression)* ]
 bool AsmParser::parseDirectiveValue(unsigned Size) {
   if (getLexer().isNot(AsmToken::EndOfStatement)) {
-    checkForValidSection();
+    if (checkForValidSection())
+      return true;
 
     while (true) {
       const MCExpr *Value;
@@ -2816,7 +2828,8 @@ bool AsmParser::parseDirectiveValue(unsigned Size) {
 ///  ::= .octa [ hexconstant (, hexconstant)* ]
 bool AsmParser::parseDirectiveOctaValue() {
   if (getLexer().isNot(AsmToken::EndOfStatement)) {
-    checkForValidSection();
+    if (checkForValidSection())
+      return true;
 
     while (true) {
       if (getTok().is(AsmToken::Error))
@@ -2904,7 +2917,8 @@ bool AsmParser::parseRealValue(const fltSemantics &Semantics, APInt &Res) {
 ///  ::= (.single | .double) [ expression (, expression)* ]
 bool AsmParser::parseDirectiveRealValue(const fltSemantics &Semantics) {
   if (getLexer().isNot(AsmToken::EndOfStatement)) {
-    checkForValidSection();
+    if (checkForValidSection())
+      return true;
 
     while (true) {
       APInt AsInt;
@@ -2929,11 +2943,9 @@ bool AsmParser::parseDirectiveRealValue(const fltSemantics &Semantics) {
 /// parseDirectiveZero
 ///  ::= .zero expression
 bool AsmParser::parseDirectiveZero() {
-  checkForValidSection();
-
   SMLoc NumBytesLoc = Lexer.getLoc();
   const MCExpr *NumBytes;
-  if (parseExpression(NumBytes))
+  if (checkForValidSection() || parseExpression(NumBytes))
     return true;
 
   int64_t Val = 0;
@@ -2954,11 +2966,9 @@ bool AsmParser::parseDirectiveZero() {
 /// parseDirectiveFill
 ///  ::= .fill expression [ , expression [ , expression ] ]
 bool AsmParser::parseDirectiveFill() {
-  checkForValidSection();
-
   SMLoc NumValuesLoc = Lexer.getLoc();
   const MCExpr *NumValues;
-  if (parseExpression(NumValues))
+  if (checkForValidSection() || parseExpression(NumValues))
     return true;
 
   int64_t FillSize = 1;
@@ -3001,10 +3011,8 @@ bool AsmParser::parseDirectiveFill() {
 /// parseDirectiveOrg
 ///  ::= .org expression [ , expression ]
 bool AsmParser::parseDirectiveOrg() {
-  checkForValidSection();
-
   const MCExpr *Offset;
-  if (parseExpression(Offset))
+  if (checkForValidSection() || parseExpression(Offset))
     return true;
 
   // Parse optional fill expression.
@@ -3026,11 +3034,9 @@ bool AsmParser::parseDirectiveOrg() {
 /// parseDirectiveAlign
 ///  ::= {.align, ...} expression [ , expression [ , expression ]]
 bool AsmParser::parseDirectiveAlign(bool IsPow2, unsigned ValueSize) {
-  checkForValidSection();
-
   SMLoc AlignmentLoc = getLexer().getLoc();
   int64_t Alignment;
-  if (parseAbsoluteExpression(Alignment))
+  if (checkForValidSection() || parseAbsoluteExpression(Alignment))
     return true;
 
   SMLoc MaxBytesLoc;
@@ -3103,7 +3109,7 @@ bool AsmParser::parseDirectiveAlign(bool IsPow2, unsigned ValueSize) {
 
   // Check whether we should use optimal code alignment for this .align
   // directive.
-  const MCSection *Section = getStreamer().getCurrentSection().first;
+  const MCSection *Section = getStreamer().getCurrentSectionOnly();
   assert(Section && "must have section to emit alignment");
   bool UseCodeAlign = Section->UseCodeAlign();
   if ((!HasFillExpr || Lexer.getMAI().getTextAlignFillValue() == FillExpr) &&
@@ -4183,13 +4189,11 @@ bool AsmParser::parseDirectivePurgeMacro(SMLoc DirectiveLoc) {
 /// parseDirectiveBundleAlignMode
 /// ::= {.bundle_align_mode} expression
 bool AsmParser::parseDirectiveBundleAlignMode() {
-  checkForValidSection();
-
   // Expect a single argument: an expression that evaluates to a constant
   // in the inclusive range 0-30.
   SMLoc ExprLoc = getLexer().getLoc();
   int64_t AlignSizePow2;
-  if (parseAbsoluteExpression(AlignSizePow2) ||
+  if (checkForValidSection() || parseAbsoluteExpression(AlignSizePow2) ||
       parseToken(AsmToken::EndOfStatement, "unexpected token after expression "
                                            "in '.bundle_align_mode' "
                                            "directive") ||
@@ -4206,7 +4210,8 @@ bool AsmParser::parseDirectiveBundleAlignMode() {
 /// parseDirectiveBundleLock
 /// ::= {.bundle_lock} [align_to_end]
 bool AsmParser::parseDirectiveBundleLock() {
-  checkForValidSection();
+  if (checkForValidSection())
+    return true;
   bool AlignToEnd = false;
 
   if (getLexer().isNot(AsmToken::EndOfStatement)) {
@@ -4232,9 +4237,8 @@ bool AsmParser::parseDirectiveBundleLock() {
 /// parseDirectiveBundleLock
 /// ::= {.bundle_lock}
 bool AsmParser::parseDirectiveBundleUnlock() {
-  checkForValidSection();
-
-  if (parseToken(AsmToken::EndOfStatement,
+  if (checkForValidSection() ||
+      parseToken(AsmToken::EndOfStatement,
                  "unexpected token in '.bundle_unlock' directive"))
     return true;
 
@@ -4245,11 +4249,10 @@ bool AsmParser::parseDirectiveBundleUnlock() {
 /// parseDirectiveSpace
 /// ::= (.skip | .space) expression [ , expression ]
 bool AsmParser::parseDirectiveSpace(StringRef IDVal) {
-  checkForValidSection();
 
   SMLoc NumBytesLoc = Lexer.getLoc();
   const MCExpr *NumBytes;
-  if (parseExpression(NumBytes))
+  if (checkForValidSection() || parseExpression(NumBytes))
     return true;
 
   int64_t FillExpr = 0;
@@ -4274,11 +4277,9 @@ bool AsmParser::parseDirectiveSpace(StringRef IDVal) {
 /// parseDirectiveDCB
 /// ::= .dcb.{b, l, w} expression, expression
 bool AsmParser::parseDirectiveDCB(StringRef IDVal, unsigned Size) {
-  checkForValidSection();
-
   SMLoc NumValuesLoc = Lexer.getLoc();
   int64_t NumValues;
-  if (parseAbsoluteExpression(NumValues))
+  if (checkForValidSection() || parseAbsoluteExpression(NumValues))
     return true;
 
   if (NumValues < 0) {
@@ -4318,11 +4319,9 @@ bool AsmParser::parseDirectiveDCB(StringRef IDVal, unsigned Size) {
 /// parseDirectiveRealDCB
 /// ::= .dcb.{d, s} expression, expression
 bool AsmParser::parseDirectiveRealDCB(StringRef IDVal, const fltSemantics &Semantics) {
-  checkForValidSection();
-
   SMLoc NumValuesLoc = Lexer.getLoc();
   int64_t NumValues;
-  if (parseAbsoluteExpression(NumValues))
+  if (checkForValidSection() || parseAbsoluteExpression(NumValues))
     return true;
 
   if (NumValues < 0) {
@@ -4352,11 +4351,10 @@ bool AsmParser::parseDirectiveRealDCB(StringRef IDVal, const fltSemantics &Seman
 /// parseDirectiveDS
 /// ::= .ds.{b, d, l, p, s, w, x} expression
 bool AsmParser::parseDirectiveDS(StringRef IDVal, unsigned Size) {
-  checkForValidSection();
 
   SMLoc NumValuesLoc = Lexer.getLoc();
   int64_t NumValues;
-  if (parseAbsoluteExpression(NumValues))
+  if (checkForValidSection() || parseAbsoluteExpression(NumValues))
     return true;
 
   if (NumValues < 0) {
@@ -4377,7 +4375,9 @@ bool AsmParser::parseDirectiveDS(StringRef IDVal, unsigned Size) {
 /// parseDirectiveLEB128
 /// ::= (.sleb128 | .uleb128) [ expression (, expression)* ]
 bool AsmParser::parseDirectiveLEB128(bool Signed) {
-  checkForValidSection();
+  if (checkForValidSection())
+    return true;
+
   const MCExpr *Value;
 
   while (true) {
@@ -4435,7 +4435,8 @@ bool AsmParser::parseDirectiveSymbolAttribute(MCSymbolAttr Attr) {
 /// parseDirectiveComm
 ///  ::= ( .comm | .lcomm ) identifier , size_expression [ , align_expression ]
 bool AsmParser::parseDirectiveComm(bool IsLocal) {
-  checkForValidSection();
+  if (checkForValidSection())
+    return true;
 
   SMLoc IDLoc = getLexer().getLoc();
   StringRef Name;

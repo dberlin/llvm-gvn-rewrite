@@ -13,14 +13,14 @@
 #include "AArch64.h"
 #include "AArch64CallLowering.h"
 #include "AArch64InstructionSelector.h"
-#include "AArch64MachineLegalizer.h"
+#include "AArch64LegalizerInfo.h"
 #include "AArch64RegisterBankInfo.h"
 #include "AArch64TargetMachine.h"
 #include "AArch64TargetObjectFile.h"
 #include "AArch64TargetTransformInfo.h"
 #include "llvm/CodeGen/GlobalISel/IRTranslator.h"
 #include "llvm/CodeGen/GlobalISel/InstructionSelect.h"
-#include "llvm/CodeGen/GlobalISel/MachineLegalizePass.h"
+#include "llvm/CodeGen/GlobalISel/Legalizer.h"
 #include "llvm/CodeGen/GlobalISel/RegBankSelect.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/RegAllocRegistry.h"
@@ -126,22 +126,22 @@ static cl::opt<bool>
 
 extern "C" void LLVMInitializeAArch64Target() {
   // Register the target.
-  RegisterTargetMachine<AArch64leTargetMachine> X(TheAArch64leTarget);
-  RegisterTargetMachine<AArch64beTargetMachine> Y(TheAArch64beTarget);
-  RegisterTargetMachine<AArch64leTargetMachine> Z(TheARM64Target);
+  RegisterTargetMachine<AArch64leTargetMachine> X(getTheAArch64leTarget());
+  RegisterTargetMachine<AArch64beTargetMachine> Y(getTheAArch64beTarget());
+  RegisterTargetMachine<AArch64leTargetMachine> Z(getTheARM64Target());
   auto PR = PassRegistry::getPassRegistry();
   initializeGlobalISel(*PR);
   initializeAArch64A53Fix835769Pass(*PR);
   initializeAArch64A57FPLoadBalancingPass(*PR);
   initializeAArch64AddressTypePromotionPass(*PR);
   initializeAArch64AdvSIMDScalarPass(*PR);
-  initializeAArch64BranchRelaxationPass(*PR);
   initializeAArch64CollectLOHPass(*PR);
   initializeAArch64ConditionalComparesPass(*PR);
   initializeAArch64ConditionOptimizerPass(*PR);
   initializeAArch64DeadRegisterDefinitionsPass(*PR);
   initializeAArch64ExpandPseudoPass(*PR);
   initializeAArch64LoadStoreOptPass(*PR);
+  initializeAArch64VectorByElementOptPass(*PR);
   initializeAArch64PromoteConstantPass(*PR);
   initializeAArch64RedundantCopyEliminationPass(*PR);
   initializeAArch64StorePairSuppressPass(*PR);
@@ -202,7 +202,7 @@ namespace {
 struct AArch64GISelActualAccessor : public GISelAccessor {
   std::unique_ptr<CallLowering> CallLoweringInfo;
   std::unique_ptr<InstructionSelector> InstSelector;
-  std::unique_ptr<MachineLegalizer> Legalizer;
+  std::unique_ptr<LegalizerInfo> Legalizer;
   std::unique_ptr<RegisterBankInfo> RegBankInfo;
   const CallLowering *getCallLowering() const override {
     return CallLoweringInfo.get();
@@ -210,7 +210,7 @@ struct AArch64GISelActualAccessor : public GISelAccessor {
   const InstructionSelector *getInstructionSelector() const override {
     return InstSelector.get();
   }
-  const class MachineLegalizer *getMachineLegalizer() const override {
+  const class LegalizerInfo *getLegalizerInfo() const override {
     return Legalizer.get();
   }
   const RegisterBankInfo *getRegBankInfo() const override {
@@ -247,14 +247,14 @@ AArch64TargetMachine::getSubtargetImpl(const Function &F) const {
         new AArch64GISelActualAccessor();
     GISel->CallLoweringInfo.reset(
         new AArch64CallLowering(*I->getTargetLowering()));
-    GISel->Legalizer.reset(new AArch64MachineLegalizer());
+    GISel->Legalizer.reset(new AArch64LegalizerInfo());
 
     auto *RBI = new AArch64RegisterBankInfo(*I->getRegisterInfo());
 
     // FIXME: At this point, we can't rely on Subtarget having RBI.
     // It's awkward to mix passing RBI and the Subtarget; should we pass
     // TII/TRI as well?
-    GISel->InstSelector.reset(new AArch64InstructionSelector(*I, *RBI));
+    GISel->InstSelector.reset(new AArch64InstructionSelector(*this, *I, *RBI));
 
     GISel->RegBankInfo.reset(RBI);
 #endif
@@ -399,7 +399,7 @@ bool AArch64PassConfig::addIRTranslator() {
   return false;
 }
 bool AArch64PassConfig::addLegalizeMachineIR() {
-  addPass(new MachineLegalizePass());
+  addPass(new Legalizer());
   return false;
 }
 bool AArch64PassConfig::addRegBankSelect() {
@@ -423,6 +423,7 @@ bool AArch64PassConfig::addILPOpts() {
     addPass(&EarlyIfConverterID);
   if (EnableStPairSuppress)
     addPass(createAArch64StorePairSuppressPass());
+  addPass(createAArch64VectorByElementOptPass());
   return true;
 }
 
@@ -463,7 +464,8 @@ void AArch64PassConfig::addPreEmitPass() {
   // Relax conditional branch instructions if they're otherwise out of
   // range of their destination.
   if (BranchRelaxation)
-    addPass(createAArch64BranchRelaxation());
+    addPass(&BranchRelaxationPassID);
+
   if (TM->getOptLevel() != CodeGenOpt::None && EnableCollectLOH &&
       TM->getTargetTriple().isOSBinFormatMachO())
     addPass(createAArch64CollectLOHPass());
