@@ -127,17 +127,13 @@ unlikely to be supported by our host compilers.
 * Variadic templates: N2242_
 * Explicit conversion operators: N2437_
 * Defaulted and deleted functions: N2346_
-
-  * But not defaulted move constructors or move assignment operators, MSVC 2013
-    cannot synthesize them.
 * Initializer lists: N2627_
 * Delegating constructors: N1986_
 * Default member initializers (non-static data member initializers): N2756_
 
   * Only use these for scalar members that would otherwise be left
     uninitialized. Non-scalar members generally have appropriate default
-    constructors, and MSVC 2013 has problems when braced initializer lists are
-    involved.
+    constructors.
 
 .. _N2118: http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2118.html
 .. _N2439: http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2439.htm
@@ -189,7 +185,7 @@ you hit a type trait which doesn't work we can then add support to LLVM's
 traits header to emulate it.
 
 .. _the libstdc++ manual:
-  http://gcc.gnu.org/onlinedocs/gcc-4.7.3/libstdc++/manual/manual/status.html#status.iso.2011
+  http://gcc.gnu.org/onlinedocs/gcc-4.8.0/libstdc++/manual/manual/status.html#status.iso.2011
 
 Other Languages
 ---------------

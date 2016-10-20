@@ -168,7 +168,10 @@ public:
   ErrorOr<const Elf_Shdr *> getSection(uint32_t Index) const;
 
   const Elf_Sym *getSymbol(const Elf_Shdr *Sec, uint32_t Index) const {
-    return &symbols(Sec)[Index];
+    Elf_Sym_Range Symbols = symbols(Sec);
+    if (Index >= Symbols.size())
+      report_fatal_error("Invalid symbol index");
+    return &Symbols[Index];
   }
 
   ErrorOr<StringRef> getSectionName(const Elf_Shdr *Section) const;
@@ -334,7 +337,7 @@ ELFFile<ELFT>::ELFFile(StringRef Object, std::error_code &EC)
     return;
   }
 
-  if (SectionTableOffset & (AlignOf<Elf_Shdr>::Alignment - 1)) {
+  if (SectionTableOffset & (alignof(Elf_Shdr) - 1)) {
     // Invalid address alignment of section headers
     EC = object_error::parse_failed;
     return;

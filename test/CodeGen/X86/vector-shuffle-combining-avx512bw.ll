@@ -28,10 +28,6 @@ declare <32 x i16> @llvm.x86.avx512.mask.vpermi2var.hi.512(<32 x i16>, <32 x i16
 define <8 x double> @combine_permvar_8f64_identity(<8 x double> %x0, <8 x double> %x1) {
 ; X32-LABEL: combine_permvar_8f64_identity:
 ; X32:       # BB#0:
-; X32-NEXT:    vmovapd {{.*#+}} zmm1 = [7,0,6,0,5,0,4,0,3,0,2,0,1,0,0,0]
-; X32-NEXT:    vpermpd %zmm0, %zmm1, %zmm0
-; X32-NEXT:    vmovapd {{.*#+}} zmm1 = [7,0,14,0,5,0,12,0,3,0,10,0,1,0,8,0]
-; X32-NEXT:    vpermpd %zmm0, %zmm1, %zmm0
 ; X32-NEXT:    retl
 ;
 ; X64-LABEL: combine_permvar_8f64_identity:
@@ -112,10 +108,6 @@ define <8 x i64> @combine_permvar_8i64_identity_mask(<8 x i64> %x0, <8 x i64> %x
 define <8 x double> @combine_vpermt2var_8f64_identity(<8 x double> %x0, <8 x double> %x1) {
 ; X32-LABEL: combine_vpermt2var_8f64_identity:
 ; X32:       # BB#0:
-; X32-NEXT:    vmovapd {{.*#+}} zmm2 = [7,0,6,0,5,0,4,0,3,0,2,0,1,0,0,0]
-; X32-NEXT:    vpermt2pd %zmm1, %zmm2, %zmm0
-; X32-NEXT:    vmovapd {{.*#+}} zmm1 = [7,0,14,0,5,0,12,0,3,0,10,0,1,0,8,0]
-; X32-NEXT:    vpermt2pd %zmm0, %zmm1, %zmm0
 ; X32-NEXT:    retl
 ;
 ; X64-LABEL: combine_vpermt2var_8f64_identity:
@@ -152,8 +144,7 @@ define <8 x double> @combine_vpermt2var_8f64_identity_mask(<8 x double> %x0, <8 
 define <8 x double> @combine_vpermt2var_8f64_movddup(<8 x double> %x0, <8 x double> %x1) {
 ; X32-LABEL: combine_vpermt2var_8f64_movddup:
 ; X32:       # BB#0:
-; X32-NEXT:    vmovapd {{.*#+}} zmm2 = <0,0,0,0,2,0,2,0,4,0,4,0,u,u,u,u>
-; X32-NEXT:    vpermt2pd %zmm1, %zmm2, %zmm0
+; X32-NEXT:    vmovddup {{.*#+}} zmm0 = zmm0[0,0,2,2,4,4,6,6]
 ; X32-NEXT:    retl
 ;
 ; X64-LABEL: combine_vpermt2var_8f64_movddup:
@@ -167,10 +158,7 @@ define <8 x double> @combine_vpermt2var_8f64_movddup_load(<8 x double> *%p0, <8 
 ; X32-LABEL: combine_vpermt2var_8f64_movddup_load:
 ; X32:       # BB#0:
 ; X32-NEXT:    movl {{[0-9]+}}(%esp), %eax
-; X32-NEXT:    vmovapd (%eax), %zmm1
-; X32-NEXT:    vmovapd {{.*#+}} zmm2 = [0,0,0,0,2,0,2,0,4,0,4,0,6,0,6,0]
-; X32-NEXT:    vpermt2pd %zmm0, %zmm2, %zmm1
-; X32-NEXT:    vmovapd %zmm1, %zmm0
+; X32-NEXT:    vmovddup {{.*#+}} zmm0 = mem[0,0,2,2,4,4,6,6]
 ; X32-NEXT:    retl
 ;
 ; X64-LABEL: combine_vpermt2var_8f64_movddup_load:
@@ -186,8 +174,7 @@ define <8 x double> @combine_vpermt2var_8f64_movddup_mask(<8 x double> %x0, <8 x
 ; X32:       # BB#0:
 ; X32-NEXT:    movzbl {{[0-9]+}}(%esp), %eax
 ; X32-NEXT:    kmovd %eax, %k1
-; X32-NEXT:    vmovapd {{.*#+}} zmm2 = [0,0,0,0,2,0,2,0,4,0,4,0,6,0,6,0]
-; X32-NEXT:    vpermt2pd %zmm1, %zmm2, %zmm0 {%k1} {z}
+; X32-NEXT:    vmovddup {{.*#+}} zmm0 {%k1} {z} = zmm0[0,0,2,2,4,4,6,6]
 ; X32-NEXT:    retl
 ;
 ; X64-LABEL: combine_vpermt2var_8f64_movddup_mask:
@@ -712,8 +699,7 @@ define <8 x i64> @combine_permvar_8i64_as_permq_mask(<8 x i64> %x0, <8 x i64> %x
 define <8 x double> @combine_permvar_8f64_as_permpd(<8 x double> %x0, <8 x double> %x1) {
 ; X32-LABEL: combine_permvar_8f64_as_permpd:
 ; X32:       # BB#0:
-; X32-NEXT:    vmovapd {{.*#+}} zmm1 = <3,0,2,0,1,0,u,u,u,u,6,0,5,0,4,0>
-; X32-NEXT:    vpermpd %zmm0, %zmm1, %zmm0
+; X32-NEXT:    vpermpd {{.*#+}} zmm0 = zmm0[3,2,1,0,7,6,5,4]
 ; X32-NEXT:    retl
 ;
 ; X64-LABEL: combine_permvar_8f64_as_permpd:
@@ -728,8 +714,7 @@ define <8 x double> @combine_permvar_8f64_as_permpd_mask(<8 x double> %x0, <8 x 
 ; X32:       # BB#0:
 ; X32-NEXT:    movzbl {{[0-9]+}}(%esp), %eax
 ; X32-NEXT:    kmovd %eax, %k1
-; X32-NEXT:    vmovapd {{.*#+}} zmm2 = <3,0,2,0,1,0,u,u,u,u,6,0,5,0,4,0>
-; X32-NEXT:    vpermpd %zmm0, %zmm2, %zmm1 {%k1}
+; X32-NEXT:    vpermpd {{.*#+}} zmm1 {%k1} = zmm0[3,2,1,0,7,6,5,4]
 ; X32-NEXT:    vmovapd %zmm1, %zmm0
 ; X32-NEXT:    retl
 ;
@@ -777,13 +762,13 @@ define <64 x i8> @combine_pshufb_as_pslldq_mask(<64 x i8> %a0, i64 %m) {
 ; X32-NEXT:    kmovd {{[0-9]+}}(%esp), %k0
 ; X32-NEXT:    kmovd {{[0-9]+}}(%esp), %k1
 ; X32-NEXT:    kunpckdq %k0, %k1, %k1
-; X32-NEXT:    vpshufb {{.*#+}} zmm0 = zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[0,1,2,3,4,5],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[16,17,18,19,20,21],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[32,33,34,35,36,37],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[48,49,50,51,52,53]
+; X32-NEXT:    vpshufb {{.*#+}} zmm0 {%k1} {z} = zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[0,1,2,3,4,5],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[16,17,18,19,20,21],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[32,33,34,35,36,37],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[48,49,50,51,52,53]
 ; X32-NEXT:    retl
 ;
 ; X64-LABEL: combine_pshufb_as_pslldq_mask:
 ; X64:       # BB#0:
 ; X64-NEXT:    kmovq %rdi, %k1
-; X64-NEXT:    vpshufb {{.*#+}} zmm0 = zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[0,1,2,3,4,5],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[16,17,18,19,20,21],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[32,33,34,35,36,37],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[48,49,50,51,52,53]
+; X64-NEXT:    vpshufb {{.*#+}} zmm0 {%k1} {z} = zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[0,1,2,3,4,5],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[16,17,18,19,20,21],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[32,33,34,35,36,37],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[48,49,50,51,52,53]
 ; X64-NEXT:    retq
   %res0 = call <64 x i8> @llvm.x86.avx512.mask.pshuf.b.512(<64 x i8> %a0, <64 x i8> <i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 0, i8 1, i8 2, i8 3, i8 4, i8 5, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 0, i8 1, i8 2, i8 3, i8 4, i8 5, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 0, i8 1, i8 2, i8 3, i8 4, i8 5, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 0, i8 1, i8 2, i8 3, i8 4, i8 5>, <64 x i8> zeroinitializer, i64 %m)
   ret <64 x i8> %res0
@@ -808,13 +793,13 @@ define <64 x i8> @combine_pshufb_as_psrldq_mask(<64 x i8> %a0, i64 %m) {
 ; X32-NEXT:    kmovd {{[0-9]+}}(%esp), %k0
 ; X32-NEXT:    kmovd {{[0-9]+}}(%esp), %k1
 ; X32-NEXT:    kunpckdq %k0, %k1, %k1
-; X32-NEXT:    vpshufb {{.*#+}} zmm0 = zmm0[15],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[31],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[47],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[63],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero
+; X32-NEXT:    vpshufb {{.*#+}} zmm0 {%k1} {z} = zmm0[15],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[31],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[47],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[63],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero
 ; X32-NEXT:    retl
 ;
 ; X64-LABEL: combine_pshufb_as_psrldq_mask:
 ; X64:       # BB#0:
 ; X64-NEXT:    kmovq %rdi, %k1
-; X64-NEXT:    vpshufb {{.*#+}} zmm0 = zmm0[15],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[31],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[47],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[63],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero
+; X64-NEXT:    vpshufb {{.*#+}} zmm0 {%k1} {z} = zmm0[15],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[31],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[47],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zmm0[63],zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero,zero
 ; X64-NEXT:    retq
   %res0 = call <64 x i8> @llvm.x86.avx512.mask.pshuf.b.512(<64 x i8> %a0, <64 x i8> <i8 15, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 15, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 15, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 15, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128, i8 128>, <64 x i8> zeroinitializer, i64 %m)
   ret <64 x i8> %res0
@@ -868,10 +853,6 @@ define <32 x i16> @combine_pshufb_as_pshufw(<32 x i16> %a0) {
 define <8 x double> @combine_vpermi2var_8f64_identity(<8 x double> %x0, <8 x double> %x1) {
 ; X32-LABEL: combine_vpermi2var_8f64_identity:
 ; X32:       # BB#0:
-; X32-NEXT:    vmovapd {{.*#+}} zmm2 = [7,0,6,0,5,0,4,0,3,0,2,0,1,0,0,0]
-; X32-NEXT:    vpermi2pd %zmm1, %zmm0, %zmm2
-; X32-NEXT:    vmovapd {{.*#+}} zmm0 = [7,0,14,0,5,0,12,0,3,0,10,0,1,0,8,0]
-; X32-NEXT:    vpermi2pd %zmm2, %zmm2, %zmm0
 ; X32-NEXT:    retl
 ;
 ; X64-LABEL: combine_vpermi2var_8f64_identity:

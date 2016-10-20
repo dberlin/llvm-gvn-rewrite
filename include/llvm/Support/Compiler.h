@@ -60,24 +60,17 @@
 /// \macro LLVM_MSC_PREREQ
 /// \brief Is the compiler MSVC of at least the specified version?
 /// The common \param version values to check for are:
-///  * 1800: Microsoft Visual Studio 2013 / 12.0
 ///  * 1900: Microsoft Visual Studio 2015 / 14.0
 #ifdef _MSC_VER
 #define LLVM_MSC_PREREQ(version) (_MSC_VER >= (version))
 
-// We require at least MSVC 2013.
-#if !LLVM_MSC_PREREQ(1800)
-#error LLVM requires at least MSVC 2013.
+// We require at least MSVC 2015.
+#if !LLVM_MSC_PREREQ(1900)
+#error LLVM requires at least MSVC 2015.
 #endif
 
 #else
 #define LLVM_MSC_PREREQ(version) 0
-#endif
-
-#if !defined(_MSC_VER) || defined(__clang__) || LLVM_MSC_PREREQ(1900)
-#define LLVM_NOEXCEPT noexcept
-#else
-#define LLVM_NOEXCEPT throw()
 #endif
 
 /// \brief Does the compiler support ref-qualifiers for *this?
@@ -116,6 +109,12 @@
 #define LLVM_LIBRARY_VISIBILITY __attribute__ ((visibility("hidden")))
 #else
 #define LLVM_LIBRARY_VISIBILITY
+#endif
+
+#if defined(__GNUC__)
+#define LLVM_PREFETCH(addr, rw, locality) __builtin_prefetch(addr, rw, locality)
+#else
+#define LLVM_PREFETCH(addr, rw, locality)
 #endif
 
 #if __has_attribute(sentinel) || LLVM_GNUC_PREREQ(3, 0, 0)
@@ -326,15 +325,8 @@
 #endif
 
 /// \macro LLVM_ALIGNAS
-/// \brief Used to specify a minimum alignment for a structure or variable. The
-/// alignment must be a constant integer. Use LLVM_PTR_SIZE to compute
-/// alignments in terms of the size of a pointer.
-///
-/// Note that __declspec(align) has special quirks, it's not legal to pass a
-/// structure with __declspec(align) as a formal parameter.
-#ifdef _MSC_VER
-# define LLVM_ALIGNAS(x) __declspec(align(x))
-#elif __GNUC__ && !__has_feature(cxx_alignas) && !LLVM_GNUC_PREREQ(4, 8, 0)
+/// \brief Used to specify a minimum alignment for a structure or variable.
+#if __GNUC__ && !__has_feature(cxx_alignas) && !LLVM_GNUC_PREREQ(4, 8, 1)
 # define LLVM_ALIGNAS(x) __attribute__((aligned(x)))
 #else
 # define LLVM_ALIGNAS(x) alignas(x)
@@ -382,15 +374,6 @@
 # error "could not determine LLVM_PTR_SIZE as a constant int for MSVC"
 #else
 # define LLVM_PTR_SIZE sizeof(void *)
-#endif
-
-/// \macro LLVM_FUNCTION_NAME
-/// \brief Expands to __func__ on compilers which support it.  Otherwise,
-/// expands to a compiler-dependent replacement.
-#if defined(_MSC_VER)
-# define LLVM_FUNCTION_NAME __FUNCTION__
-#else
-# define LLVM_FUNCTION_NAME __func__
 #endif
 
 /// \macro LLVM_MEMORY_SANITIZER_BUILD

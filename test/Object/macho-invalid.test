@@ -355,3 +355,54 @@ INVALID-LINKOPT-BAD-SIZE: macho-invalid-linkopt-bad-size': truncated or malforme
 
 RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-linkopt-bad-count 2>&1 | FileCheck -check-prefix INVALID-LINKOPT-BAD-COUNT %s
 INVALID-LINKOPT-BAD-COUNT: macho-invalid-linkopt-bad-count': truncated or malformed object (load command 0 LC_LINKER_OPTION string count 3 does not match number of strings)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-subframe-small 2>&1 | FileCheck -check-prefix INVALID-SUBFRAME-SMALL %s
+INVALID-SUBFRAME-SMALL: macho-invalid-subframe-small': truncated or malformed object (load command 0 LC_SUB_FRAMEWORK cmdsize too small)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-subumbrella-offset-small 2>&1 | FileCheck -check-prefix INVALID-SUBUMBRELLA-OFFSET-SMALL %s
+INVALID-SUBUMBRELLA-OFFSET-SMALL: macho-invalid-subumbrella-offset-small': truncated or malformed object (load command 0 LC_SUB_UMBRELLA sub_umbrella.offset field too small, not past the end of the sub_umbrella_command)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-sublibrary-name_offset-toobig 2>&1 | FileCheck -check-prefix INVALID-SUBLIB-NAME_OFFSET-TOOBIG %s
+INVALID-SUBLIB-NAME_OFFSET-TOOBIG: macho-invalid-sublibrary-name_offset-toobig': truncated or malformed object (load command 0 LC_SUB_LIBRARY sub_library.offset field extends past the end of the load command)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-subclient-name_toobig 2>&1 | FileCheck -check-prefix INVALID-SUBCLIENT-NAME-TOOBIG %s
+INVALID-SUBCLIENT-NAME-TOOBIG: macho-invalid-subclient-name_toobig': truncated or malformed object (load command 0 LC_SUB_CLIENT client name extends past the end of the load command)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-routines-bad-size 2>&1 | FileCheck -check-prefix INVALID-ROUTINES-BAD-SIZE %s
+INVALID-ROUTINES-BAD-SIZE: macho-invalid-routines-bad-size': truncated or malformed object (LC_ROUTINES command 0 has incorrect cmdsize)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-routines64-more-than-one 2>&1 | FileCheck -check-prefix INVALID-ROUTINES64-MORE-THAN-ONE %s
+INVALID-ROUTINES64-MORE-THAN-ONE: macho-invalid-routines64-more-than-one': truncated or malformed object (more than one LC_ROUTINES_64 and or LC_ROUTINES command)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-codesign-bad-size 2>&1 | FileCheck -check-prefix INVALID-CODESIGN-BAD-SIZE %s
+INVALID-CODESIGN-BAD-SIZE: macho-invalid-codesign-bad-size': truncated or malformed object (LC_CODE_SIGNATURE command 0 has incorrect cmdsize)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-thread-count-pastend 2>&1 | FileCheck -check-prefix INVALID-THREAD-COUNT-PASTEND %s
+INVALID-THREAD-COUNT-PASTEND: macho-invalid-thread-count-pastend': truncated or malformed object (load command 0 count in LC_UNIXTHREAD extends past end of command)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-thread-count-wrong 2>&1 | FileCheck -check-prefix INVALID-THREAD-COUNT-WRONG %s
+INVALID-THREAD-COUNT-WRONG: macho-invalid-thread-count-wrong': truncated or malformed object (load command 0 count not x86_THREAD_STATE64_COUNT for flavor number 0 which is a x86_THREAD_STATE64 flavor in LC_THREAD command)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-thread-flavor-unknown 2>&1 | FileCheck -check-prefix INVALID-THREAD-FLAVOR-UNKNOWN %s
+INVALID-THREAD-FLAVOR-UNKNOWN: macho-invalid-thread-flavor-unknown': truncated or malformed object (load command 0 unknown flavor (507) for flavor number 0 in LC_THREAD command)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-thread-state-pastend 2>&1 | FileCheck -check-prefix INVALID-THREAD-PASTEND %s
+INVALID-THREAD-PASTEND: macho-invalid-thread-state-pastend': truncated or malformed object (load command 0 x86_THREAD_STATE64 extends past end of command in LC_THREAD command)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-thread-unknown-cputype 2>&1 | FileCheck -check-prefix INVALID-THREAD-UNKNOWN-CPUTYPE %s
+INVALID-THREAD-UNKNOWN-CPUTYPE: macho-invalid-thread-unknown-cputype': truncated or malformed object (unknown cputype (328) load command 0 for LC_THREAD command can't be checked)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-unixthread-more-than-one 2>&1 | FileCheck -check-prefix INVALID-UNIXTHREAD-MORE-THAN-ONE %s
+INVALID-UNIXTHREAD-MORE-THAN-ONE: macho-invalid-unixthread-more-than-one': truncated or malformed object (more than one LC_UNIXTHREAD command)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-twolevelhints-bad-size 2>&1 | FileCheck -check-prefix INVALID-TWOLEVELHINTS-BAD-SIZE %s
+INVALID-TWOLEVELHINTS-BAD-SIZE: macho-invalid-twolevelhints-bad-size': truncated or malformed object (load command 0 LC_TWOLEVEL_HINTS has incorrect cmdsize)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-twolevelhints-more-than-one 2>&1 | FileCheck -check-prefix INVALID-TWOLEVELHINTS-MORE-THAN-ONE %s
+INVALID-TWOLEVELHINTS-MORE-THAN-ONE: macho-invalid-twolevelhints-more-than-one': truncated or malformed object (more than one LC_TWOLEVEL_HINTS command)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-twolevelhints-offset 2>&1 | FileCheck -check-prefix INVALID-TWOLEVELHINTS-OFFSET %s
+INVALID-TWOLEVELHINTS-OFFSET: macho-invalid-twolevelhints-offset': truncated or malformed object (offset field of LC_TWOLEVEL_HINTS command 0 extends past the end of the file)
+
+RUN: not llvm-objdump -macho -private-headers %p/Inputs/macho-invalid-twolevelhints-offset-nhints 2>&1 | FileCheck -check-prefix INVALID-TWOLEVELHINTS-OFFSET-HNINTS %s
+INVALID-TWOLEVELHINTS-OFFSET-HNINTS: macho-invalid-twolevelhints-offset-nhints': truncated or malformed object (offset field plus nhints times sizeof(struct twolevel_hint) field of LC_TWOLEVEL_HINTS command 0 extends past the end of the file)
