@@ -4,7 +4,7 @@
 ; functions have consistent function attributes values. Here we check two
 ; functions have inconsistent values, and that a default is returned. 
 
-; RUN: llc < %s -mtriple=armv7-linux-gnueabi -mcpu=cortex-a15  | FileCheck %s --check-prefix=CHECK
+; RUN: llc < %s -mtriple=armv7-linux-gnueabi -mcpu=cortex-a15  | FileCheck %s
 
 ; CHECK: .eabi_attribute 20, 1
 
@@ -19,4 +19,4 @@ entry:
 }
 
 attributes #0 = { minsize norecurse nounwind optsize readnone "denormal-fp-math"="preserve-sign"}
-attributes #0 = { minsize norecurse nounwind optsize readnone "denormal-fp-math"="positive-zero"}
+attributes #1 = { minsize norecurse nounwind optsize readnone "denormal-fp-math"="positive-zero"}

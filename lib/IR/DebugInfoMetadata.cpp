@@ -84,8 +84,9 @@ StringRef DINode::getFlagString(DIFlags Flag) {
 
 DINode::DIFlags DINode::splitFlags(DIFlags Flags,
                                    SmallVectorImpl<DIFlags> &SplitFlags) {
-  // Accessibility and member pointer flags need to be specially handled, since
-  // they're packed together.
+  // Flags that are packed together need to be specially handled, so
+  // that, for example, we emit "DIFlagPublic" and not
+  // "DIFlagPrivate | DIFlagProtected".
   if (DIFlags A = Flags & FlagAccessibility) {
     if (A == FlagPrivate)
       SplitFlags.push_back(FlagPrivate);
@@ -103,6 +104,10 @@ DINode::DIFlags DINode::splitFlags(DIFlags Flags,
     else
       SplitFlags.push_back(FlagVirtualInheritance);
     Flags &= ~R;
+  }
+  if ((Flags & FlagIndirectVirtualBase) == FlagIndirectVirtualBase) {
+    Flags &= ~FlagIndirectVirtualBase;
+    SplitFlags.push_back(FlagIndirectVirtualBase);
   }
 
 #define HANDLE_DI_FLAG(ID, NAME)                                               \
@@ -466,11 +471,12 @@ DILexicalBlockFile *DILexicalBlockFile::getImpl(LLVMContext &Context,
 
 DINamespace *DINamespace::getImpl(LLVMContext &Context, Metadata *Scope,
                                   Metadata *File, MDString *Name, unsigned Line,
-                                  StorageType Storage, bool ShouldCreate) {
+                                  bool ExportSymbols, StorageType Storage,
+                                  bool ShouldCreate) {
   assert(isCanonical(Name) && "Expected canonical MDString");
-  DEFINE_GETIMPL_LOOKUP(DINamespace, (Scope, File, Name, Line));
+  DEFINE_GETIMPL_LOOKUP(DINamespace, (Scope, File, Name, Line, ExportSymbols));
   Metadata *Ops[] = {File, Scope, Name};
-  DEFINE_GETIMPL_STORE(DINamespace, (Line), Ops);
+  DEFINE_GETIMPL_STORE(DINamespace, (Line, ExportSymbols), Ops);
 }
 
 DIModule *DIModule::getImpl(LLVMContext &Context, Metadata *Scope,
@@ -510,7 +516,7 @@ DIGlobalVariable::getImpl(LLVMContext &Context, Metadata *Scope, MDString *Name,
                           Metadata *Type, bool IsLocalToUnit, bool IsDefinition,
                           Metadata *Variable,
                           Metadata *StaticDataMemberDeclaration,
-                          uint64_t AlignInBits,
+                          uint32_t AlignInBits,
                           StorageType Storage, bool ShouldCreate) {
   assert(isCanonical(Name) && "Expected canonical MDString");
   assert(isCanonical(LinkageName) && "Expected canonical MDString");
@@ -529,7 +535,7 @@ DILocalVariable *DILocalVariable::getImpl(LLVMContext &Context, Metadata *Scope,
                                           MDString *Name, Metadata *File,
                                           unsigned Line, Metadata *Type,
                                           unsigned Arg, DIFlags Flags,
-                                          uint64_t AlignInBits,
+                                          uint32_t AlignInBits,
                                           StorageType Storage,
                                           bool ShouldCreate) {
   // 64K ought to be enough for any frontend.

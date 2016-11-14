@@ -330,9 +330,9 @@ bool HexagonGenPredicate::isScalarPred(Register PredReg) {
       case Hexagon::C4_or_orn:
       case Hexagon::C2_xor:
         // Add operands to the queue.
-        for (ConstMIOperands Mo(*DefI); Mo.isValid(); ++Mo)
-          if (Mo->isReg() && Mo->isUse())
-            WorkQ.push(Register(Mo->getReg()));
+        for (const MachineOperand &MO : DefI->operands())
+          if (MO.isReg() && MO.isUse())
+            WorkQ.push(Register(MO.getReg()));
         break;
 
       // All non-vector compares are ok, everything else is bad.
@@ -356,7 +356,7 @@ bool HexagonGenPredicate::convertToPredForm(MachineInstr *MI) {
     if (!MO.isReg() || !MO.isUse())
       continue;
     Register Reg(MO);
-    if (Reg.S && Reg.S != Hexagon::subreg_loreg)
+    if (Reg.S && Reg.S != Hexagon::isub_lo)
       return false;
     if (!PredGPRs.count(Reg))
       return false;

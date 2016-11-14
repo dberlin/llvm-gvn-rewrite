@@ -14,8 +14,11 @@
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/GlobalISel/CallLowering.h"
+#include "llvm/CodeGen/Analysis.h"
+#include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
+#include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/IR/Constant.h"
@@ -37,6 +40,13 @@ INITIALIZE_PASS_BEGIN(IRTranslator, DEBUG_TYPE, "IRTranslator LLVM IR -> MI",
 INITIALIZE_PASS_DEPENDENCY(TargetPassConfig)
 INITIALIZE_PASS_END(IRTranslator, DEBUG_TYPE, "IRTranslator LLVM IR -> MI",
                 false, false)
+
+static void reportTranslationError(const Value &V, const Twine &Message) {
+  std::string ErrStorage;
+  raw_string_ostream Err(ErrStorage);
+  Err << Message << ": " << V << '\n';
+  report_fatal_error(Err.str());
+}
 
 IRTranslator::IRTranslator() : MachineFunctionPass(ID), MRI(nullptr) {
   initializeIRTranslatorPass(*PassRegistry::getPassRegistry());
@@ -67,11 +77,32 @@ unsigned IRTranslator::getOrCreateVReg(const Value &Val) {
               MachineFunctionProperties::Property::FailedISel);
           return 0;
         }
-        report_fatal_error("unable to translate constant");
+        reportTranslationError(Val, "unable to translate constant");
       }
     }
   }
   return ValReg;
+}
+
+int IRTranslator::getOrCreateFrameIndex(const AllocaInst &AI) {
+  if (FrameIndices.find(&AI) != FrameIndices.end())
+    return FrameIndices[&AI];
+
+  MachineFunction &MF = MIRBuilder.getMF();
+  unsigned ElementSize = DL->getTypeStoreSize(AI.getAllocatedType());
+  unsigned Size =
+      ElementSize * cast<ConstantInt>(AI.getArraySize())->getZExtValue();
+
+  // Always allocate at least one byte.
+  Size = std::max(Size, 1u);
+
+  unsigned Alignment = AI.getAlignment();
+  if (!Alignment)
+    Alignment = DL->getABITypeAlignment(AI.getAllocatedType());
+
+  int &FI = FrameIndices[&AI];
+  FI = MF.getFrameInfo().CreateStackObject(Size, Alignment, false, &AI);
+  return FI;
 }
 
 unsigned IRTranslator::getMemOpAlignment(const Instruction &I) {
@@ -382,6 +413,26 @@ bool IRTranslator::translateMemcpy(const CallInst &CI) {
                         CallLowering::ArgInfo(0, CI.getType()), Args);
 }
 
+void IRTranslator::getStackGuard(unsigned DstReg) {
+  auto MIB = MIRBuilder.buildInstr(TargetOpcode::LOAD_STACK_GUARD);
+  MIB.addDef(DstReg);
+
+  auto &MF = MIRBuilder.getMF();
+  auto &TLI = *MF.getSubtarget().getTargetLowering();
+  Value *Global = TLI.getSDagStackGuard(*MF.getFunction()->getParent());
+  if (!Global)
+    return;
+
+  MachinePointerInfo MPInfo(Global);
+  MachineInstr::mmo_iterator MemRefs = MF.allocateMemRefsArray(1);
+  auto Flags = MachineMemOperand::MOLoad | MachineMemOperand::MOInvariant |
+               MachineMemOperand::MODereferenceable;
+  *MemRefs =
+      MF.getMachineMemOperand(MPInfo, Flags, DL->getPointerSizeInBits() / 8,
+                              DL->getPointerABIAlignment());
+  MIB.setMemRefs(MemRefs, MemRefs + 1);
+}
+
 bool IRTranslator::translateKnownIntrinsic(const CallInst &CI,
                                            Intrinsic::ID ID) {
   unsigned Op = 0;
@@ -395,11 +446,36 @@ bool IRTranslator::translateKnownIntrinsic(const CallInst &CI,
   case Intrinsic::smul_with_overflow: Op = TargetOpcode::G_SMULO; break;
   case Intrinsic::memcpy:
     return translateMemcpy(CI);
+  case Intrinsic::eh_typeid_for: {
+    GlobalValue *GV = ExtractTypeInfo(CI.getArgOperand(0));
+    unsigned Reg = getOrCreateVReg(CI);
+    unsigned TypeID = MIRBuilder.getMF().getMMI().getTypeIDFor(GV);
+    MIRBuilder.buildConstant(Reg, TypeID);
+    return true;
+  }
   case Intrinsic::objectsize: {
     // If we don't know by now, we're never going to know.
     const ConstantInt *Min = cast<ConstantInt>(CI.getArgOperand(1));
 
     MIRBuilder.buildConstant(getOrCreateVReg(CI), Min->isZero() ? -1ULL : 0);
+    return true;
+  }
+  case Intrinsic::stackguard:
+    getStackGuard(getOrCreateVReg(CI));
+    return true;
+  case Intrinsic::stackprotector: {
+    MachineFunction &MF = MIRBuilder.getMF();
+    LLT PtrTy{*CI.getArgOperand(0)->getType(), *DL};
+    unsigned GuardVal = MRI->createGenericVirtualRegister(PtrTy);
+    getStackGuard(GuardVal);
+
+    AllocaInst *Slot = cast<AllocaInst>(CI.getArgOperand(1));
+    MIRBuilder.buildStore(
+        GuardVal, getOrCreateVReg(*Slot),
+        *MF.getMachineMemOperand(
+            MachinePointerInfo::getFixedStack(MF, getOrCreateFrameIndex(*Slot)),
+            MachineMemOperand::MOStore | MachineMemOperand::MOVolatile,
+            PtrTy.getSizeInBits() / 8, 8));
     return true;
   }
   }
@@ -463,25 +539,118 @@ bool IRTranslator::translateCall(const User &U) {
   return true;
 }
 
+bool IRTranslator::translateInvoke(const User &U) {
+  const InvokeInst &I = cast<InvokeInst>(U);
+  MachineFunction &MF = MIRBuilder.getMF();
+  MachineModuleInfo &MMI = MF.getMMI();
+
+  const BasicBlock *ReturnBB = I.getSuccessor(0);
+  const BasicBlock *EHPadBB = I.getSuccessor(1);
+
+  const Value *Callee(I.getCalledValue());
+  const Function *Fn = dyn_cast<Function>(Callee);
+  if (isa<InlineAsm>(Callee))
+    return false;
+
+  // FIXME: support invoking patchpoint and statepoint intrinsics.
+  if (Fn && Fn->isIntrinsic())
+    return false;
+
+  // FIXME: support whatever these are.
+  if (I.countOperandBundlesOfType(LLVMContext::OB_deopt))
+    return false;
+
+  // FIXME: support Windows exception handling.
+  if (!isa<LandingPadInst>(EHPadBB->front()))
+    return false;
+
+
+  // Emit the actual call, bracketed by EH_LABELs so that the MMI knows about
+  // the region covered by the try.
+  MCSymbol *BeginSymbol = MMI.getContext().createTempSymbol();
+  MIRBuilder.buildInstr(TargetOpcode::EH_LABEL).addSym(BeginSymbol);
+
+  unsigned Res = I.getType()->isVoidTy() ? 0 : getOrCreateVReg(I);
+  SmallVector<CallLowering::ArgInfo, 8> Args;
+  for (auto &Arg: I.arg_operands())
+    Args.emplace_back(getOrCreateVReg(*Arg), Arg->getType());
+
+  if (!CLI->lowerCall(MIRBuilder, MachineOperand::CreateGA(Fn, 0),
+                      CallLowering::ArgInfo(Res, I.getType()), Args))
+    return false;
+
+  MCSymbol *EndSymbol = MMI.getContext().createTempSymbol();
+  MIRBuilder.buildInstr(TargetOpcode::EH_LABEL).addSym(EndSymbol);
+
+  // FIXME: track probabilities.
+  MachineBasicBlock &EHPadMBB = getOrCreateBB(*EHPadBB),
+                    &ReturnMBB = getOrCreateBB(*ReturnBB);
+  MMI.addInvoke(&EHPadMBB, BeginSymbol, EndSymbol);
+  MIRBuilder.getMBB().addSuccessor(&ReturnMBB);
+  MIRBuilder.getMBB().addSuccessor(&EHPadMBB);
+
+  return true;
+}
+
+bool IRTranslator::translateLandingPad(const User &U) {
+  const LandingPadInst &LP = cast<LandingPadInst>(U);
+
+  MachineBasicBlock &MBB = MIRBuilder.getMBB();
+  MachineFunction &MF = MIRBuilder.getMF();
+  MachineModuleInfo &MMI = MF.getMMI();
+  AddLandingPadInfo(LP, MMI, &MBB);
+
+  MBB.setIsEHPad();
+
+  // If there aren't registers to copy the values into (e.g., during SjLj
+  // exceptions), then don't bother.
+  auto &TLI = *MF.getSubtarget().getTargetLowering();
+  const Constant *PersonalityFn = MF.getFunction()->getPersonalityFn();
+  if (TLI.getExceptionPointerRegister(PersonalityFn) == 0 &&
+      TLI.getExceptionSelectorRegister(PersonalityFn) == 0)
+    return true;
+
+  // If landingpad's return type is token type, we don't create DAG nodes
+  // for its exception pointer and selector value. The extraction of exception
+  // pointer or selector value from token type landingpads is not currently
+  // supported.
+  if (LP.getType()->isTokenTy())
+    return true;
+
+  // Add a label to mark the beginning of the landing pad.  Deletion of the
+  // landing pad can thus be detected via the MachineModuleInfo.
+  MIRBuilder.buildInstr(TargetOpcode::EH_LABEL)
+    .addSym(MMI.addLandingPad(&MBB));
+
+  // Mark exception register as live in.
+  SmallVector<unsigned, 2> Regs;
+  SmallVector<uint64_t, 2> Offsets;
+  LLT p0 = LLT::pointer(0, DL->getPointerSizeInBits());
+  if (unsigned Reg = TLI.getExceptionPointerRegister(PersonalityFn)) {
+    unsigned VReg = MRI->createGenericVirtualRegister(p0);
+    MIRBuilder.buildCopy(VReg, Reg);
+    Regs.push_back(VReg);
+    Offsets.push_back(0);
+  }
+
+  if (unsigned Reg = TLI.getExceptionSelectorRegister(PersonalityFn)) {
+    unsigned VReg = MRI->createGenericVirtualRegister(p0);
+    MIRBuilder.buildCopy(VReg, Reg);
+    Regs.push_back(VReg);
+    Offsets.push_back(p0.getSizeInBits());
+  }
+
+  MIRBuilder.buildSequence(getOrCreateVReg(LP), Regs, Offsets);
+  return true;
+}
+
 bool IRTranslator::translateStaticAlloca(const AllocaInst &AI) {
   if (!TPC->isGlobalISelAbortEnabled() && !AI.isStaticAlloca())
     return false;
 
   assert(AI.isStaticAlloca() && "only handle static allocas now");
-  MachineFunction &MF = MIRBuilder.getMF();
-  unsigned ElementSize = DL->getTypeStoreSize(AI.getAllocatedType());
-  unsigned Size =
-      ElementSize * cast<ConstantInt>(AI.getArraySize())->getZExtValue();
-
-  // Always allocate at least one byte.
-  Size = std::max(Size, 1u);
-
-  unsigned Alignment = AI.getAlignment();
-  if (!Alignment)
-    Alignment = DL->getABITypeAlignment(AI.getAllocatedType());
-
   unsigned Res = getOrCreateVReg(AI);
-  int FI = MF.getFrameInfo().CreateStackObject(Size, Alignment, false, &AI);
+  int FI = getOrCreateFrameIndex(AI);
   MIRBuilder.buildFrameIndex(Res, FI);
   return true;
 }
@@ -559,13 +728,13 @@ bool IRTranslator::translate(const Constant &C, unsigned Reg) {
   return true;
 }
 
-
 void IRTranslator::finalizeFunction() {
   finishPendingPhis();
 
   // Release the memory used by the different maps we
   // needed during the translation.
   ValToVReg.clear();
+  FrameIndices.clear();
   Constants.clear();
 }
 
@@ -610,12 +779,12 @@ bool IRTranslator::runOnMachineFunction(MachineFunction &MF) {
     // Set the insertion point of all the following translations to
     // the end of this basic block.
     MIRBuilder.setMBB(MBB);
+
     for (const Instruction &Inst: BB) {
       bool Succeeded = translate(Inst);
       if (!Succeeded) {
-        DEBUG(dbgs() << "Cannot translate: " << Inst << '\n');
         if (TPC->isGlobalISelAbortEnabled())
-          report_fatal_error("Unable to translate instruction");
+          reportTranslationError(Inst, "unable to translate instruction");
         MF.getProperties().set(MachineFunctionProperties::Property::FailedISel);
         break;
       }

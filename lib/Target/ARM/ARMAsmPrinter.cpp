@@ -1166,6 +1166,9 @@ void ARMAsmPrinter::EmitJumpTableTBInst(const MachineInstr *MI,
   const MachineOperand &MO1 = MI->getOperand(1);
   unsigned JTI = MO1.getIndex();
 
+  if (Subtarget->isThumb1Only())
+    EmitAlignment(2);
+  
   MCSymbol *JTISymbol = GetARMJTIPICJumpTableLabel(JTI);
   OutStreamer->EmitLabel(JTISymbol);
 
@@ -1738,6 +1741,14 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
       //    LSLS idx, #1
       //    ADDS pc, pc, idx
 
+      // When using PC as the base, it's important that there is no padding
+      // between the last ADDS and the start of the jump table. The jump table
+      // is 4-byte aligned, so we ensure we're 4 byte aligned here too.
+      //
+      // FIXME: Ideally we could vary the LDRB index based on the padding
+      // between the sequence and jump table, however that relies on MCExprs
+      // for load indexes which are currently not supported.
+      OutStreamer->EmitCodeAlignment(4);
       EmitToStreamer(*OutStreamer, MCInstBuilder(ARM::tADDhirr)
                                        .addReg(Idx)
                                        .addReg(Idx)

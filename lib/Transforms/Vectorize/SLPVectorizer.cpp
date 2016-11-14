@@ -211,12 +211,12 @@ static unsigned getSameOpcode(ArrayRef<Value *> VL) {
 /// of each scalar operation (VL) that will be converted into a vector (I).
 /// Flag set: NSW, NUW, exact, and all of fast-math.
 static void propagateIRFlags(Value *I, ArrayRef<Value *> VL) {
-  if (auto *VecOp = dyn_cast<BinaryOperator>(I)) {
-    if (auto *Intersection = dyn_cast<BinaryOperator>(VL[0])) {
+  if (auto *VecOp = dyn_cast<Instruction>(I)) {
+    if (auto *Intersection = dyn_cast<Instruction>(VL[0])) {
       // Intersection is initialized to the 0th scalar,
       // so start counting from index '1'.
       for (int i = 1, e = VL.size(); i < e; ++i) {
-        if (auto *Scalar = dyn_cast<BinaryOperator>(VL[i]))
+        if (auto *Scalar = dyn_cast<Instruction>(VL[i]))
           Intersection->andIRFlags(Scalar);
       }
       VecOp->copyIRFlags(Intersection);
@@ -2430,6 +2430,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
         V = Builder.CreateICmp(P0, L, R);
 
       E->VectorizedValue = V;
+      propagateIRFlags(E->VectorizedValue, E->Scalars);
       ++NumVectorInstructions;
       return V;
     }
@@ -4062,7 +4063,14 @@ class HorizontalReduction {
   SmallVector<Value *, 32> ReducedVals;
 
   BinaryOperator *ReductionRoot;
-  PHINode *ReductionPHI;
+  // After successfull horizontal reduction vectorization attempt for PHI node
+  // vectorizer tries to update root binary op by combining vectorized tree and
+  // the ReductionPHI node. But during vectorization this ReductionPHI can be
+  // vectorized itself and replaced by the undef value, while the instruction
+  // itself is marked for deletion. This 'marked for deletion' PHI node then can
+  // be used in new binary operation, causing "Use still stuck around after Def
+  // is destroyed" crash upon PHI node deletion.
+  WeakVH ReductionPHI;
 
   /// The opcode of the reduction.
   unsigned ReductionOpcode;
@@ -4081,8 +4089,8 @@ public:
   unsigned MinVecRegSize;
 
   HorizontalReduction(unsigned MinVecRegSize)
-      : ReductionRoot(nullptr), ReductionPHI(nullptr), ReductionOpcode(0),
-        ReducedValueOpcode(0), IsPairwiseReduction(false), ReduxWidth(0),
+      : ReductionRoot(nullptr), ReductionOpcode(0), ReducedValueOpcode(0),
+        IsPairwiseReduction(false), ReduxWidth(0),
         MinVecRegSize(MinVecRegSize) {}
 
   /// \brief Try to find a reduction tree.
@@ -4247,7 +4255,7 @@ public:
                                      ReducedVals[i]);
       }
       // Update users.
-      if (ReductionPHI) {
+      if (ReductionPHI && !isa<UndefValue>(ReductionPHI)) {
         assert(ReductionRoot && "Need a reduction operation");
         ReductionRoot->setOperand(0, VectorizedTree);
         ReductionRoot->setOperand(1, ReductionPHI);

@@ -296,3 +296,18 @@ define <4 x i32> @combine_vec_ashr_positive(<4 x i32> %x, <4 x i32> %y) {
   %2 = ashr <4 x i32> %1, %y
   ret <4 x i32> %2
 }
+
+define <4 x i32> @combine_vec_ashr_positive_splat(<4 x i32> %x, <4 x i32> %y) {
+; SSE-LABEL: combine_vec_ashr_positive_splat:
+; SSE:       # BB#0:
+; SSE-NEXT:    xorps %xmm0, %xmm0
+; SSE-NEXT:    retq
+;
+; AVX-LABEL: combine_vec_ashr_positive_splat:
+; AVX:       # BB#0:
+; AVX-NEXT:    vxorps %xmm0, %xmm0, %xmm0
+; AVX-NEXT:    retq
+  %1 = and <4 x i32> %x, <i32 1023, i32 1023, i32 1023, i32 1023>
+  %2 = ashr <4 x i32> %1, <i32 10, i32 10, i32 10, i32 10>
+  ret <4 x i32> %2
+}

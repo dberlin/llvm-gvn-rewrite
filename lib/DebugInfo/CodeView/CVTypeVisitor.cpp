@@ -10,45 +10,12 @@
 #include "llvm/DebugInfo/CodeView/CVTypeVisitor.h"
 
 #include "llvm/DebugInfo/CodeView/CodeViewError.h"
+#include "llvm/DebugInfo/CodeView/TypeDeserializer.h"
+#include "llvm/DebugInfo/CodeView/TypeVisitorCallbackPipeline.h"
 #include "llvm/DebugInfo/MSF/ByteStream.h"
 
 using namespace llvm;
 using namespace llvm::codeview;
-
-static Error skipPadding(msf::StreamReader &Reader) {
-  if (Reader.empty())
-    return Error::success();
-
-  uint8_t Leaf = Reader.peek();
-  if (Leaf < LF_PAD0)
-    return Error::success();
-  // Leaf is greater than 0xf0. We should advance by the number of bytes in
-  // the low 4 bits.
-  unsigned BytesToAdvance = Leaf & 0x0F;
-  return Reader.skip(BytesToAdvance);
-}
-
-template <typename T>
-static Expected<CVMemberRecord>
-deserializeMemberRecord(msf::StreamReader &Reader, TypeLeafKind Kind) {
-  msf::StreamReader OldReader = Reader;
-  TypeRecordKind RK = static_cast<TypeRecordKind>(Kind);
-  auto ExpectedRecord = T::deserialize(RK, Reader);
-  if (!ExpectedRecord)
-    return ExpectedRecord.takeError();
-  assert(Reader.bytesRemaining() < OldReader.bytesRemaining());
-  if (auto EC = skipPadding(Reader))
-    return std::move(EC);
-
-  CVMemberRecord CVMR;
-  CVMR.Kind = Kind;
-
-  uint32_t RecordLength = OldReader.bytesRemaining() - Reader.bytesRemaining();
-  if (auto EC = OldReader.readBytes(CVMR.Data, RecordLength))
-    return std::move(EC);
-
-  return CVMR;
-}
 
 CVTypeVisitor::CVTypeVisitor(TypeVisitorCallbacks &Callbacks)
     : Callbacks(Callbacks) {}
@@ -100,7 +67,8 @@ Error CVTypeVisitor::visitTypeRecord(CVType &Record) {
   return Error::success();
 }
 
-Error CVTypeVisitor::visitMemberRecord(CVMemberRecord &Record) {
+static Error visitMemberRecord(CVMemberRecord &Record,
+                               TypeVisitorCallbacks &Callbacks) {
   if (auto EC = Callbacks.visitMemberBegin(Record))
     return EC;
 
@@ -128,6 +96,10 @@ Error CVTypeVisitor::visitMemberRecord(CVMemberRecord &Record) {
   return Error::success();
 }
 
+Error CVTypeVisitor::visitMemberRecord(CVMemberRecord &Record) {
+  return ::visitMemberRecord(Record, Callbacks);
+}
+
 /// Visits the type records in Data. Sets the error flag on parse failures.
 Error CVTypeVisitor::visitTypeStream(const CVTypeArray &Types) {
   for (auto I : Types) {
@@ -137,46 +109,23 @@ Error CVTypeVisitor::visitTypeStream(const CVTypeArray &Types) {
   return Error::success();
 }
 
-template <typename MR>
-static Error visitKnownMember(msf::StreamReader &Reader, TypeLeafKind Leaf,
-                              TypeVisitorCallbacks &Callbacks) {
-  auto ExpectedRecord = deserializeMemberRecord<MR>(Reader, Leaf);
-  if (!ExpectedRecord)
-    return ExpectedRecord.takeError();
-  CVMemberRecord &Record = *ExpectedRecord;
-  if (auto EC = Callbacks.visitMemberBegin(Record))
-    return EC;
-  if (auto EC = visitKnownMember<MR>(Record, Callbacks))
-    return EC;
-  if (auto EC = Callbacks.visitMemberEnd(Record))
-    return EC;
-  return Error::success();
-}
-
 Error CVTypeVisitor::visitFieldListMemberStream(msf::StreamReader Reader) {
+  FieldListDeserializer Deserializer(Reader);
+  TypeVisitorCallbackPipeline Pipeline;
+  Pipeline.addCallbackToPipeline(Deserializer);
+  Pipeline.addCallbackToPipeline(Callbacks);
+
   TypeLeafKind Leaf;
   while (!Reader.empty()) {
     if (auto EC = Reader.readEnum(Leaf))
       return EC;
 
-    CVType Record;
-    switch (Leaf) {
-    default:
-      // Field list records do not describe their own length, so we cannot
-      // continue parsing past a type that we don't know how to deserialize.
-      return llvm::make_error<CodeViewError>(
-          cv_error_code::unknown_member_record);
-#define MEMBER_RECORD(EnumName, EnumVal, Name)                                 \
-  case EnumName: {                                                             \
-    if (auto EC = visitKnownMember<Name##Record>(Reader, Leaf, Callbacks))     \
-      return EC;                                                               \
-    break;                                                                     \
+    CVMemberRecord Record;
+    Record.Kind = Leaf;
+    if (auto EC = ::visitMemberRecord(Record, Pipeline))
+      return EC;
   }
-#define MEMBER_RECORD_ALIAS(EnumName, EnumVal, Name, AliasName)                \
-  MEMBER_RECORD(EnumVal, EnumVal, AliasName)
-#include "llvm/DebugInfo/CodeView/TypeRecords.def"
-    }
-  }
+
   return Error::success();
 }
 

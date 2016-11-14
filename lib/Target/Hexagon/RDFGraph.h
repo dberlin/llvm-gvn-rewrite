@@ -328,8 +328,6 @@ namespace rdf {
   template <typename T> struct NodeAddr {
     NodeAddr() : Addr(nullptr), Id(0) {}
     NodeAddr(T A, NodeId I) : Addr(A), Id(I) {}
-    NodeAddr(const NodeAddr&) = default;
-    NodeAddr &operator= (const NodeAddr&) = default;
 
     bool operator== (const NodeAddr<T> &NA) const {
       assert((Addr == NA.Addr) == (Id == NA.Id));
@@ -407,8 +405,6 @@ namespace rdf {
     RegisterRef() : RegisterRef(0) {}
     explicit RegisterRef(RegisterId R, LaneBitmask M = ~LaneBitmask(0))
       : Reg(R), Mask(R != 0 ? M : 0) {}
-    RegisterRef(const RegisterRef &RR) = default;
-    RegisterRef &operator= (const RegisterRef &RR) = default;
     operator bool() const { return Reg != 0 && Mask != LaneBitmask(0); }
     bool operator== (const RegisterRef &RR) const {
       return Reg == RR.Reg && Mask == RR.Mask;
@@ -790,7 +786,7 @@ namespace rdf {
 
     // Make this std::unordered_map for speed of accessing elements.
     // Map: Register (physical or virtual) -> DefStack
-    typedef std::unordered_map<uint32_t,DefStack> DefStackMap;
+    typedef std::unordered_map<RegisterId,DefStack> DefStackMap;
 
     void build(unsigned Options = BuildOptions::None);
     void pushDefs(NodeAddr<InstrNode*> IA, DefStackMap &DM);
@@ -863,7 +859,7 @@ namespace rdf {
   private:
     void reset();
 
-    RegisterSet getAliasSet(uint32_t Reg) const;
+    RegisterSet getAliasSet(RegisterId Reg) const;
     RegisterSet getLandingPadLiveIns() const;
 
     NodeAddr<NodeBase*> newNode(uint16_t Attrs);

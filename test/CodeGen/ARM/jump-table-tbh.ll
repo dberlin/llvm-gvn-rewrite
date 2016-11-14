@@ -25,6 +25,7 @@ define i32 @test_tbh(i1 %tst, i32 %sw, i32 %l) {
 ; T1: [[ANCHOR:.LCPI[0-9_]+]]:
 ; T1: add pc, [[x]]
 ; T1-NEXT: @ BB#2
+; T1-NEXT: .p2align 2
 ; T1-NEXT: LJTI
 ; T1-NEXT: .short	(.LBB0_[[x:[0-9]+]]-([[ANCHOR]]+4))/2
 ; T1-NEXT: .short	(.LBB0_{{[0-9]+}}-([[ANCHOR]]+4))/2

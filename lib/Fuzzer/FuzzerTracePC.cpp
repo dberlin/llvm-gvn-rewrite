@@ -30,24 +30,16 @@ TracePC TPC;
 void TracePC::HandleTrace(uint32_t *Guard, uintptr_t PC) {
   uint32_t Idx = *Guard;
   if (!Idx) return;
-  uint8_t *CounterPtr = &Counters[Idx % kNumCounters];
-  uint8_t Counter = *CounterPtr;
-  if (Counter == 0) {
-    if (!PCs[Idx % kNumPCs]) {
-      AddNewPCID(Idx);
-      TotalPCCoverage++;
-      PCs[Idx % kNumPCs] = PC;
-    }
-  }
-  if (UseCounters) {
-    if (Counter < 128)
-      *CounterPtr = Counter + 1;
-    else
-      *Guard = 0;
-  } else {
-    *CounterPtr = 1;
-    *Guard = 0;
-  }
+  PCs[Idx % kNumPCs] = PC;
+  Counters[Idx % kNumCounters]++;
+}
+
+size_t TracePC::GetTotalPCCoverage() {
+  size_t Res = 0;
+  for (size_t i = 1; i < GetNumPCs(); i++)
+    if (PCs[i])
+      Res++;
+  return Res;
 }
 
 void TracePC::HandleInit(uint32_t *Start, uint32_t *Stop) {
@@ -65,14 +57,6 @@ void TracePC::PrintModuleInfo() {
   for (size_t i = 0; i < NumModules; i++)
     Printf("[%p, %p), ", Modules[i].Start, Modules[i].Stop);
   Printf("\n");
-}
-
-void TracePC::ResetGuards() {
-  uint32_t N = 0;
-  for (size_t M = 0; M < NumModules; M++)
-    for (uint32_t *X = Modules[M].Start, *End = Modules[M].Stop; X < End; X++)
-      *X = ++N;
-  assert(N == NumGuards);
 }
 
 size_t TracePC::FinalizeTrace(InputCorpus *C, size_t InputSize, bool Shrink) {
@@ -129,6 +113,16 @@ static bool IsInterestingCoverageFile(std::string &File) {
   return true;
 }
 
+void TracePC::PrintNewPCs() {
+  if (DoPrintNewPCs) {
+    if (!PrintedPCs)
+      PrintedPCs = new std::set<uintptr_t>;
+    for (size_t i = 1; i < GetNumPCs(); i++)
+      if (PCs[i] && PrintedPCs->insert(PCs[i]).second)
+        PrintPC("\tNEW_PC: %p %F %L\n", "\tNEW_PC: %p\n", PCs[i]);
+  }
+}
+
 void TracePC::PrintCoverage() {
   if (!EF->__sanitizer_symbolize_pc) {
     Printf("INFO: __sanitizer_symbolize_pc is not available,"
@@ -139,7 +133,7 @@ void TracePC::PrintCoverage() {
   std::map<std::string, uintptr_t> ModuleOffsets;
   std::set<std::string> CoveredFiles, CoveredFunctions, CoveredLines;
   Printf("COVERAGE:\n");
-  for (size_t i = 0; i < Min(NumGuards + 1, kNumPCs); i++) {
+  for (size_t i = 1; i < GetNumPCs(); i++) {
     if (!PCs[i]) continue;
     std::string FileStr = DescribePC("%s", PCs[i]);
     if (!IsInterestingCoverageFile(FileStr)) continue;
@@ -224,6 +218,9 @@ void TracePC::PrintCoverage() {
 // For cmp instructions the interesting value is a XOR of the parameters.
 // The interesting value is mixed up with the PC and is then added to the map.
 
+#ifdef __clang__  // avoid gcc warning.
+__attribute__((no_sanitize("memory")))
+#endif
 void TracePC::AddValueForMemcmp(void *caller_pc, const void *s1, const void *s2,
                               size_t n) {
   if (!n) return;
@@ -268,57 +265,11 @@ void TracePC::HandleCmp(void *PC, T Arg1, T Arg2) {
   uint64_t ArgXor = Arg1 ^ Arg2;
   uint64_t ArgDistance = __builtin_popcountl(ArgXor) + 1; // [1,65]
   uintptr_t Idx = ((PCuint & 4095) + 1) * ArgDistance;
-  TORCInsert(ArgXor, Arg1, Arg2);
+  if (sizeof(T) == 4)
+      TORC4.Insert(ArgXor, Arg1, Arg2);
+  else if (sizeof(T) == 8)
+      TORC8.Insert(ArgXor, Arg1, Arg2);
   HandleValueProfile(Idx);
-}
-
-void TracePC::ProcessTORC(Dictionary *Dict, const uint8_t *Data, size_t Size) {
-  TORCToDict(TORC8, Dict, Data, Size);
-  TORCToDict(TORC4, Dict, Data, Size);
-}
-
-template <class T>
-void TracePC::TORCToDict(const TableOfRecentCompares<T, kTORCSize> &TORC,
-                         Dictionary *Dict, const uint8_t *Data, size_t Size) {
-  ScopedDoingMyOwnMemmem scoped_doing_my_own_memmem;
-  for (size_t i = 0; i < TORC.kSize; i++) {
-    T A[2] = {TORC.Table[i][0], TORC.Table[i][1]};
-    if (!A[0] && !A[1]) continue;
-    for (int j = 0; j < 2; j++)
-      TORCToDict(Dict, A[j], A[!j], Data, Size);
-  }
-}
-
-template <class T>
-void TracePC::TORCToDict(Dictionary *Dict, T FindInData, T Substitute,
-                         const uint8_t *Data, size_t Size) {
-  if (FindInData == Substitute) return;
-  if (sizeof(T) == 4) {
-    uint16_t HigherBytes = Substitute >> sizeof(T) * 4;
-    if (HigherBytes == 0 || HigherBytes == 0xffff)
-      TORCToDict(Dict, static_cast<uint16_t>(FindInData),
-                 static_cast<uint16_t>(Substitute), Data, Size);
-  }
-  const size_t DataSize = sizeof(T);
-  const uint8_t *End = Data + Size;
-  int Attempts = 3;
-  for (int DoSwap = 0; DoSwap <= 1; DoSwap++) {
-    for (const uint8_t *Cur = Data; Cur < End && Attempts--; Cur++) {
-      Cur = (uint8_t *)memmem(Cur, End - Cur, &FindInData, DataSize);
-      if (!Cur)
-        break;
-      size_t Pos = Cur - Data;
-      Word W(reinterpret_cast<uint8_t *>(&Substitute), sizeof(Substitute));
-      DictionaryEntry DE(W, Pos);
-      // TODO: evict all entries from Dic if it's full.
-      Dict->push_back(DE);
-      // Printf("Dict[%zd] TORC%zd %llx => %llx pos %zd\n", Dict->size(),
-      // sizeof(T),
-      //       (uint64_t)FindInData, (uint64_t)Substitute, Pos);
-    }
-    FindInData = Bswap(FindInData);
-    Substitute = Bswap(Substitute);
-  }
 }
 
 } // namespace fuzzer

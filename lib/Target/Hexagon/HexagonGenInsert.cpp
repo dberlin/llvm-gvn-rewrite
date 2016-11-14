@@ -1387,9 +1387,9 @@ bool HexagonGenInsert::generateInserts() {
     unsigned Wdh = IF.Wdh, Off = IF.Off;
     unsigned InsS = 0;
     if (R32 && MRI->getRegClass(IF.InsR) == &Hexagon::DoubleRegsRegClass) {
-      InsS = Hexagon::subreg_loreg;
+      InsS = Hexagon::isub_lo;
       if (Off >= 32) {
-        InsS = Hexagon::subreg_hireg;
+        InsS = Hexagon::isub_hi;
         Off -= 32;
       }
     }
@@ -1444,10 +1444,10 @@ bool HexagonGenInsert::removeDeadCode(MachineDomTreeNode *N) {
 
     bool AllDead = true;
     SmallVector<unsigned,2> Regs;
-    for (ConstMIOperands Op(*MI); Op.isValid(); ++Op) {
-      if (!Op->isReg() || !Op->isDef())
+    for (const MachineOperand &MO : MI->operands()) {
+      if (!MO.isReg() || !MO.isDef())
         continue;
-      unsigned R = Op->getReg();
+      unsigned R = MO.getReg();
       if (!TargetRegisterInfo::isVirtualRegister(R) ||
           !MRI->use_nodbg_empty(R)) {
         AllDead = false;
@@ -1474,8 +1474,6 @@ bool HexagonGenInsert::runOnMachineFunction(MachineFunction &MF) {
 
   bool Timing = OptTiming, TimingDetail = Timing && OptTimingDetail;
   bool Changed = false;
-  TimerGroup __G("hexinsert");
-  NamedRegionTimer __T("hexinsert", Timing && !TimingDetail);
 
   // Sanity check: one, but not both.
   assert(!OptSelectAll0 || !OptSelectHas0);

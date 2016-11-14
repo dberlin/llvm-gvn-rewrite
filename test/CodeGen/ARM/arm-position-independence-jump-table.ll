@@ -85,12 +85,13 @@ lab4:
 ; THUMB2: [[LBB4]]
 ; THUMB2-NEXT: b exit4
 
-
+; THUMB1: .p2align 2
 ; THUMB1: add     r[[x:[0-9]+]], pc
 ; THUMB1: ldrb    r[[x]], [r[[x]], #4]
 ; THUMB1: lsls    r[[x]], r[[x]], #1
 ; THUMB1: [[LCPI:\.LCPI[0-9]+_[0-9]+]]:
 ; THUMB1: add     pc, r[[x]]
+; THUMB1: .p2align 2
 ; THUMB1: .byte   ([[LBB1:\.LBB[0-9]+_[0-9]+]]-([[LCPI]]+4))/2
 ; THUMB1: .byte   ([[LBB2:\.LBB[0-9]+_[0-9]+]]-([[LCPI]]+4))/2
 ; THUMB1: .byte   ([[LBB3:\.LBB[0-9]+_[0-9]+]]-([[LCPI]]+4))/2

@@ -64,9 +64,10 @@ void AArch64Subtarget::initializeProperties() {
     MaxInterleaveFactor = 4;
     break;
   case ExynosM1:
+    MaxInterleaveFactor = 4;
+    MaxJumpTableSize = 8;
     PrefFunctionAlignment = 4;
     PrefLoopAlignment = 3;
-    MaxJumpTableSize = 12;
     break;
   case Kryo:
     MaxInterleaveFactor = 4;

@@ -30,6 +30,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
+#include "llvm/Support/ScopedPrinter.h"
 #include "llvm/Support/ThreadPool.h"
 #include "llvm/Support/ToolOutputFile.h"
 #include <functional>
@@ -38,8 +39,7 @@
 using namespace llvm;
 using namespace coverage;
 
-void exportCoverageDataToJson(StringRef ObjectFilename,
-                              const coverage::CoverageMapping &CoverageMapping,
+void exportCoverageDataToJson(const coverage::CoverageMapping &CoverageMapping,
                               raw_ostream &OS);
 
 namespace {
@@ -116,7 +116,7 @@ private:
   int export_(int argc, const char **argv,
               CommandLineParserType commandLineParser);
 
-  std::string ObjectFilename;
+  std::vector<StringRef> ObjectFilenames;
   CoverageViewOptions ViewOpts;
   CoverageFiltersMatchAll Filters;
 
@@ -325,13 +325,15 @@ static bool modifiedTimeGT(StringRef LHS, StringRef RHS) {
 }
 
 std::unique_ptr<CoverageMapping> CodeCoverageTool::load() {
-  if (modifiedTimeGT(ObjectFilename, PGOFilename))
-    warning("profile data may be out of date - object is newer",
-            ObjectFilename);
+  for (StringRef ObjectFilename : ObjectFilenames)
+    if (modifiedTimeGT(ObjectFilename, PGOFilename))
+      warning("profile data may be out of date - object is newer",
+              ObjectFilename);
   auto CoverageOrErr =
-      CoverageMapping::load(ObjectFilename, PGOFilename, CoverageArch);
+      CoverageMapping::load(ObjectFilenames, PGOFilename, CoverageArch);
   if (Error E = CoverageOrErr.takeError()) {
-    error("Failed to load coverage: " + toString(std::move(E)), ObjectFilename);
+    error("Failed to load coverage: " + toString(std::move(E)),
+          join(ObjectFilenames.begin(), ObjectFilenames.end(), ", "));
     return nullptr;
   }
   auto Coverage = std::move(CoverageOrErr.get());
@@ -484,9 +486,12 @@ void CodeCoverageTool::writeSourceFileView(StringRef SourceFile,
 }
 
 int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
-  cl::opt<std::string, true> ObjectFilename(
-      cl::Positional, cl::Required, cl::location(this->ObjectFilename),
-      cl::desc("Covered executable or object file."));
+  cl::opt<std::string> CovFilename(
+      cl::Positional, cl::desc("Covered executable or object file."));
+
+  cl::list<std::string> CovFilenames(
+      "object", cl::desc("Coverage executable or object file"), cl::ZeroOrMore,
+      cl::CommaSeparated);
 
   cl::list<std::string> InputSourceFiles(
       cl::Positional, cl::desc("<Source files>"), cl::ZeroOrMore);
@@ -568,14 +573,16 @@ int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
     ViewOpts.Debug = DebugDump;
     CompareFilenamesOnly = FilenameEquivalence;
 
-    ViewOpts.Format = Format;
-    SmallString<128> ObjectFilePath(this->ObjectFilename);
-    if (std::error_code EC = sys::fs::make_absolute(ObjectFilePath)) {
-      error(EC.message(), this->ObjectFilename);
-      return 1;
+    if (!CovFilename.empty())
+      ObjectFilenames.emplace_back(CovFilename);
+    for (const std::string &Filename : CovFilenames)
+      ObjectFilenames.emplace_back(Filename);
+    if (ObjectFilenames.empty()) {
+      errs() << "No filenames specified!\n";
+      ::exit(1);
     }
-    sys::path::native(ObjectFilePath);
-    ViewOpts.ObjectFilename = ObjectFilePath.c_str();
+
+    ViewOpts.Format = Format;
     switch (ViewOpts.Format) {
     case CoverageViewOptions::OutputFormat::Text:
       ViewOpts.Colors = UseColor == cl::BOU_UNSET
@@ -584,7 +591,7 @@ int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
       break;
     case CoverageViewOptions::OutputFormat::HTML:
       if (UseColor == cl::BOU_FALSE)
-        error("Color output cannot be disabled when generating html.");
+        errs() << "Color output cannot be disabled when generating html.\n";
       ViewOpts.Colors = true;
       break;
     }
@@ -734,7 +741,7 @@ int CodeCoverageTool::show(int argc, const char **argv,
   }
 
   auto ModifiedTime = Status.getLastModificationTime();
-  std::string ModifiedTimeStr = ModifiedTime.str();
+  std::string ModifiedTimeStr = to_string(ModifiedTime);
   size_t found = ModifiedTimeStr.rfind(":");
   ViewOpts.CreatedTimeStr = (found != std::string::npos)
                                 ? "Created: " + ModifiedTimeStr.substr(0, found)
@@ -842,7 +849,7 @@ int CodeCoverageTool::export_(int argc, const char **argv,
     return 1;
   }
 
-  exportCoverageDataToJson(ObjectFilename, *Coverage.get(), outs());
+  exportCoverageDataToJson(*Coverage.get(), outs());
 
   return 0;
 }

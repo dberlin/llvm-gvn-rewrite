@@ -56,6 +56,7 @@ AMDGPUSubtarget::initializeSubtargetDependencies(const Triple &TT,
   // denormals, but should be checked. Should we issue a warning somewhere
   // if someone tries to enable these?
   if (getGeneration() <= AMDGPUSubtarget::NORTHERN_ISLANDS) {
+    FP16Denormals = false;
     FP32Denormals = false;
     FP64Denormals = false;
   }
@@ -81,6 +82,7 @@ AMDGPUSubtarget::AMDGPUSubtarget(const Triple &TT, StringRef GPU, StringRef FS,
     FastFMAF32(false),
     HalfRate64Ops(false),
 
+    FP16Denormals(false),
     FP32Denormals(false),
     FP64Denormals(false),
     FPExceptions(false),
@@ -110,6 +112,8 @@ AMDGPUSubtarget::AMDGPUSubtarget(const Triple &TT, StringRef GPU, StringRef FS,
     Has16BitInsts(false),
     HasMovrel(false),
     HasVGPRIndexMode(false),
+    HasScalarStores(false),
+    HasInv2PiInlineImm(false),
     FlatAddressSpace(false),
 
     R600ALUInst(false),
@@ -352,4 +356,14 @@ unsigned SISubtarget::getOccupancyWithNumVGPRs(unsigned VGPRs) const {
   if (VGPRs <= 128)
     return 2;
   return 1;
+}
+
+unsigned SISubtarget::getMaxNumSGPRs() const {
+  if (hasSGPRInitBug())
+    return SISubtarget::FIXED_SGPR_COUNT_FOR_INIT_BUG;
+
+  if (getGeneration() >= VOLCANIC_ISLANDS)
+    return 102;
+
+  return 104;
 }

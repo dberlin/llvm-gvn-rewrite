@@ -674,16 +674,20 @@ template <> struct MDNodeKeyImpl<DINamespace> {
   Metadata *File;
   MDString *Name;
   unsigned Line;
+  bool ExportSymbols;
 
-  MDNodeKeyImpl(Metadata *Scope, Metadata *File, MDString *Name, unsigned Line)
-      : Scope(Scope), File(File), Name(Name), Line(Line) {}
+  MDNodeKeyImpl(Metadata *Scope, Metadata *File, MDString *Name, unsigned Line,
+                bool ExportSymbols)
+      : Scope(Scope), File(File), Name(Name), Line(Line),
+        ExportSymbols(ExportSymbols) {}
   MDNodeKeyImpl(const DINamespace *N)
       : Scope(N->getRawScope()), File(N->getRawFile()), Name(N->getRawName()),
-        Line(N->getLine()) {}
+        Line(N->getLine()), ExportSymbols(N->getExportSymbols()) {}
 
   bool isKeyOf(const DINamespace *RHS) const {
     return Scope == RHS->getRawScope() && File == RHS->getRawFile() &&
-           Name == RHS->getRawName() && Line == RHS->getLine();
+           Name == RHS->getRawName() && Line == RHS->getLine() &&
+           ExportSymbols == RHS->getExportSymbols();
   }
   unsigned getHashValue() const {
     return hash_combine(Scope, File, Name, Line);
@@ -761,13 +765,13 @@ template <> struct MDNodeKeyImpl<DIGlobalVariable> {
   bool IsDefinition;
   Metadata *Expr;
   Metadata *StaticDataMemberDeclaration;
-  uint64_t AlignInBits;
+  uint32_t AlignInBits;
 
   MDNodeKeyImpl(Metadata *Scope, MDString *Name, MDString *LinkageName,
                 Metadata *File, unsigned Line, Metadata *Type,
                 bool IsLocalToUnit, bool IsDefinition,
                 Metadata *Expr, Metadata *StaticDataMemberDeclaration,
-                uint64_t AlignInBits)
+                uint32_t AlignInBits)
       : Scope(Scope), Name(Name), LinkageName(LinkageName), File(File),
         Line(Line), Type(Type), IsLocalToUnit(IsLocalToUnit),
         IsDefinition(IsDefinition), Expr(Expr),
@@ -815,11 +819,11 @@ template <> struct MDNodeKeyImpl<DILocalVariable> {
   Metadata *Type;
   unsigned Arg;
   unsigned Flags;
-  uint64_t AlignInBits;
+  uint32_t AlignInBits;
 
   MDNodeKeyImpl(Metadata *Scope, MDString *Name, Metadata *File, unsigned Line,
                 Metadata *Type, unsigned Arg, unsigned Flags,
-                uint64_t AlignInBits)
+                uint32_t AlignInBits)
       : Scope(Scope), Name(Name), File(File), Line(Line), Type(Type), Arg(Arg),
         Flags(Flags), AlignInBits(AlignInBits) {}
   MDNodeKeyImpl(const DILocalVariable *N)

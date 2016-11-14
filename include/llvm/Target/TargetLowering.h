@@ -1051,9 +1051,7 @@ public:
   }
 
   /// Return lower limit for number of blocks in a jump table.
-  unsigned getMinimumJumpTableEntries() const {
-    return MinimumJumpTableEntries;
-  }
+  unsigned getMinimumJumpTableEntries() const;
 
   /// Return upper limit for number of entries in a jump table.
   /// Zero if no limit.
@@ -1389,9 +1387,7 @@ protected:
   }
 
   /// Indicate the minimum number of blocks to generate jump tables.
-  void setMinimumJumpTableEntries(unsigned Val) {
-    MinimumJumpTableEntries = Val;
-  }
+  void setMinimumJumpTableEntries(unsigned Val);
 
   /// Indicate the maximum number of entries in jump tables.
   /// Set to zero to generate unlimited jump tables.
@@ -1957,9 +1953,6 @@ private:
   ///
   /// Defaults to false.
   bool UseUnderscoreLongJmp;
-
-  /// Number of blocks threshold to use jump tables.
-  int MinimumJumpTableEntries;
 
   /// Information about the contents of the high-bits in boolean values held in
   /// a type wider than i1. See getBooleanContents.
@@ -2993,21 +2986,24 @@ public:
   /// Hooks for building estimates in place of slower divisions and square
   /// roots.
 
-  /// Return a reciprocal square root estimate value for the input operand.
+  /// Return either a square root or its reciprocal estimate value for the input
+  /// operand.
   /// \p Enabled is a ReciprocalEstimate enum with value either 'Unspecified' or
   /// 'Enabled' as set by a potential default override attribute.
   /// If \p RefinementSteps is 'Unspecified', the number of Newton-Raphson
   /// refinement iterations required to generate a sufficient (though not
   /// necessarily IEEE-754 compliant) estimate is returned in that parameter.
   /// The boolean UseOneConstNR output is used to select a Newton-Raphson
-  /// algorithm implementation that uses one constant or two constants.
+  /// algorithm implementation that uses either one or two constants.
+  /// The boolean Reciprocal is used to select whether the estimate is for the
+  /// square root of the input operand or the reciprocal of its square root.
   /// A target may choose to implement its own refinement within this function.
   /// If that's true, then return '0' as the number of RefinementSteps to avoid
   /// any further refinement of the estimate.
   /// An empty SDValue return means no estimate sequence can be created.
-  virtual SDValue getRsqrtEstimate(SDValue Operand, SelectionDAG &DAG,
-                                   int Enabled, int &RefinementSteps,
-                                   bool &UseOneConstNR) const {
+  virtual SDValue getSqrtEstimate(SDValue Operand, SelectionDAG &DAG,
+                                  int Enabled, int &RefinementSteps,
+                                  bool &UseOneConstNR, bool Reciprocal) const {
     return SDValue();
   }
 

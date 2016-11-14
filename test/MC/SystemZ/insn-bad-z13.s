@@ -1,6 +1,32 @@
 # For z13 only.
 # RUN: not llvm-mc -triple s390x-linux-gnu -mcpu=z13 < %s 2> %t
 # RUN: FileCheck < %t %s
+# RUN: not llvm-mc -triple s390x-linux-gnu -mcpu=arch11 < %s 2> %t
+# RUN: FileCheck < %t %s
+
+#CHECK: error: invalid operand
+#CHECK: lzrf	%r0, -524289
+#CHECK: error: invalid operand
+#CHECK: lzrf	%r0, 524288
+
+	lzrf	%r0, -524289
+	lzrf	%r0, 524288
+
+#CHECK: error: invalid operand
+#CHECK: lzrg	%r0, -524289
+#CHECK: error: invalid operand
+#CHECK: lzrg	%r0, 524288
+
+	lzrg	%r0, -524289
+	lzrg	%r0, 524288
+
+#CHECK: error: invalid operand
+#CHECK: llzrgf	%r0, -524289
+#CHECK: error: invalid operand
+#CHECK: llzrgf	%r0, 524288
+
+	llzrgf	%r0, -524289
+	llzrgf	%r0, 524288
 
 #CHECK: error: invalid operand
 #CHECK: lcbb	%r0, 0, -1

@@ -1552,6 +1552,11 @@ PHINode *WidenIV::createWideIV(SCEVExpander &Rewriter) {
     WideInc =
       cast<Instruction>(WidePhi->getIncomingValueForBlock(LatchBlock));
     WideIncExpr = SE->getSCEV(WideInc);
+    // Propagate the debug location associated with the original loop increment
+    // to the new (widened) increment.
+    auto *OrigInc =
+      cast<Instruction>(OrigPhi->getIncomingValueForBlock(LatchBlock));
+    WideInc->setDebugLoc(OrigInc->getDebugLoc());
   }
 
   DEBUG(dbgs() << "Wide IV: " << *WidePhi << "\n");
@@ -2183,6 +2188,11 @@ linearFunctionTestReplace(Loop *L,
                << "  IVCount:\t" << *IVCount << "\n");
 
   IRBuilder<> Builder(BI);
+
+  // The new loop exit condition should reuse the debug location of the
+  // original loop exit condition.
+  if (auto *Cond = dyn_cast<Instruction>(BI->getCondition()))
+    Builder.SetCurrentDebugLocation(Cond->getDebugLoc());
 
   // LFTR can ignore IV overflow and truncate to the width of
   // BECount. This avoids materializing the add(zext(add)) expression.

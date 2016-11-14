@@ -116,8 +116,10 @@ static inline size_t getMemUsage() {
 }
 
 TimeRecord TimeRecord::getCurrentTime(bool Start) {
+  using Seconds = std::chrono::duration<double, std::ratio<1>>;
   TimeRecord Result;
-  sys::TimeValue now(0,0), user(0,0), sys(0,0);
+  sys::TimePoint<> now;
+  std::chrono::nanoseconds user, sys;
 
   if (Start) {
     Result.MemUsed = getMemUsage();
@@ -127,9 +129,9 @@ TimeRecord TimeRecord::getCurrentTime(bool Start) {
     Result.MemUsed = getMemUsage();
   }
 
-  Result.WallTime   =  now.seconds() +  now.microseconds() / 1000000.0;
-  Result.UserTime   = user.seconds() + user.microseconds() / 1000000.0;
-  Result.SystemTime =  sys.seconds() +  sys.microseconds() / 1000000.0;
+  Result.WallTime = Seconds(now.time_since_epoch()).count();
+  Result.UserTime = Seconds(user).count();
+  Result.SystemTime = Seconds(sys).count();
   return Result;
 }
 
@@ -208,21 +210,7 @@ public:
 
 }
 
-static ManagedStatic<Name2TimerMap> NamedTimers;
 static ManagedStatic<Name2PairMap> NamedGroupedTimers;
-
-static Timer &getNamedRegionTimer(StringRef Name) {
-  sys::SmartScopedLock<true> L(*TimerLock);
-
-  Timer &T = (*NamedTimers)[Name];
-  if (!T.isInitialized())
-    T.init(Name);
-  return T;
-}
-
-NamedRegionTimer::NamedRegionTimer(StringRef Name,
-                                   bool Enabled)
-  : TimeRegion(!Enabled ? nullptr : &getNamedRegionTimer(Name)) {}
 
 NamedRegionTimer::NamedRegionTimer(StringRef Name, StringRef GroupName,
                                    bool Enabled)

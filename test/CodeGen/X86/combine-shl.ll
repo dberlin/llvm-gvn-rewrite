@@ -44,6 +44,19 @@ define <4 x i32> @combine_vec_shl_outofrange1(<4 x i32> %x) {
   ret <4 x i32> %1
 }
 
+define <4 x i32> @combine_vec_shl_outofrange2(<4 x i32> %a0) {
+; SSE-LABEL: combine_vec_shl_outofrange2:
+; SSE:       # BB#0:
+; SSE-NEXT:    retq
+;
+; AVX-LABEL: combine_vec_shl_outofrange2:
+; AVX:       # BB#0:
+; AVX-NEXT:    retq
+  %1 = and <4 x i32> %a0, <i32 2147483647, i32 2147483647, i32 2147483647, i32 2147483647>
+  %2 = shl <4 x i32> %1, <i32 33, i32 33, i32 33, i32 33>
+  ret <4 x i32> %2
+}
+
 ; fold (shl x, 0) -> x
 define <4 x i32> @combine_vec_shl_by_zero(<4 x i32> %x) {
 ; SSE-LABEL: combine_vec_shl_by_zero:
@@ -61,16 +74,12 @@ define <4 x i32> @combine_vec_shl_by_zero(<4 x i32> %x) {
 define <4 x i32> @combine_vec_shl_known_zero0(<4 x i32> %x) {
 ; SSE-LABEL: combine_vec_shl_known_zero0:
 ; SSE:       # BB#0:
-; SSE-NEXT:    pxor %xmm1, %xmm1
-; SSE-NEXT:    pblendw {{.*#+}} xmm0 = xmm1[0],xmm0[1],xmm1[2],xmm0[3],xmm1[4],xmm0[5],xmm1[6],xmm0[7]
-; SSE-NEXT:    pslld $16, %xmm0
+; SSE-NEXT:    xorps %xmm0, %xmm0
 ; SSE-NEXT:    retq
 ;
 ; AVX-LABEL: combine_vec_shl_known_zero0:
 ; AVX:       # BB#0:
-; AVX-NEXT:    vpxor %xmm1, %xmm1, %xmm1
-; AVX-NEXT:    vpblendw {{.*#+}} xmm0 = xmm1[0],xmm0[1],xmm1[2],xmm0[3],xmm1[4],xmm0[5],xmm1[6],xmm0[7]
-; AVX-NEXT:    vpslld $16, %xmm0, %xmm0
+; AVX-NEXT:    vxorps %xmm0, %xmm0, %xmm0
 ; AVX-NEXT:    retq
   %1 = and <4 x i32> %x, <i32 4294901760, i32 4294901760, i32 4294901760, i32 4294901760>
   %2 = shl <4 x i32> %1, <i32 16, i32 16, i32 16, i32 16>

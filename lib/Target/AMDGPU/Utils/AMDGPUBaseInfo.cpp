@@ -87,6 +87,9 @@ IsaVersion getIsaVersion(const FeatureBitset &Features) {
   if (Features.test(FeatureISAVersion7_0_1))
     return {7, 0, 1};
 
+  if (Features.test(FeatureISAVersion7_0_2))
+    return {7, 0, 2};
+
   if (Features.test(FeatureISAVersion8_0_0))
     return {8, 0, 0};
 
@@ -98,6 +101,12 @@ IsaVersion getIsaVersion(const FeatureBitset &Features) {
 
   if (Features.test(FeatureISAVersion8_0_3))
     return {8, 0, 3};
+
+  if (Features.test(FeatureISAVersion8_0_4))
+    return {8, 0, 4};
+
+  if (Features.test(FeatureISAVersion8_1_0))
+    return {8, 1, 0};
 
   return {0, 0, 0};
 }
@@ -343,8 +352,8 @@ bool isSISrcInlinableOperand(const MCInstrDesc &Desc, unsigned OpNo) {
 
 // Avoid using MCRegisterClass::getSize, since that function will go away
 // (move from MC* level to Target* level). Return size in bits.
-unsigned getRegBitWidth(const MCRegisterClass &RC) {
-  switch (RC.getID()) {
+unsigned getRegBitWidth(unsigned RCID) {
+  switch (RCID) {
   case AMDGPU::SGPR_32RegClassID:
   case AMDGPU::VGPR_32RegClassID:
   case AMDGPU::VS_32RegClassID:
@@ -371,6 +380,10 @@ unsigned getRegBitWidth(const MCRegisterClass &RC) {
   default:
     llvm_unreachable("Unexpected register class");
   }
+}
+
+unsigned getRegBitWidth(const MCRegisterClass &RC) {
+  return getRegBitWidth(RC.getID());
 }
 
 unsigned getRegOperandSize(const MCRegisterInfo *MRI, const MCInstrDesc &Desc,

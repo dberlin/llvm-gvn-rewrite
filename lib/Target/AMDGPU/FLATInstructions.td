@@ -79,7 +79,7 @@ class FLAT_Real <bits<7> op, FLAT_Pseudo ps> :
 class FLAT_Load_Pseudo <string opName, RegisterClass regClass> : FLAT_Pseudo<
   opName,
   (outs regClass:$vdst),
-  (ins VReg_64:$addr, glc:$glc, slc:$slc, tfe:$tfe),
+  (ins VReg_64:$addr, GLC:$glc, slc:$slc, tfe:$tfe),
   " $vdst, $addr$glc$slc$tfe"> {
   let has_data = 0;
   let mayLoad = 1;
@@ -88,7 +88,7 @@ class FLAT_Load_Pseudo <string opName, RegisterClass regClass> : FLAT_Pseudo<
 class FLAT_Store_Pseudo <string opName, RegisterClass vdataClass> : FLAT_Pseudo<
   opName,
   (outs),
-  (ins VReg_64:$addr, vdataClass:$data, glc:$glc, slc:$slc, tfe:$tfe),
+  (ins VReg_64:$addr, vdataClass:$data, GLC:$glc, slc:$slc, tfe:$tfe),
   " $addr, $data$glc$slc$tfe"> {
   let mayLoad  = 0;
   let mayStore = 1;
@@ -341,6 +341,8 @@ let Predicates = [isCIVI] in {
 
 def : FlatLoadPat <FLAT_LOAD_UBYTE, flat_az_extloadi8, i32>;
 def : FlatLoadPat <FLAT_LOAD_SBYTE, flat_sextloadi8, i32>;
+def : FlatLoadPat <FLAT_LOAD_UBYTE, flat_az_extloadi8, i16>;
+def : FlatLoadPat <FLAT_LOAD_SBYTE, flat_sextloadi8, i16>;
 def : FlatLoadPat <FLAT_LOAD_USHORT, flat_az_extloadi16, i32>;
 def : FlatLoadPat <FLAT_LOAD_SSHORT, flat_sextloadi16, i32>;
 def : FlatLoadPat <FLAT_LOAD_DWORD, flat_load, i32>;
@@ -389,6 +391,10 @@ def : FlatAtomicPat <FLAT_ATOMIC_XOR_X2_RTN, atomic_xor_global, i64>;
 
 } // End Predicates = [isCIVI]
 
+let Predicates = [isVI] in {
+  def : FlatStorePat <FLAT_STORE_BYTE, flat_truncstorei8, i16>;
+  def : FlatStorePat <FLAT_STORE_SHORT, flat_store, i16>;
+}
 
 
 //===----------------------------------------------------------------------===//

@@ -626,8 +626,9 @@ unsigned ARMConstantIslands::getCPELogAlign(const MachineInstr *CPEMI) {
   case ARM::CONSTPOOL_ENTRY:
     break;
   case ARM::JUMPTABLE_TBB:
-    return 0;
+    return isThumb1 ? 2 : 0;
   case ARM::JUMPTABLE_TBH:
+    return isThumb1 ? 2 : 1;
   case ARM::JUMPTABLE_INSTS:
     return 1;
   case ARM::JUMPTABLE_ADDRS:
@@ -2048,7 +2049,9 @@ bool ARMConstantIslands::optimizeThumb2JumpTables() {
       //   %base = tLEApcrelJT
       //   %t = tLDRr %idx, %base
       unsigned BaseReg = User.MI->getOperand(0).getReg();
-      
+
+      if (User.MI->getIterator() == User.MI->getParent()->begin())
+        continue;
       MachineInstr *Shift = User.MI->getPrevNode();
       if (Shift->getOpcode() != ARM::tLSLri ||
           Shift->getOperand(3).getImm() != 2 ||

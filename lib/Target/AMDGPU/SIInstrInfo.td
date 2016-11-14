@@ -265,19 +265,25 @@ class InlineFPImm <ValueType vt> : PatLeaf <(vt fpimm), [{
   return isInlineImmediate(N);
 }]>;
 
-class SGPRImm <dag frag> : PatLeaf<frag, [{
+class VGPRImm <dag frag> : PatLeaf<frag, [{
   if (Subtarget->getGeneration() < SISubtarget::SOUTHERN_ISLANDS) {
     return false;
   }
   const SIRegisterInfo *SIRI =
       static_cast<const SIRegisterInfo *>(Subtarget->getRegisterInfo());
+  unsigned Limit = 0;
   for (SDNode::use_iterator U = N->use_begin(), E = SDNode::use_end();
-                                                U != E; ++U) {
+         Limit < 10 && U != E; ++U, ++Limit) {
     const TargetRegisterClass *RC = getOperandRegClass(*U, U.getOperandNo());
-    if (RC && SIRI->isSGPRClass(RC))
-      return true;
+
+    // If the register class is unknown, it could be an unknown
+    // register class that needs to be an SGPR, e.g. an inline asm
+    // constraint
+    if (!RC || SIRI->isSGPRClass(RC))
+      return false;
   }
-  return false;
+
+  return Limit < 10;
 }]>;
 
 //===----------------------------------------------------------------------===//
@@ -372,7 +378,7 @@ def gds : NamedOperandBit<"GDS", NamedMatchClass<"GDS">>;
 def omod : NamedOperandU32<"OModSI", NamedMatchClass<"OModSI">>;
 def clampmod : NamedOperandBit<"ClampSI", NamedMatchClass<"ClampSI">>;
 
-def glc : NamedOperandBit<"GLC", NamedMatchClass<"GLC">>;
+def GLC : NamedOperandBit<"GLC", NamedMatchClass<"GLC">>;
 def slc : NamedOperandBit<"SLC", NamedMatchClass<"SLC">>;
 def tfe : NamedOperandBit<"TFE", NamedMatchClass<"TFE">>;
 def unorm : NamedOperandBit<"UNorm", NamedMatchClass<"UNorm">>;
@@ -933,14 +939,13 @@ class VOP_NO_EXT <VOPProfile p> : VOPProfile <p.ArgVT> {
   let HasExt = 0;
 }
 
-// FIXME: I think these F16/I16 profiles will need to use f16/i16 types in order
-//        for the instruction patterns to work.
 def VOP_F16_F16 : VOPProfile <[f16, f16, untyped, untyped]>;
-def VOP_F16_I16 : VOPProfile <[f16, i32, untyped, untyped]>;
-def VOP_I16_F16 : VOPProfile <[i32, f16, untyped, untyped]>;
+def VOP_F16_I16 : VOPProfile <[f16, i16, untyped, untyped]>;
+def VOP_I16_F16 : VOPProfile <[i16, f16, untyped, untyped]>;
 
 def VOP_F16_F16_F16 : VOPProfile <[f16, f16, f16, untyped]>;
-def VOP_F16_F16_I16 : VOPProfile <[f16, f16, i32, untyped]>;
+def VOP_F16_F16_I16 : VOPProfile <[f16, f16, i16, untyped]>;
+def VOP_F16_F16_I32 : VOPProfile <[f16, f16, i32, untyped]>;
 def VOP_I16_I16_I16 : VOPProfile <[i32, i32, i32, untyped]>;
 
 def VOP_I16_I16_I16_I16 : VOPProfile <[i32, i32, i32, i32, untyped]>;
@@ -954,10 +959,12 @@ def VOP_F32_I32 : VOPProfile <[f32, i32, untyped, untyped]>;
 def VOP_F64_F32 : VOPProfile <[f64, f32, untyped, untyped]>;
 def VOP_F64_F64 : VOPProfile <[f64, f64, untyped, untyped]>;
 def VOP_F64_I32 : VOPProfile <[f64, i32, untyped, untyped]>;
+def VOP_I32_F16 : VOPProfile <[i32, f16, untyped, untyped]>;
 def VOP_I32_F32 : VOPProfile <[i32, f32, untyped, untyped]>;
 def VOP_I32_F64 : VOPProfile <[i32, f64, untyped, untyped]>;
 def VOP_I32_I32 : VOPProfile <[i32, i32, untyped, untyped]>;
 
+def VOP_F32_F32_F16 : VOPProfile <[f32, f32, f16, untyped]>;
 def VOP_F32_F32_F32 : VOPProfile <[f32, f32, f32, untyped]>;
 def VOP_F32_F32_I32 : VOPProfile <[f32, f32, i32, untyped]>;
 def VOP_F64_F64_F64 : VOPProfile <[f64, f64, f64, untyped]>;
@@ -970,6 +977,8 @@ def VOP_I64_I64_I32 : VOPProfile <[i64, i64, i32, untyped]>;
 def VOP_I64_I32_I64 : VOPProfile <[i64, i32, i64, untyped]>;
 def VOP_I64_I64_I64 : VOPProfile <[i64, i64, i64, untyped]>;
 
+def VOP_F16_F32_F16_F32 : VOPProfile <[f16, f32, f16, f32]>;
+def VOP_F32_F32_F16_F16 : VOPProfile <[f32, f32, f16, f16]>;
 def VOP_F32_F32_F32_F32 : VOPProfile <[f32, f32, f32, f32]>;
 def VOP_F64_F64_F64_F64 : VOPProfile <[f64, f64, f64, f64]>;
 def VOP_I32_I32_I32_I32 : VOPProfile <[i32, i32, i32, i32]>;
@@ -1122,7 +1131,6 @@ def getAtomicNoRetOp : InstrMapping {
 
 include "SIInstructions.td"
 include "CIInstructions.td"
-include "VIInstructions.td"
 
 include "DSInstructions.td"
 include "MIMGInstructions.td"

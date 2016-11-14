@@ -204,16 +204,33 @@ int X86TTIImpl::getArithmeticInstrCost(
       return LT.first * Entry->Cost;
   }
 
+  static const CostTblEntry AVX512DQCostTable[] = {
+    { ISD::MUL,  MVT::v2i64, 1 },
+    { ISD::MUL,  MVT::v4i64, 1 },
+    { ISD::MUL,  MVT::v8i64, 1 }
+  };
+
+  // Look for AVX512DQ lowering tricks for custom cases.
+  if (ST->hasDQI()) {
+    if (const auto *Entry = CostTableLookup(AVX512DQCostTable, ISD,
+                                            LT.second))
+      return LT.first * Entry->Cost;
+  }
+
   static const CostTblEntry AVX512BWCostTable[] = {
+    { ISD::MUL,   MVT::v64i8,     11 }, // extend/pmullw/trunc sequence.
+    { ISD::MUL,   MVT::v32i8,      4 }, // extend/pmullw/trunc sequence.
+    { ISD::MUL,   MVT::v16i8,      4 }, // extend/pmullw/trunc sequence.
+
     // Vectorizing division is a bad idea. See the SSE2 table for more comments.
     { ISD::SDIV,  MVT::v64i8,  64*20 },
     { ISD::SDIV,  MVT::v32i16, 32*20 },
     { ISD::SDIV,  MVT::v16i32, 16*20 },
-    { ISD::SDIV,  MVT::v8i64,  8*20 },
+    { ISD::SDIV,  MVT::v8i64,   8*20 },
     { ISD::UDIV,  MVT::v64i8,  64*20 },
     { ISD::UDIV,  MVT::v32i16, 32*20 },
     { ISD::UDIV,  MVT::v16i32, 16*20 },
-    { ISD::UDIV,  MVT::v8i64,  8*20 },
+    { ISD::UDIV,  MVT::v8i64,   8*20 },
   };
 
   // Look for AVX512BW lowering tricks for custom cases.
@@ -227,9 +244,12 @@ int X86TTIImpl::getArithmeticInstrCost(
     { ISD::SHL,     MVT::v16i32,    1 },
     { ISD::SRL,     MVT::v16i32,    1 },
     { ISD::SRA,     MVT::v16i32,    1 },
-    { ISD::SHL,     MVT::v8i64,    1 },
-    { ISD::SRL,     MVT::v8i64,    1 },
-    { ISD::SRA,     MVT::v8i64,    1 },
+    { ISD::SHL,     MVT::v8i64,     1 },
+    { ISD::SRL,     MVT::v8i64,     1 },
+    { ISD::SRA,     MVT::v8i64,     1 },
+
+    { ISD::MUL,     MVT::v32i8,    13 }, // extend/pmullw/trunc sequence.
+    { ISD::MUL,     MVT::v16i8,     5 }, // extend/pmullw/trunc sequence.
   };
 
   if (ST->hasAVX512()) {
@@ -311,6 +331,16 @@ int X86TTIImpl::getArithmeticInstrCost(
     { ISD::SRA,  MVT::v16i16,     10 }, // extend/vpsravd/pack sequence.
     { ISD::SRA,  MVT::v2i64,       4 }, // srl/xor/sub sequence.
     { ISD::SRA,  MVT::v4i64,       4 }, // srl/xor/sub sequence.
+
+    { ISD::MUL,   MVT::v32i8,     17 }, // extend/pmullw/trunc sequence.
+    { ISD::MUL,   MVT::v16i8,      7 }, // extend/pmullw/trunc sequence.
+
+    { ISD::FDIV,  MVT::f32,        7 }, // Haswell from http://www.agner.org/
+    { ISD::FDIV,  MVT::v4f32,      7 }, // Haswell from http://www.agner.org/
+    { ISD::FDIV,  MVT::v8f32,     14 }, // Haswell from http://www.agner.org/
+    { ISD::FDIV,  MVT::f64,       14 }, // Haswell from http://www.agner.org/
+    { ISD::FDIV,  MVT::v2f64,     14 }, // Haswell from http://www.agner.org/
+    { ISD::FDIV,  MVT::v4f64,     28 }, // Haswell from http://www.agner.org/
   };
 
   // Look for AVX2 lowering tricks for custom cases.
@@ -321,6 +351,15 @@ int X86TTIImpl::getArithmeticInstrCost(
   }
 
   static const CostTblEntry AVXCustomCostTable[] = {
+    { ISD::MUL,   MVT::v32i8,  26 }, // extend/pmullw/trunc sequence.
+
+    { ISD::FDIV,  MVT::f32,    14 }, // SNB from http://www.agner.org/
+    { ISD::FDIV,  MVT::v4f32,  14 }, // SNB from http://www.agner.org/
+    { ISD::FDIV,  MVT::v8f32,  28 }, // SNB from http://www.agner.org/
+    { ISD::FDIV,  MVT::f64,    22 }, // SNB from http://www.agner.org/
+    { ISD::FDIV,  MVT::v2f64,  22 }, // SNB from http://www.agner.org/
+    { ISD::FDIV,  MVT::v4f64,  44 }, // SNB from http://www.agner.org/
+
     // Vectorizing division is a bad idea. See the SSE2 table for more comments.
     { ISD::SDIV,  MVT::v32i8,  32*20 },
     { ISD::SDIV,  MVT::v16i16, 16*20 },
@@ -335,6 +374,19 @@ int X86TTIImpl::getArithmeticInstrCost(
   // Look for AVX2 lowering tricks for custom cases.
   if (ST->hasAVX()) {
     if (const auto *Entry = CostTableLookup(AVXCustomCostTable, ISD,
+                                            LT.second))
+      return LT.first * Entry->Cost;
+  }
+
+  static const CostTblEntry SSE42FloatCostTable[] = {
+    { ISD::FDIV,  MVT::f32,   14 }, // Nehalem from http://www.agner.org/
+    { ISD::FDIV,  MVT::v4f32, 14 }, // Nehalem from http://www.agner.org/
+    { ISD::FDIV,  MVT::f64,   22 }, // Nehalem from http://www.agner.org/
+    { ISD::FDIV,  MVT::v2f64, 22 }, // Nehalem from http://www.agner.org/
+  };
+
+  if (ST->hasSSE42()) {
+    if (const auto *Entry = CostTableLookup(SSE42FloatCostTable, ISD,
                                             LT.second))
       return LT.first * Entry->Cost;
   }
@@ -400,6 +452,32 @@ int X86TTIImpl::getArithmeticInstrCost(
       ISD = ISD::MUL;
   }
 
+  static const CostTblEntry SSE41CostTable[] = {
+    { ISD::SHL,  MVT::v16i8,    11 }, // pblendvb sequence.
+    { ISD::SHL,  MVT::v32i8,  2*11 }, // pblendvb sequence.
+    { ISD::SHL,  MVT::v8i16,    14 }, // pblendvb sequence.
+    { ISD::SHL,  MVT::v16i16, 2*14 }, // pblendvb sequence.
+
+    { ISD::SRL,  MVT::v16i8,    12 }, // pblendvb sequence.
+    { ISD::SRL,  MVT::v32i8,  2*12 }, // pblendvb sequence.
+    { ISD::SRL,  MVT::v8i16,    14 }, // pblendvb sequence.
+    { ISD::SRL,  MVT::v16i16, 2*14 }, // pblendvb sequence.
+    { ISD::SRL,  MVT::v4i32,    11 }, // Shift each lane + blend.
+    { ISD::SRL,  MVT::v8i32,  2*11 }, // Shift each lane + blend.
+
+    { ISD::SRA,  MVT::v16i8,    24 }, // pblendvb sequence.
+    { ISD::SRA,  MVT::v32i8,  2*24 }, // pblendvb sequence.
+    { ISD::SRA,  MVT::v8i16,    14 }, // pblendvb sequence.
+    { ISD::SRA,  MVT::v16i16, 2*14 }, // pblendvb sequence.
+    { ISD::SRA,  MVT::v4i32,    12 }, // Shift each lane + blend.
+    { ISD::SRA,  MVT::v8i32,  2*12 }, // Shift each lane + blend.
+  };
+
+  if (ST->hasSSE41()) {
+    if (const auto *Entry = CostTableLookup(SSE41CostTable, ISD, LT.second))
+      return LT.first * Entry->Cost;
+  }
+
   static const CostTblEntry SSE2CostTable[] = {
     // We don't correctly identify costs of casts because they are marked as
     // custom.
@@ -430,6 +508,13 @@ int X86TTIImpl::getArithmeticInstrCost(
     { ISD::SRA,  MVT::v2i64,    12 }, // srl/xor/sub sequence.
     { ISD::SRA,  MVT::v4i64,  2*12 }, // srl/xor/sub sequence.
 
+    { ISD::MUL,  MVT::v16i8,    12 }, // extend/pmullw/trunc sequence.
+
+    { ISD::FDIV, MVT::f32,      23 }, // Pentium IV from http://www.agner.org/
+    { ISD::FDIV, MVT::v4f32,    39 }, // Pentium IV from http://www.agner.org/
+    { ISD::FDIV, MVT::f64,      38 }, // Pentium IV from http://www.agner.org/
+    { ISD::FDIV, MVT::v2f64,    69 }, // Pentium IV from http://www.agner.org/
+
     // It is not a good idea to vectorize division. We have to scalarize it and
     // in the process we will often end up having to spilling regular
     // registers. The overhead of division is going to dominate most kernels
@@ -457,6 +542,10 @@ int X86TTIImpl::getArithmeticInstrCost(
     // Two ops + 1 extract + 1 insert = 4.
     { ISD::MUL,     MVT::v16i16,   4 },
     { ISD::MUL,     MVT::v8i32,    4 },
+    { ISD::SUB,     MVT::v32i8,    4 },
+    { ISD::ADD,     MVT::v32i8,    4 },
+    { ISD::SUB,     MVT::v16i16,   4 },
+    { ISD::ADD,     MVT::v16i16,   4 },
     { ISD::SUB,     MVT::v8i32,    4 },
     { ISD::ADD,     MVT::v8i32,    4 },
     { ISD::SUB,     MVT::v4i64,    4 },
@@ -483,6 +572,7 @@ int X86TTIImpl::getArithmeticInstrCost(
     // multiplies(3), shifts(4) and adds(2).
     { ISD::MUL,     MVT::v2i64,    9 },
     { ISD::MUL,     MVT::v4i64,    9 },
+    { ISD::MUL,     MVT::v8i64,    9 }
   };
   if (const auto *Entry = CostTableLookup(CustomLowered, ISD, LT.second))
     return LT.first * Entry->Cost;
@@ -493,6 +583,15 @@ int X86TTIImpl::getArithmeticInstrCost(
       !ST->hasSSE41())
     return LT.first * 6;
 
+  static const CostTblEntry SSE1FloatCostTable[] = {
+    { ISD::FDIV, MVT::f32,   17 }, // Pentium III from http://www.agner.org/
+    { ISD::FDIV, MVT::v4f32, 34 }, // Pentium III from http://www.agner.org/
+  };
+
+  if (ST->hasSSE1())
+    if (const auto *Entry = CostTableLookup(SSE1FloatCostTable, ISD,
+                                            LT.second))
+      return LT.first * Entry->Cost;
   // Fallback to the default implementation.
   return BaseT::getArithmeticInstrCost(Opcode, Ty, Op1Info, Op2Info);
 }
@@ -1071,7 +1170,13 @@ int X86TTIImpl::getIntrinsicInstrCost(Intrinsic::ID IID, Type *RetTy,
     { ISD::CTTZ,       MVT::v4i64,  10 },
     { ISD::CTTZ,       MVT::v8i32,  14 },
     { ISD::CTTZ,       MVT::v16i16, 12 },
-    { ISD::CTTZ,       MVT::v32i8,   9 }
+    { ISD::CTTZ,       MVT::v32i8,   9 },
+    { ISD::FSQRT,      MVT::f32,     7 }, // Haswell from http://www.agner.org/
+    { ISD::FSQRT,      MVT::v4f32,   7 }, // Haswell from http://www.agner.org/
+    { ISD::FSQRT,      MVT::v8f32,  14 }, // Haswell from http://www.agner.org/
+    { ISD::FSQRT,      MVT::f64,    14 }, // Haswell from http://www.agner.org/
+    { ISD::FSQRT,      MVT::v2f64,  14 }, // Haswell from http://www.agner.org/
+    { ISD::FSQRT,      MVT::v4f64,  28 }, // Haswell from http://www.agner.org/
   };
   static const CostTblEntry AVX1CostTbl[] = {
     { ISD::BITREVERSE, MVT::v4i64,  10 },
@@ -1093,6 +1198,16 @@ int X86TTIImpl::getIntrinsicInstrCost(Intrinsic::ID IID, Type *RetTy,
     { ISD::CTTZ,       MVT::v8i32,  28 },
     { ISD::CTTZ,       MVT::v16i16, 24 },
     { ISD::CTTZ,       MVT::v32i8,  18 },
+    { ISD::FSQRT,      MVT::f32,    14 }, // SNB from http://www.agner.org/
+    { ISD::FSQRT,      MVT::v4f32,  14 }, // SNB from http://www.agner.org/
+    { ISD::FSQRT,      MVT::v8f32,  28 }, // SNB from http://www.agner.org/
+    { ISD::FSQRT,      MVT::f64,    21 }, // SNB from http://www.agner.org/
+    { ISD::FSQRT,      MVT::v2f64,  21 }, // SNB from http://www.agner.org/
+    { ISD::FSQRT,      MVT::v4f64,  43 }, // SNB from http://www.agner.org/
+  };
+  static const CostTblEntry SSE42CostTbl[] = {
+    { ISD::FSQRT, MVT::f32,   18 }, // Nehalem from http://www.agner.org/
+    { ISD::FSQRT, MVT::v4f32, 18 }, // Nehalem from http://www.agner.org/
   };
   static const CostTblEntry SSSE3CostTbl[] = {
     { ISD::BITREVERSE, MVT::v2i64,   5 },
@@ -1119,7 +1234,10 @@ int X86TTIImpl::getIntrinsicInstrCost(Intrinsic::ID IID, Type *RetTy,
     { ISD::BSWAP,      MVT::v2i64,   7 },
     { ISD::BSWAP,      MVT::v4i32,   7 },
     { ISD::BSWAP,      MVT::v8i16,   7 },
-    /* ISD::CTLZ - currently scalarized pre-SSSE3 */
+    { ISD::CTLZ,       MVT::v2i64,  25 },
+    { ISD::CTLZ,       MVT::v4i32,  26 },
+    { ISD::CTLZ,       MVT::v8i16,  20 },
+    { ISD::CTLZ,       MVT::v16i8,  17 },
     { ISD::CTPOP,      MVT::v2i64,  12 },
     { ISD::CTPOP,      MVT::v4i32,  15 },
     { ISD::CTPOP,      MVT::v8i16,  13 },
@@ -1127,7 +1245,13 @@ int X86TTIImpl::getIntrinsicInstrCost(Intrinsic::ID IID, Type *RetTy,
     { ISD::CTTZ,       MVT::v2i64,  14 },
     { ISD::CTTZ,       MVT::v4i32,  18 },
     { ISD::CTTZ,       MVT::v8i16,  16 },
-    { ISD::CTTZ,       MVT::v16i8,  13 }
+    { ISD::CTTZ,       MVT::v16i8,  13 },
+    { ISD::FSQRT,      MVT::f64,    32 }, // Nehalem from http://www.agner.org/
+    { ISD::FSQRT,      MVT::v2f64,  32 }, // Nehalem from http://www.agner.org/
+  };
+  static const CostTblEntry SSE1CostTbl[] = {
+    { ISD::FSQRT, MVT::f32,   28 }, // Pentium III from http://www.agner.org/
+    { ISD::FSQRT, MVT::v4f32, 56 }, // Pentium III from http://www.agner.org/
   };
 
   unsigned ISD = ISD::DELETED_NODE;
@@ -1149,6 +1273,9 @@ int X86TTIImpl::getIntrinsicInstrCost(Intrinsic::ID IID, Type *RetTy,
   case Intrinsic::cttz:
     ISD = ISD::CTTZ;
     break;
+  case Intrinsic::sqrt:
+    ISD = ISD::FSQRT;
+    break;
   }
 
   // Legalize the type.
@@ -1168,12 +1295,20 @@ int X86TTIImpl::getIntrinsicInstrCost(Intrinsic::ID IID, Type *RetTy,
     if (const auto *Entry = CostTableLookup(AVX1CostTbl, ISD, MTy))
       return LT.first * Entry->Cost;
 
+  if (ST->hasSSE42())
+    if (const auto *Entry = CostTableLookup(SSE42CostTbl, ISD, MTy))
+      return LT.first * Entry->Cost;
+
   if (ST->hasSSSE3())
     if (const auto *Entry = CostTableLookup(SSSE3CostTbl, ISD, MTy))
       return LT.first * Entry->Cost;
 
   if (ST->hasSSE2())
     if (const auto *Entry = CostTableLookup(SSE2CostTbl, ISD, MTy))
+      return LT.first * Entry->Cost;
+
+  if (ST->hasSSE1())
+    if (const auto *Entry = CostTableLookup(SSE1CostTbl, ISD, MTy))
       return LT.first * Entry->Cost;
 
   return BaseT::getIntrinsicInstrCost(IID, RetTy, Tys, FMF);
@@ -1766,4 +1901,11 @@ bool X86TTIImpl::areInlineCompatible(const Function *Caller,
   // that we might not care about for inlining, but it is conservatively
   // correct.
   return (CallerBits & CalleeBits) == CalleeBits;
+}
+
+bool X86TTIImpl::enableInterleavedAccessVectorization() {
+  // TODO: We expect this to be beneficial regardless of arch,
+  // but there are currently some unexplained performance artifacts on Atom.
+  // As a temporary solution, disable on Atom.
+  return !(ST->isAtom() || ST->isSLM());
 }
