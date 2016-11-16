@@ -368,7 +368,8 @@ private:
                                                   const BasicBlock *);
   const Expression *performSymbolicPHIEvaluation(Instruction *,
                                                  const BasicBlock *);
-  void valueNumberMemoryPhi(MemoryPhi *MP);
+  bool setMemoryAccessTo(MemoryAccess *From, MemoryAccess *To);
+  void valueNumberMemoryPhi(MemoryPhi *);
   const Expression *performSymbolicAggrValueEvaluation(Instruction *,
                                                        const BasicBlock *);
   int analyzeLoadFromClobberingStore(Type *, Value *, StoreInst *);
@@ -1410,9 +1411,32 @@ const Expression *NewGVN::performSymbolicCallEvaluation(Instruction *I,
     return nullptr;
 }
 
+// Update the memory access equivalence table to say that From is equal to To,
+// and return true if this is different from what already existed in the table.
+bool NewGVN::setMemoryAccessTo(MemoryAccess *From, MemoryAccess *To) {
+  auto LookupResult = MemoryAccessEquiv.insert({From, nullptr});
+  bool Changed = false;
+  // If it's already in the table, see if the value changed
+  if (LookupResult.second) {
+    if (To && LookupResult.first->second != To) {
+      // It wasn't equivalent before, and now it is.
+      LookupResult.first->second = To;
+      Changed = true;
+    } else if (!To) {
+      // It used to be equivalent to something, and now it's not.
+      MemoryAccessEquiv.erase(LookupResult.first);
+      Changed = true;
+    }
+  } else if (To) {
+    // It wasn't in the table, but is equivalent to something
+    LookupResult.first->second = To;
+    Changed = true;
+  }
+  return Changed;
+}
+
 // valueNumberMemoryPhi - Evaluate MemoryPhi nodes symbolically
 void NewGVN::valueNumberMemoryPhi(MemoryPhi *MP) {
-
   // If all the arguments are the same, the MemoryPhi has the same value as the
   // argument.
   MemoryAccess *AllSameValue = nullptr;
@@ -1433,25 +1457,7 @@ void NewGVN::valueNumberMemoryPhi(MemoryPhi *MP) {
     } else if (!AllSameValue)
       AllSameValue = cast<MemoryAccess>(MP->getOperand(i));
   }
-  auto LookupResult = MemoryAccessEquiv.insert({MP, nullptr});
-  bool Changed = false;
-  // If it's already in the table, see if the value changed
-  if (LookupResult.second) {
-    if (AllSameValue && LookupResult.first->second != AllSameValue) {
-      // It wasn't equivalent before, and now it is.
-      LookupResult.first->second = AllSameValue;
-      Changed = true;
-    } else if (!AllSameValue) {
-      // It used to be equivalent to something, and now it's not.
-      MemoryAccessEquiv.erase(LookupResult.first);
-      Changed = true;
-    }
-  } else if (AllSameValue) {
-    // It wasn't in the table, but is equivalent to something
-    LookupResult.first->second = AllSameValue;
-    Changed = true;
-  }
-  if (Changed)
+  if (setMemoryAccessTo(MP, AllSameValue))
     markMemoryUsersTouched(MP);
 }
 
