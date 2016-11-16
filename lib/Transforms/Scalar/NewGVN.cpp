@@ -293,8 +293,7 @@ public:
 
   bool runOnFunction(Function &F) override;
   bool runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
-              TargetLibraryInfo *TLI, AliasAnalysis *AA,
-              MemorySSA *MSSA);
+              TargetLibraryInfo *TLI, AliasAnalysis *AA, MemorySSA *MSSA);
 
 private:
   // This transformation requires dominator postdominator info
@@ -2335,8 +2334,8 @@ void NewGVN::topoVisitCongruenceClass(
 /// runOnFunction - This is the main transformation entry point for a
 /// function.
 bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
-                   TargetLibraryInfo *TLI, AliasAnalysis *AA,
-                   MemorySSA *MSSA) {
+                    TargetLibraryInfo *TLI, AliasAnalysis *AA,
+                    MemorySSA *MSSA) {
   bool Changed = false;
   this->DT = DT;
   this->AC = AC;
@@ -2545,8 +2544,7 @@ bool NewGVN::runOnFunction(Function &F) {
                 &getAnalysis<MemorySSAWrapperPass>().getMSSA());
 }
 
-PreservedAnalyses NewGVNPass::run(Function &F,
-                                  AnalysisManager<Function> &AM) {
+PreservedAnalyses NewGVNPass::run(Function &F, AnalysisManager<Function> &AM) {
   NewGVN Impl;
 
   // Apparently the order in which we get these results matter for
@@ -2763,7 +2761,7 @@ void NewGVN::deleteInstructionsInBlock(BasicBlock *BB) {
     if (!Inst.use_empty())
       Inst.replaceAllUsesWith(UndefValue::get(Inst.getType()));
     if (isa<LandingPadInst>(Inst))
-        continue;
+      continue;
 
     Inst.eraseFromParent();
     ++NumGVNInstrDeleted;
