@@ -267,8 +267,8 @@ class NewGVN : public FunctionPass {
 
   // DFS info
   DenseMap<const BasicBlock *, std::pair<int, int>> DFSDomMap;
-  DenseMap<const Instruction *, unsigned> InstrDFS;
-  std::vector<Instruction *> DFSToInstr;
+  DenseMap<const Value *, unsigned> InstrDFS;
+  SmallVector<Value *, 32> DFSToInstr;
 
   // Deletion info
   SmallPtrSet<Instruction *, 8> InstructionsToErase;
@@ -368,6 +368,7 @@ private:
                                                   const BasicBlock *);
   const Expression *performSymbolicPHIEvaluation(Instruction *,
                                                  const BasicBlock *);
+  void *valueNumberMemoryPhi(MemoryPhi *MP);
   const Expression *performSymbolicAggrValueEvaluation(Instruction *,
                                                        const BasicBlock *);
   int analyzeLoadFromClobberingStore(Type *, Value *, StoreInst *);
@@ -421,6 +422,7 @@ private:
   // New instruction creation
   void handleNewInstruction(Instruction *){};
   void markUsersTouched(Value *);
+  void markMemoryUsersTouched(MemoryAccess *);
   // Utilities
   void cleanupTables();
   std::pair<unsigned, unsigned> assignDFSNumbers(BasicBlock *, unsigned);
@@ -1881,10 +1883,19 @@ bool NewGVN::propagateEquality(Value *LHS, Value *RHS,
 
 void NewGVN::markUsersTouched(Value *V) {
   // Now mark the users as touched
-  for (auto &U : V->uses()) {
-    Instruction *User = dyn_cast<Instruction>(U.getUser());
+  for (auto U : V->users()) {
+    Instruction *User = dyn_cast<Instruction>(U);
     assert(User && "Use of value not within an instruction?");
     TouchedInstructions.set(InstrDFS[User]);
+  }
+}
+
+void NewGVN::markMemoryUsersTouched(MemoryAccess *MA) {
+  for (auto U : MA->users()) {
+    if (MemoryUseOrDef *MUD = dyn_cast<MemoryUseOrDef>(U))
+      TouchedInstructions.set(InstrDFS[MUD->getMemoryInst()]);
+    else
+      TouchedInstructions.set(InstrDFS[MA]);
   }
 }
 
@@ -2008,6 +2019,9 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
       }
     }
     markUsersTouched(V);
+    if (Instruction *I = dyn_cast<Instruction>(V))
+      if (MemoryAccess *MA = MSSA->getMemoryAccess(I))
+        markMemoryUsersTouched(MA);
   }
 }
 
@@ -2301,6 +2315,11 @@ void NewGVN::cleanupTables() {
 std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
                                                        unsigned Start) {
   unsigned int End = Start;
+  if (MemoryAccess *MemPhi = MSSA->getMemoryAccess(B)) {
+    InstrDFS[MemPhi] = End++;
+    DFSToInstr.emplace_back(MemPhi);
+  }
+
   for (auto &I : *B) {
     InstrDFS[&I] = End++;
     DFSToInstr.emplace_back(&I);
@@ -2368,7 +2387,6 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
 
   // Handle forward unreachable blocks and figure out which blocks
   // have single preds
-
   for (auto &B : F) {
     // Assign numbers to unreachable blocks
     if (!VisitedBlocks.count(&B)) {
@@ -2398,8 +2416,17 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
     // Walk through all the instructions in all the blocks in RPO
     for (int InstrNum = TouchedInstructions.find_first(); InstrNum != -1;
          InstrNum = TouchedInstructions.find_next(InstrNum)) {
-      Instruction *I = DFSToInstr[InstrNum];
-      BasicBlock *CurrBlock = I->getParent();
+      Value *V = DFSToInstr[InstrNum];
+      BasicBlock *CurrBlock;
+      Instruction *I = nullptr;
+      MemoryPhi *MP = nullptr;
+
+      if ((I = dyn_cast<Instruction>(V)))
+        CurrBlock = I->getParent();
+      else if ((MP = dyn_cast<MemoryPhi>(V)))
+        CurrBlock = MP->getBlock();
+      else
+        llvm_unreachable("DFSToInstr gave us an unknown type of instruction");
 
       // If we hit a new block, do reachability processing
       if (CurrBlock != LastBlock) {
@@ -2427,6 +2454,14 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
         }
         //#endif
       }
+
+      if (MP) {
+        //        valueNumberMemoryPhi(M);
+        TouchedInstructions.reset(InstrNum);
+        continue;
+      }
+
+      assert(I && "Should have been a MemoryPhi or Instruction");
       DEBUG(dbgs() << "Processing instruction " << *I << "\n");
       if (I->use_empty() && !I->getType()->isVoidTy()) {
         DEBUG(dbgs() << "Skipping unused instruction\n");
