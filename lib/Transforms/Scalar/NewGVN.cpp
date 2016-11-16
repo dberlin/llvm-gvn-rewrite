@@ -201,7 +201,7 @@ class NewGVN : public FunctionPass {
   // Value Mappings
   DenseMap<Value *, CongruenceClass *> ValueToClass;
   DenseMap<Value *, const Expression *> ValueToExpression;
-
+  DenseMap<MemoryAccess *, MemoryAccess *> MemoryAccessEquiv;
   struct ComparingExpressionInfo : public DenseMapInfo<const Expression *> {
     static unsigned getHashValue(const Expression *V) {
       return static_cast<unsigned>(V->getHashValue());
@@ -368,7 +368,7 @@ private:
                                                   const BasicBlock *);
   const Expression *performSymbolicPHIEvaluation(Instruction *,
                                                  const BasicBlock *);
-  void *valueNumberMemoryPhi(MemoryPhi *MP);
+  void valueNumberMemoryPhi(MemoryPhi *MP);
   const Expression *performSymbolicAggrValueEvaluation(Instruction *,
                                                        const BasicBlock *);
   int analyzeLoadFromClobberingStore(Type *, Value *, StoreInst *);
@@ -1330,7 +1330,6 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
     return createConstantExpression(UndefValue::get(LI->getType()), false);
 
   MemoryAccess *DefiningAccess = MSSAWalker->getClobberingMemoryAccess(I);
-
   if (!MSSA->isLiveOnEntryDef(DefiningAccess)) {
     if (MemoryDef *MD = dyn_cast<MemoryDef>(DefiningAccess)) {
       Instruction *DefiningInst = MD->getMemoryInst();
@@ -1409,6 +1408,51 @@ const Expression *NewGVN::performSymbolicCallEvaluation(Instruction *I,
                                 B);
   else
     return nullptr;
+}
+
+// valueNumberMemoryPhi - Evaluate MemoryPhi nodes symbolically
+void NewGVN::valueNumberMemoryPhi(MemoryPhi *MP) {
+
+  // If all the arguments are the same, the MemoryPhi has the same value as the
+  // argument.
+  MemoryAccess *AllSameValue = nullptr;
+  // See if all arguments are the same, ignoring unreachable arguments
+  for (unsigned i = 0, e = MP->getNumOperands(); i < e; ++i) {
+    BasicBlock *B = MP->getIncomingBlock(i);
+    if (!ReachableBlocks.count(B))
+      continue;
+    MemoryAccess *Operand = cast<MemoryAccess>(MP->getOperand(i));
+    auto OperandLookup = MemoryAccessEquiv.find(Operand);
+    if (OperandLookup != MemoryAccessEquiv.end())
+      Operand = OperandLookup->second;
+    if (AllSameValue && AllSameValue != MP->getOperand(i)) {
+      // Phi node does not have equal arguments, this phi node value numbers to
+      // itself.
+      AllSameValue = nullptr;
+      break;
+    } else if (!AllSameValue)
+      AllSameValue = cast<MemoryAccess>(MP->getOperand(i));
+  }
+  auto LookupResult = MemoryAccessEquiv.insert({MP, nullptr});
+  bool Changed = false;
+  // If it's already in the table, see if the value changed
+  if (LookupResult.second) {
+    if (AllSameValue && LookupResult.first->second != AllSameValue) {
+      // It wasn't equivalent before, and now it is.
+      LookupResult.first->second = AllSameValue;
+      Changed = true;
+    } else if (!AllSameValue) {
+      // It used to be equivalent to something, and now it's not.
+      MemoryAccessEquiv.erase(LookupResult.first);
+      Changed = true;
+    }
+  } else if (AllSameValue) {
+    // It wasn't in the table, but is equivalent to something
+    LookupResult.first->second = AllSameValue;
+    Changed = true;
+  }
+  if (Changed)
+    markMemoryUsersTouched(MP);
 }
 
 // performSymbolicPHIEvaluation - Evaluate PHI nodes symbolically, and
@@ -1928,12 +1972,12 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
   } else if (const VariableExpression *VE = dyn_cast<VariableExpression>(E)) {
     EClass = ValueToClass[VE->getVariableValue()];
   } else {
-    auto lookupResult = ExpressionToClass.insert({E, nullptr});
+    auto LookupResult = ExpressionToClass.insert({E, nullptr});
 
     // If it's not in the value table, create a new congruence class
-    if (lookupResult.second) {
+    if (LookupResult.second) {
       CongruenceClass *NewClass = createCongruenceClass(NULL, E);
-      auto place = lookupResult.first;
+      auto place = LookupResult.first;
       place->second = NewClass;
 
       // Constants and variables should always be made the leader
@@ -1952,7 +1996,7 @@ void NewGVN::performCongruenceFinding(Value *V, const Expression *E) {
                    << "\n");
       DEBUG(dbgs() << "Hash value was " << E->getHashValue() << "\n");
     } else {
-      EClass = lookupResult.first->second;
+      EClass = LookupResult.first->second;
       assert(EClass && "Somehow don't have an eclass");
 
       assert(!EClass->Dead && "We accidentally looked up a dead class");
@@ -2456,7 +2500,8 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
       }
 
       if (MP) {
-        //        valueNumberMemoryPhi(M);
+        DEBUG(dbgs() << "Processing MemoryPhi " << *MP << "\n");
+        valueNumberMemoryPhi(MP);
         TouchedInstructions.reset(InstrNum);
         continue;
       }
