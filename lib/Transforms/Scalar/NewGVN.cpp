@@ -384,6 +384,7 @@ private:
   template <class T>
   Value *findDominatingEquivalent(CongruenceClass *, const User *,
                                   const T &) const;
+  MemoryAccess *lookupMemoryAccessEquiv(MemoryAccess *);
   void performCongruenceFinding(Value *, const Expression *);
   // Predicate and reachability handling
   void updateReachableEdge(BasicBlock *, BasicBlock *);
@@ -975,6 +976,11 @@ std::pair<Value *, bool> NewGVN::lookupOperandLeader(Value *V, const User *U,
   return std::make_pair(V, false);
 }
 
+MemoryAccess *NewGVN::lookupMemoryAccessEquiv(MemoryAccess *MA) {
+  MemoryAccess *Result = MemoryAccessEquiv.lookup(MA);
+  return Result ? Result : MA;
+}
+
 LoadExpression *NewGVN::createLoadExpression(Type *LoadType, Value *PointerOp,
                                              LoadInst *LI, MemoryAccess *DA,
                                              const BasicBlock *B) {
@@ -1191,8 +1197,23 @@ int NewGVN::analyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
 const Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
                                                          const BasicBlock *B) {
   StoreInst *SI = cast<StoreInst>(I);
-  const Expression *E = createStoreExpression(SI, MSSA->getMemoryAccess(SI), B);
-  return E;
+  // If this store's memorydef stores the same value as the last store, the
+  // memory accesses are equivalent.
+  // Get the expression, if any, for the RHS of the MemoryDef.
+  MemoryAccess *StoreAccess = MSSA->getMemoryAccess(SI);
+  MemoryAccess *StoreRHS = lookupMemoryAccessEquiv(
+      cast<MemoryDef>(StoreAccess)->getDefiningAccess());
+  const Expression *OldStore = createStoreExpression(SI, StoreRHS, B);
+  // See if this store expression already has a value, and it's the same as our
+  // current store.
+  CongruenceClass *CC = ExpressionToClass.lookup(OldStore);
+  if (CC &&
+      CC->RepLeader ==
+          lookupOperandLeader(SI->getValueOperand(), SI, B).first) {
+    setMemoryAccessTo(StoreAccess, StoreRHS);
+    return OldStore;
+  }
+  return createStoreExpression(SI, StoreAccess, B);
 }
 
 const Expression *
@@ -1392,8 +1413,9 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
     }
   }
 
-  const Expression *E = createLoadExpression(
-      LI->getType(), LI->getPointerOperand(), LI, DefiningAccess, B);
+  const Expression *E =
+      createLoadExpression(LI->getType(), LI->getPointerOperand(), LI,
+                           lookupMemoryAccessEquiv(DefiningAccess), B);
   return E;
 }
 
@@ -1445,18 +1467,24 @@ void NewGVN::valueNumberMemoryPhi(MemoryPhi *MP) {
     BasicBlock *B = MP->getIncomingBlock(i);
     if (!ReachableBlocks.count(B))
       continue;
-    MemoryAccess *Operand = cast<MemoryAccess>(MP->getOperand(i));
-    auto OperandLookup = MemoryAccessEquiv.find(Operand);
-    if (OperandLookup != MemoryAccessEquiv.end())
-      Operand = OperandLookup->second;
-    if (AllSameValue && AllSameValue != MP->getOperand(i)) {
+    MemoryAccess *Operand =
+        lookupMemoryAccessEquiv(cast<MemoryAccess>(MP->getOperand(i)));
+    if (AllSameValue && AllSameValue != Operand) {
       // Phi node does not have equal arguments, this phi node value numbers to
       // itself.
       AllSameValue = nullptr;
       break;
-    } else if (!AllSameValue)
-      AllSameValue = cast<MemoryAccess>(MP->getOperand(i));
+    } else if (!AllSameValue) {
+      AllSameValue = Operand;
+    }
   }
+#ifdef DEBUG
+  if (AllSameValue)
+    dbgs() << "Memory Phi value numbered to " << *AllSameValue << "\n";
+  else
+    dbgs() << "Memory Phi value numbered to itself\n";
+#endif
+
   if (setMemoryAccessTo(MP, AllSameValue))
     markMemoryUsersTouched(MP);
 }

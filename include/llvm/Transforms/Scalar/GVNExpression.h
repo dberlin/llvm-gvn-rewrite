@@ -609,6 +609,8 @@ private:
   Constant *ConstantValue;
 };
 
+/* Stores and loads are equal if the operands and defining access are the same.
+Essentially, we are value numbering memory locations, not operation. */
 bool LoadExpression::equals(const Expression &Other) const {
   if (!isa<LoadExpression>(Other) && !isa<StoreExpression>(Other))
     return false;
