@@ -182,7 +182,6 @@ struct CongruenceClass {
 };
 
 class NewGVN : public FunctionPass {
-  MemoryDependenceResults *MD;
   DominatorTree *DT;
   const DataLayout *DL;
   const TargetLibraryInfo *TLI;
@@ -287,7 +286,7 @@ class NewGVN : public FunctionPass {
 
 public:
   static char ID; // Pass identification, replacement for typeid
-  explicit NewGVN() : FunctionPass(ID), MD(nullptr) {
+  explicit NewGVN() : FunctionPass(ID){
     initializeNewGVNPass(*PassRegistry::getPassRegistry());
   }
 
@@ -429,154 +428,7 @@ private:
   void cleanupTables();
   std::pair<unsigned, unsigned> assignDFSNumbers(BasicBlock *, unsigned);
 
-  /// Represents a particular available value that we know how to materialize.
-  /// Materialization of an AvailableValue never fails.  An AvailableValue is
-  /// implicitly associated with a rematerialization point which is the
-  /// location of the instruction from which it was formed.
-  struct AvailableValue {
-    enum ValType {
-      SimpleVal, // A simple offsetted value that is accessed.
-      LoadVal,   // A value produced by a load.
-      MemIntrin, // A memory intrinsic which is loaded from.
-      UndefVal   // A UndefValue representing a value from dead block (which
-                 // is not yet physically removed from the CFG).
-    };
 
-    /// V - The value that is live out of the block.
-    PointerIntPair<Value *, 2, ValType> Val;
-
-    /// Offset - The byte offset in Val that is interesting for the load query.
-    unsigned Offset;
-
-    static AvailableValue get(Value *V, unsigned Offset = 0) {
-      AvailableValue Res;
-      Res.Val.setPointer(V);
-      Res.Val.setInt(SimpleVal);
-      Res.Offset = Offset;
-      return Res;
-    }
-
-    static AvailableValue getMI(MemIntrinsic *MI, unsigned Offset = 0) {
-      AvailableValue Res;
-      Res.Val.setPointer(MI);
-      Res.Val.setInt(MemIntrin);
-      Res.Offset = Offset;
-      return Res;
-    }
-
-    static AvailableValue getLoad(LoadInst *LI, unsigned Offset = 0) {
-      AvailableValue Res;
-      Res.Val.setPointer(LI);
-      Res.Val.setInt(LoadVal);
-      Res.Offset = Offset;
-      return Res;
-    }
-
-    static AvailableValue getUndef() {
-      AvailableValue Res;
-      Res.Val.setPointer(nullptr);
-      Res.Val.setInt(UndefVal);
-      Res.Offset = 0;
-      return Res;
-    }
-
-    bool isSimpleValue() const { return Val.getInt() == SimpleVal; }
-    bool isCoercedLoadValue() const { return Val.getInt() == LoadVal; }
-    bool isMemIntrinValue() const { return Val.getInt() == MemIntrin; }
-    bool isUndefValue() const { return Val.getInt() == UndefVal; }
-
-    Value *getSimpleValue() const {
-      assert(isSimpleValue() && "Wrong accessor");
-      return Val.getPointer();
-    }
-
-    LoadInst *getCoercedLoadValue() const {
-      assert(isCoercedLoadValue() && "Wrong accessor");
-      return cast<LoadInst>(Val.getPointer());
-    }
-
-    MemIntrinsic *getMemIntrinValue() const {
-      assert(isMemIntrinValue() && "Wrong accessor");
-      return cast<MemIntrinsic>(Val.getPointer());
-    }
-
-    /// Emit code at the specified insertion point to adjust the value defined
-    /// here to the specified type. This handles various coercion cases.
-    Value *MaterializeAdjustedValue(LoadInst *LI, Instruction *InsertPt,
-                                    NewGVN &gvn) const;
-  };
-
-  /// Represents an AvailableValue which can be rematerialized at the end of
-  /// the associated BasicBlock.
-  struct AvailableValueInBlock {
-    /// BB - The basic block in question.
-    BasicBlock *BB;
-
-    /// AV - The actual available value
-    AvailableValue AV;
-
-    static AvailableValueInBlock get(BasicBlock *BB, AvailableValue &&AV) {
-      AvailableValueInBlock Res;
-      Res.BB = BB;
-      Res.AV = std::move(AV);
-      return Res;
-    }
-
-    static AvailableValueInBlock get(BasicBlock *BB, Value *V,
-                                     unsigned Offset = 0) {
-      return get(BB, AvailableValue::get(V, Offset));
-    }
-    static AvailableValueInBlock getMI(BasicBlock *BB, MemIntrinsic *MI,
-                                       unsigned Offset = 0) {
-      return get(BB, AvailableValue::getMI(MI, Offset));
-    }
-    static AvailableValueInBlock getLoad(BasicBlock *BB, LoadInst *LI,
-                                         unsigned Offset = 0) {
-      return get(BB, AvailableValue::getLoad(LI, Offset));
-    }
-    static AvailableValueInBlock getUndef(BasicBlock *BB) {
-      return get(BB, AvailableValue::getUndef());
-    }
-
-    /// Emit code at the end of this block to adjust the value defined here to
-    /// the specified type. This handles various coercion cases.
-    Value *MaterializeAdjustedValue(LoadInst *LI, NewGVN &gvn) const {
-      return AV.MaterializeAdjustedValue(LI, BB->getTerminator(), gvn);
-    }
-  };
-
-  // PRE
-  typedef SmallVector<AvailableValueInBlock, 64> AvailValInBlkVect;
-  typedef SmallVector<std::pair<BasicBlock *, const Expression *>, 64>
-      UnavailBlkVect;
-  typedef SmallDenseMap<const BasicBlock *, AvailableValueInBlock>
-      AvailValInBlkMap;
-  typedef DenseMap<const BasicBlock *, char> FullyAvailableMap;
-
-  bool isValueFullyAvailableInBlock(BasicBlock *, FullyAvailableMap &,
-                                    uint32_t);
-  Value *findPRELeader(Value *, const BasicBlock *, const Value *);
-  Value *findPRELeader(const Expression *, const BasicBlock *, const Value *);
-  bool phiTranslateArguments(const BasicExpression *, BasicExpression *,
-                             const BasicBlock *, const Value *);
-  MemoryAccess *phiTranslateMemoryAccess(MemoryAccess *, const BasicBlock *);
-  const Expression *phiTranslateExpression(const Expression *E, BasicBlock *,
-                                           BasicBlock *, const Value *);
-  BasicBlock *splitCriticalEdges(BasicBlock *, BasicBlock *);
-  void analyzeAvailability(Instruction *, AvailValInBlkVect &,
-                           UnavailBlkVect &);
-  bool performPRE(Instruction *, AvailValInBlkVect &, UnavailBlkVect &);
-  bool performPREOnClass(CongruenceClass *);
-  Value *constructSSAForSet(Instruction *,
-                            SmallVectorImpl<AvailableValueInBlock> &);
-  void valueNumberNewInstruction(Value *);
-  void valueNumberNewInstructionToValue(Value *, Value *);
-  const Expression *trySimplifyPREExpression(const Expression *,
-                                             const BasicBlock *);
-  Value *regenerateExpression(const Expression *, BasicBlock *);
-  void topoVisitCongruenceClass(CongruenceClass *,
-                                SmallDenseMap<CongruenceClass *, unsigned> &,
-                                SmallPtrSetImpl<CongruenceClass *> &);
 };
 
 char NewGVN::ID = 0;
@@ -1254,6 +1106,7 @@ const Expression *
 NewGVN::performSymbolicLoadCoercionFromPhi(Type *LoadType, Value *LoadPtr,
                                            LoadInst *LI, MemoryPhi *DefiningPhi,
                                            const BasicBlock *B) {
+#if 0
   if (!LoadPtr)
     return nullptr;
   AvailValInBlkVect ValuesPerBlock;
@@ -1314,6 +1167,7 @@ NewGVN::performSymbolicLoadCoercionFromPhi(Type *LoadType, Value *LoadPtr,
     return nullptr;
   }
   assert(ValuesPerBlock.size() == DefiningPhi->getNumIncomingValues());
+#endif
   return nullptr;
 }
 
@@ -2443,24 +2297,6 @@ std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
   return std::make_pair(Start, End);
 }
 
-void NewGVN::topoVisitCongruenceClass(
-    CongruenceClass *CC, SmallDenseMap<CongruenceClass *, unsigned> &UsedCount,
-    SmallPtrSetImpl<CongruenceClass *> &Visited) {
-  Visited.insert(CC);
-  // Visit the classes of the values of the operands of the leader set
-  for (auto Member : CC->Members) {
-    if (User *U = dyn_cast<User>(Member)) {
-      for (auto &I : U->operands()) {
-        CongruenceClass *OperandCC = ValueToClass.lookup(I);
-        if (OperandCC) {
-          UsedCount[OperandCC] += 1;
-          if (!Visited.count(OperandCC))
-            topoVisitCongruenceClass(OperandCC, UsedCount, Visited);
-        }
-      }
-    }
-  }
-}
 
 /// runOnFunction - This is the main transformation entry point for a
 /// function.
@@ -2611,54 +2447,6 @@ bool NewGVN::runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
   }
 
   Changed |= eliminateInstructions(F);
-
-// The ideal ordering for processing is not quite topological ordering,
-// because there are multiple roots.  It is essentially "group every vertex
-// that depends on a given vertex together after that vertex", which is not
-// the same.  It is in fact, an NP complete problem, and given that the graph
-// may be cyclic anyway, we order the congruence classes by how many things
-// depend on them.  This is a good approximation, and will cut down the number
-// of iterations.
-#if 0
-  SmallDenseMap<CongruenceClass *, unsigned> UsedCount;
-  SmallPtrSet<CongruenceClass *, 16> VisitedClasses;
-
-  for (int i = CongruenceClasses.size() - 1; i >= 0; --i) {
-    CongruenceClass *CC = CongruenceClasses[i];
-    if (CC == InitialClass || CC->dead || VisitedClasses.count(CC))
-      continue;
-    topoVisitCongruenceClass(CC, UsedCount, VisitedClasses);
-  }
-  SmallVector<CongruenceClass *, 16> Worklist;
-  for (auto &CC : CongruenceClasses)
-    Worklist.push_back(CC);
-  // std::sort(Worklist.begin(), Worklist.end(),
-  //           [&UsedCount](CongruenceClass *&A, CongruenceClass *&B) {
-  //             return UsedCount[A] > UsedCount[B];
-  //           });
-
-  bool PREChanged = true;
-  while (PREChanged) {
-    PREChanged = false;
-#if 1
-    // FIXME: Handle added congruence classes
-    if (Worklist.size() != CongruenceClasses.size())
-      Worklist.insert(Worklist.end(),
-                      CongruenceClasses.begin() + (Worklist.size() - 1),
-                      CongruenceClasses.end());
-#endif
-    for (auto CC : Worklist) {
-      if (CC == InitialClass || CC->dead)
-        continue;
-
-      PREChanged |= performPREOnClass(CC);
-    }
-  }
-
-  PREValueForwarding.clear();
-
-  Changed |= PREChanged;
-#endif
   // Delete all instructions marked for deletion.
   for (Instruction *ToErase : InstructionsToErase) {
     if (!ToErase->use_empty())
