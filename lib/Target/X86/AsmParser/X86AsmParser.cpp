@@ -1915,7 +1915,7 @@ bool X86AsmParser::ParseZ(std::unique_ptr<X86Operand> &Z,
                           const SMLoc &StartLoc) {
   MCAsmParser &Parser = getParser();
   // Assuming we are just pass the '{' mark, quering the next token
-  // Searched for {z}, but none was found. Return true, as no parsing error was
+  // Searched for {z}, but none was found. Return false, as no parsing error was
   // encountered
   if (!(getLexer().is(AsmToken::Identifier) &&
         (getLexer().getTok().getIdentifier() == "z")))
@@ -2536,7 +2536,7 @@ bool X86AsmParser::ParseInstruction(ParseInstructionInfo &Info, StringRef Name,
         (Name == "smov" || Name == "smovb" || Name == "smovw" ||
          Name == "smovl" || Name == "smovd" || Name == "smovq"))) &&
       (Operands.size() == 1 || Operands.size() == 3)) {
-    if (Name == "movsd" && Operands.size() == 1)
+    if (Name == "movsd" && Operands.size() == 1 && !isParsingIntelSyntax())
       Operands.back() = X86Operand::CreateToken("movsl", NameLoc);
     AddDefaultSrcDestOperands(TmpOperands, DefaultMemSIOperand(NameLoc),
                               DefaultMemDIOperand(NameLoc));

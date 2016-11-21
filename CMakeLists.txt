@@ -151,6 +151,20 @@ if(LLVM_CCACHE_BUILD)
   endif()
 endif()
 
+option(LLVM_DEPENDENCY_DEBUGGING "Dependency debugging mode to verify correctly expressed library dependencies (Darwin only)" OFF)
+
+# Some features of the LLVM build may be disallowed when dependency debugging is
+# enabled. In particular you cannot use ccache because we want to force compile
+# operations to always happen.
+if(LLVM_DEPENDENCY_DEBUGGING)
+  if(NOT CMAKE_HOST_APPLE)
+    message(FATAL_ERROR "Dependency debugging is only currently supported on Darwin hosts.")
+  endif()
+  if(LLVM_CCACHE_BUILD)
+    message(FATAL_ERROR "Cannot enable dependency debugging while using ccache.")
+  endif()
+endif()
+
 option(LLVM_BUILD_GLOBAL_ISEL "Experimental: Build GlobalISel" OFF)
 if(LLVM_BUILD_GLOBAL_ISEL)
   add_definitions(-DLLVM_BUILD_GLOBAL_ISEL)
@@ -342,6 +356,8 @@ set(LLVM_TARGET_ARCH "host"
   CACHE STRING "Set target to use for LLVM JIT or use \"host\" for automatic detection.")
 
 option(LLVM_ENABLE_TERMINFO "Use terminfo database if available." ON)
+
+option(LLVM_ENABLE_LIBEDIT "Use libedit if available." ON)
 
 option(LLVM_ENABLE_THREADS "Use threads if available." ON)
 
@@ -538,6 +554,10 @@ if (LLVM_BUILD_INSTRUMENTED OR LLVM_BUILD_INSTRUMENTED_COVERAGE)
       file(TO_NATIVE_PATH "${LLVM_PROFILE_DATA_DIR}/%${LLVM_PROFILE_MERGE_POOL_SIZE}m.profraw" LLVM_PROFILE_FILE_PATTERN)
     endif()
   endif()
+endif()
+
+if (LLVM_BUILD_STATIC)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
 endif()
 
 # All options referred to from HandleLLVMOptions have to be specified

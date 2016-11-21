@@ -2113,6 +2113,24 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
     }
     break;
   }
+  case ISD::CONCAT_VECTORS: {
+    // Split DemandedElts and test each of the demanded subvectors.
+    KnownZero = KnownOne = APInt::getAllOnesValue(BitWidth);
+    EVT SubVectorVT = Op.getOperand(0).getValueType();
+    unsigned NumSubVectorElts = SubVectorVT.getVectorNumElements();
+    unsigned NumSubVectors = Op.getNumOperands();
+    for (unsigned i = 0; i != NumSubVectors; ++i) {
+      APInt DemandedSub = DemandedElts.lshr(i * NumSubVectorElts);
+      DemandedSub = DemandedSub.trunc(NumSubVectorElts);
+      if (!!DemandedSub) {
+        SDValue Sub = Op.getOperand(i);
+        computeKnownBits(Sub, KnownZero2, KnownOne2, DemandedSub, Depth + 1);
+        KnownOne &= KnownOne2;
+        KnownZero &= KnownZero2;
+      }
+    }
+    break;
+  }
   case ISD::EXTRACT_SUBVECTOR: {
     // If we know the element index, just demand that subvector elements,
     // otherwise demand them all.
@@ -2856,6 +2874,13 @@ unsigned SelectionDAG::ComputeNumSignBits(SDValue Op, unsigned Depth) const {
       return ComputeNumSignBits(Op.getOperand(0), Depth+1);
     break;
   }
+  case ISD::CONCAT_VECTORS:
+    // Determine the minimum number of sign bits across all input vectors.
+    // Early out if the result is already 1.
+    Tmp = ComputeNumSignBits(Op.getOperand(0), Depth + 1);
+    for (unsigned i = 1, e = Op.getNumOperands(); (i < e) && (Tmp > 1); ++i)
+      Tmp = std::min(Tmp, ComputeNumSignBits(Op.getOperand(i), Depth + 1));
+    return Tmp;
   }
 
   // If we are looking at the loaded value of the SDNode.
