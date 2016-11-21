@@ -609,40 +609,6 @@ private:
   Constant *ConstantValue;
 };
 
-/* Stores and loads are equal if the operands and defining access are the same.
-Essentially, we are value numbering memory locations, not operation. */
-bool LoadExpression::equals(const Expression &Other) const {
-  if (!isa<LoadExpression>(Other) && !isa<StoreExpression>(Other))
-    return false;
-  if (!this->BasicExpression::equals(Other))
-    return false;
-  if (const LoadExpression *OtherL = dyn_cast<LoadExpression>(&Other)) {
-    if (DefiningAccess != OtherL->getDefiningAccess())
-      return false;
-  } else if (const StoreExpression *OtherS =
-                 dyn_cast<StoreExpression>(&Other)) {
-    if (DefiningAccess != OtherS->getDefiningAccess())
-      return false;
-  }
-
-  return true;
-}
-bool StoreExpression::equals(const Expression &Other) const {
-  if (!isa<LoadExpression>(Other) && !isa<StoreExpression>(Other))
-    return false;
-  if (!this->BasicExpression::equals(Other))
-    return false;
-  if (const LoadExpression *OtherL = dyn_cast<LoadExpression>(&Other)) {
-    if (DefiningAccess != OtherL->getDefiningAccess())
-      return false;
-  } else if (const StoreExpression *OtherS =
-                 dyn_cast<StoreExpression>(&Other)) {
-    if (DefiningAccess != OtherS->getDefiningAccess())
-      return false;
-  }
-
-  return true;
-}
 }
 }
 
