@@ -256,7 +256,7 @@ DwarfDebug::DwarfDebug(AsmPrinter *A, Module *M)
     UseAllLinkageNames = DwarfLinkageNames == AllLinkageNames;
 
   unsigned DwarfVersionNumber = Asm->TM.Options.MCOptions.DwarfVersion;
-  DwarfVersion = DwarfVersionNumber ? DwarfVersionNumber
+  unsigned DwarfVersion = DwarfVersionNumber ? DwarfVersionNumber
                                     : MMI->getModule()->getDwarfVersion();
   // Use dwarf 4 by default if nothing is requested.
   DwarfVersion = DwarfVersion ? DwarfVersion : dwarf::DWARF_VERSION;
@@ -437,9 +437,9 @@ DwarfDebug::constructDwarfCompileUnit(const DICompileUnit *DIUnit) {
   }
 
   if (useSplitDwarf())
-    NewCU.initSection(Asm->getObjFileLowering().getDwarfInfoDWOSection());
+    NewCU.setSection(Asm->getObjFileLowering().getDwarfInfoDWOSection());
   else
-    NewCU.initSection(Asm->getObjFileLowering().getDwarfInfoSection());
+    NewCU.setSection(Asm->getObjFileLowering().getDwarfInfoSection());
 
   if (DIUnit->getDWOId()) {
     // This CU is either a clang module DWO or a skeleton CU.
@@ -520,7 +520,7 @@ void DwarfDebug::finishVariableDefinitions() {
     // FIXME: Consider the time-space tradeoff of just storing the unit pointer
     // in the ConcreteVariables list, rather than looking it up again here.
     // DIE::getUnit isn't simple - it walks parent pointers, etc.
-    DwarfCompileUnit *Unit = lookupUnit(VariableDie->getUnit());
+    DwarfCompileUnit *Unit = CUDieMap.lookup(VariableDie->getUnitDie());
     assert(Unit);
     DbgVariable *AbsVar = getExistingAbstractVariable(
         InlinedVariable(Var->getVariable(), Var->getInlinedAt()));
@@ -726,10 +726,10 @@ void DwarfDebug::ensureAbstractVariableIsCreatedIfScoped(
     createAbstractVariable(Cleansed, Scope);
 }
 
-// Collect variable information from side table maintained by MMI.
-void DwarfDebug::collectVariableInfoFromMMITable(
+// Collect variable information from side table maintained by MF.
+void DwarfDebug::collectVariableInfoFromMFTable(
     DenseSet<InlinedVariable> &Processed) {
-  for (const auto &VI : MMI->getVariableDbgInfo()) {
+  for (const auto &VI : Asm->MF->getVariableDbgInfo()) {
     if (!VI.Var)
       continue;
     assert(VI.Var->isValidLocationForIntrinsic(VI.Loc) &&
@@ -776,7 +776,7 @@ static DebugLocEntry::Value getDebugLocValue(const MachineInstr *MI) {
   llvm_unreachable("Unexpected 4-operand DBG_VALUE instruction!");
 }
 
-/// \brief If this and Next are describing different pieces of the same
+/// \brief If this and Next are describing different fragments of the same
 /// variable, merge them by appending Next's values to the current
 /// list of values.
 /// Return true if the merge was successful.
@@ -784,15 +784,15 @@ bool DebugLocEntry::MergeValues(const DebugLocEntry &Next) {
   if (Begin == Next.Begin) {
     auto *FirstExpr = cast<DIExpression>(Values[0].Expression);
     auto *FirstNextExpr = cast<DIExpression>(Next.Values[0].Expression);
-    if (!FirstExpr->isBitPiece() || !FirstNextExpr->isBitPiece())
+    if (!FirstExpr->isFragment() || !FirstNextExpr->isFragment())
       return false;
 
-    // We can only merge entries if none of the pieces overlap any others.
+    // We can only merge entries if none of the fragments overlap any others.
     // In doing so, we can take advantage of the fact that both lists are
     // sorted.
     for (unsigned i = 0, j = 0; i < Values.size(); ++i) {
       for (; j < Next.Values.size(); ++j) {
-        int res = DebugHandlerBase::pieceCmp(
+        int res = DebugHandlerBase::fragmentCmp(
             cast<DIExpression>(Values[i].Expression),
             cast<DIExpression>(Next.Values[j].Expression));
         if (res == 0) // The two expressions overlap, we can't merge.
@@ -815,27 +815,27 @@ bool DebugLocEntry::MergeValues(const DebugLocEntry &Next) {
 
 /// Build the location list for all DBG_VALUEs in the function that
 /// describe the same variable.  If the ranges of several independent
-/// pieces of the same variable overlap partially, split them up and
+/// fragments of the same variable overlap partially, split them up and
 /// combine the ranges. The resulting DebugLocEntries are will have
 /// strict monotonically increasing begin addresses and will never
 /// overlap.
 //
 // Input:
 //
-//   Ranges History [var, loc, piece ofs size]
-// 0 |      [x, (reg0, piece 0, 32)]
-// 1 | |    [x, (reg1, piece 32, 32)] <- IsPieceOfPrevEntry
+//   Ranges History [var, loc, fragment ofs size]
+// 0 |      [x, (reg0, fragment 0, 32)]
+// 1 | |    [x, (reg1, fragment 32, 32)] <- IsFragmentOfPrevEntry
 // 2 | |    ...
 // 3   |    [clobber reg0]
-// 4        [x, (mem, piece 0, 64)] <- overlapping with both previous pieces of
+// 4        [x, (mem, fragment 0, 64)] <- overlapping with both previous fragments of
 //                                     x.
 //
 // Output:
 //
-// [0-1]    [x, (reg0, piece  0, 32)]
-// [1-3]    [x, (reg0, piece  0, 32), (reg1, piece 32, 32)]
-// [3-4]    [x, (reg1, piece 32, 32)]
-// [4- ]    [x, (mem,  piece  0, 64)]
+// [0-1]    [x, (reg0, fragment  0, 32)]
+// [1-3]    [x, (reg0, fragment  0, 32), (reg1, fragment 32, 32)]
+// [3-4]    [x, (reg1, fragment 32, 32)]
+// [4- ]    [x, (mem,  fragment  0, 64)]
 void
 DwarfDebug::buildLocationList(SmallVectorImpl<DebugLocEntry> &DebugLoc,
                               const DbgValueHistoryMap::InstrRanges &Ranges) {
@@ -853,10 +853,10 @@ DwarfDebug::buildLocationList(SmallVectorImpl<DebugLocEntry> &DebugLoc,
       continue;
     }
 
-    // If this piece overlaps with any open ranges, truncate them.
+    // If this fragment overlaps with any open ranges, truncate them.
     const DIExpression *DIExpr = Begin->getDebugExpression();
     auto Last = remove_if(OpenRanges, [&](DebugLocEntry::Value R) {
-      return piecesOverlap(DIExpr, R.getExpression());
+      return fragmentsOverlap(DIExpr, R.getExpression());
     });
     OpenRanges.erase(Last, OpenRanges.end());
 
@@ -878,12 +878,12 @@ DwarfDebug::buildLocationList(SmallVectorImpl<DebugLocEntry> &DebugLoc,
     DebugLocEntry Loc(StartLabel, EndLabel, Value);
     bool couldMerge = false;
 
-    // If this is a piece, it may belong to the current DebugLocEntry.
-    if (DIExpr->isBitPiece()) {
+    // If this is a fragment, it may belong to the current DebugLocEntry.
+    if (DIExpr->isFragment()) {
       // Add this value to the list of open ranges.
       OpenRanges.push_back(Value);
 
-      // Attempt to add the piece to the last entry.
+      // Attempt to add the fragment to the last entry.
       if (!DebugLoc.empty())
         if (DebugLoc.back().MergeValues(Loc))
           couldMerge = true;
@@ -891,7 +891,7 @@ DwarfDebug::buildLocationList(SmallVectorImpl<DebugLocEntry> &DebugLoc,
 
     if (!couldMerge) {
       // Need to add a new DebugLocEntry. Add all values from still
-      // valid non-overlapping pieces.
+      // valid non-overlapping fragments.
       if (OpenRanges.size())
         Loc.addValues(OpenRanges);
 
@@ -939,7 +939,7 @@ void DwarfDebug::collectVariableInfo(DwarfCompileUnit &TheCU,
                                      const DISubprogram *SP,
                                      DenseSet<InlinedVariable> &Processed) {
   // Grab the variable info that was squirreled away in the MMI side-table.
-  collectVariableInfoFromMMITable(Processed);
+  collectVariableInfoFromMFTable(Processed);
 
   for (const auto &I : DbgValues) {
     InlinedVariable IV = I.first;
@@ -1006,30 +1006,35 @@ void DwarfDebug::beginInstruction(const MachineInstr *MI) {
   DebugHandlerBase::beginInstruction(MI);
   assert(CurMI);
 
-  // Check if source location changes, but ignore DBG_VALUE locations.
-  if (!MI->isDebugValue()) {
-    const DebugLoc &DL = MI->getDebugLoc();
-    if (DL != PrevInstLoc) {
-      if (DL) {
-        unsigned Flags = 0;
-        PrevInstLoc = DL;
-        if (DL == PrologEndLoc) {
-          Flags |= DWARF2_FLAG_PROLOGUE_END;
-          PrologEndLoc = DebugLoc();
-          Flags |= DWARF2_FLAG_IS_STMT;
-        }
-        if (DL.getLine() !=
-            Asm->OutStreamer->getContext().getCurrentDwarfLoc().getLine())
-          Flags |= DWARF2_FLAG_IS_STMT;
+  // Check if source location changes, but ignore DBG_VALUE and CFI locations.
+  if (MI->isDebugValue() || MI->isCFIInstruction())
+    return;
+  const DebugLoc &DL = MI->getDebugLoc();
+  if (DL == PrevInstLoc)
+    return;
 
-        const MDNode *Scope = DL.getScope();
-        recordSourceLine(DL.getLine(), DL.getCol(), Scope, Flags);
-      } else if (UnknownLocations) {
-        PrevInstLoc = DL;
-        recordSourceLine(0, 0, nullptr, 0);
-      }
+  if (!DL) {
+    // We have an unspecified location, which might want to be line 0.
+    if (UnknownLocations) {
+      PrevInstLoc = DL;
+      recordSourceLine(0, 0, nullptr, 0);
     }
+    return;
   }
+
+  // We have a new, explicit location.
+  unsigned Flags = 0;
+  PrevInstLoc = DL;
+  if (DL == PrologEndLoc) {
+    Flags |= DWARF2_FLAG_PROLOGUE_END | DWARF2_FLAG_IS_STMT;
+    PrologEndLoc = DebugLoc();
+  }
+  if (DL.getLine() !=
+      Asm->OutStreamer->getContext().getCurrentDwarfLoc().getLine())
+    Flags |= DWARF2_FLAG_IS_STMT;
+
+  const MDNode *Scope = DL.getScope();
+  recordSourceLine(DL.getLine(), DL.getCol(), Scope, Flags);
 }
 
 static DebugLoc findPrologueEndLoc(const MachineFunction *MF) {
@@ -1192,7 +1197,7 @@ void DwarfDebug::recordSourceLine(unsigned Line, unsigned Col, const MDNode *S,
     Fn = Scope->getFilename();
     Dir = Scope->getDirectory();
     if (auto *LBF = dyn_cast<DILexicalBlockFile>(Scope))
-      if (DwarfVersion >= 4)
+      if (getDwarfVersion() >= 4)
         Discriminator = LBF->getDiscriminator();
 
     unsigned CUID = Asm->OutStreamer->getContext().getDwarfCompileUnitID();
@@ -1408,10 +1413,9 @@ void DwarfDebug::emitDebugLocEntry(ByteStreamer &Streamer,
 static void emitDebugLocValue(const AsmPrinter &AP, const DIBasicType *BT,
                               ByteStreamer &Streamer,
                               const DebugLocEntry::Value &Value,
-                              unsigned PieceOffsetInBits) {
+                              DwarfExpression &DwarfExpr) {
   DIExpressionCursor ExprCursor(Value.getExpression());
-  DebugLocDwarfExpression DwarfExpr(AP.getDwarfDebug()->getDwarfVersion(),
-                                    Streamer);
+  DwarfExpr.addFragmentOffset(Value.getExpression());
   // Regular entry.
   if (Value.isInt()) {
     if (BT && (BT->getEncoding() == dwarf::DW_ATE_signed ||
@@ -1421,23 +1425,16 @@ static void emitDebugLocValue(const AsmPrinter &AP, const DIBasicType *BT,
       DwarfExpr.AddUnsignedConstant(Value.getInt());
   } else if (Value.isLocation()) {
     MachineLocation Loc = Value.getLoc();
-    if (!ExprCursor)
-      // Regular entry.
-      AP.EmitDwarfRegOp(Streamer, Loc);
-    else {
-      // Complex address entry.
-      const TargetRegisterInfo &TRI = *AP.MF->getSubtarget().getRegisterInfo();
-      if (Loc.getOffset())
-        DwarfExpr.AddMachineRegIndirect(TRI, Loc.getReg(), Loc.getOffset());
-      else
-        DwarfExpr.AddMachineRegExpression(TRI, ExprCursor, Loc.getReg(),
-                                          PieceOffsetInBits);
-    }
+    const TargetRegisterInfo &TRI = *AP.MF->getSubtarget().getRegisterInfo();
+    if (Loc.getOffset())
+      DwarfExpr.AddMachineRegIndirect(TRI, Loc.getReg(), Loc.getOffset());
+    else
+      DwarfExpr.AddMachineRegExpression(TRI, ExprCursor, Loc.getReg());
   } else if (Value.isConstantFP()) {
     APInt RawBytes = Value.getConstantFP()->getValueAPF().bitcastToAPInt();
     DwarfExpr.AddUnsignedConstant(RawBytes);
   }
-  DwarfExpr.AddExpression(std::move(ExprCursor), PieceOffsetInBits);
+  DwarfExpr.AddExpression(std::move(ExprCursor));
 }
 
 void DebugLocEntry::finalize(const AsmPrinter &AP,
@@ -1445,36 +1442,24 @@ void DebugLocEntry::finalize(const AsmPrinter &AP,
                              const DIBasicType *BT) {
   DebugLocStream::EntryBuilder Entry(List, Begin, End);
   BufferByteStreamer Streamer = Entry.getStreamer();
+  DebugLocDwarfExpression DwarfExpr(AP.getDwarfVersion(), Streamer);
   const DebugLocEntry::Value &Value = Values[0];
-  if (Value.isBitPiece()) {
-    // Emit all pieces that belong to the same variable and range.
+  if (Value.isFragment()) {
+    // Emit all fragments that belong to the same variable and range.
     assert(all_of(Values, [](DebugLocEntry::Value P) {
-          return P.isBitPiece();
-        }) && "all values are expected to be pieces");
+          return P.isFragment();
+        }) && "all values are expected to be fragments");
     assert(std::is_sorted(Values.begin(), Values.end()) &&
-           "pieces are expected to be sorted");
-   
-    unsigned Offset = 0;
-    for (auto Piece : Values) {
-      const DIExpression *Expr = Piece.getExpression();
-      unsigned PieceOffset = Expr->getBitPieceOffset();
-      unsigned PieceSize = Expr->getBitPieceSize();
-      assert(Offset <= PieceOffset && "overlapping or duplicate pieces");
-      if (Offset < PieceOffset) {
-        // The DWARF spec seriously mandates pieces with no locations for gaps.
-        DebugLocDwarfExpression Expr(AP.getDwarfDebug()->getDwarfVersion(),
-                                     Streamer);
-        Expr.AddOpPiece(PieceOffset-Offset, 0);
-        Offset += PieceOffset-Offset;
-      }
-      Offset += PieceSize;
+           "fragments are expected to be sorted");
 
-      emitDebugLocValue(AP, BT, Streamer, Piece, PieceOffset);
-    }
+    for (auto Fragment : Values)
+      emitDebugLocValue(AP, BT, Streamer, Fragment, DwarfExpr);
+
   } else {
-    assert(Values.size() == 1 && "only pieces may have >1 value");
-    emitDebugLocValue(AP, BT, Streamer, Value, 0);
+    assert(Values.size() == 1 && "only fragments may have >1 value");
+    emitDebugLocValue(AP, BT, Streamer, Value, DwarfExpr);
   }
+  DwarfExpr.finalize();
 }
 
 void DwarfDebug::emitDebugLocEntryLocation(const DebugLocStream::Entry &Entry) {
@@ -1818,7 +1803,7 @@ DwarfCompileUnit &DwarfDebug::constructSkeletonCU(const DwarfCompileUnit &CU) {
   auto OwnedUnit = make_unique<DwarfCompileUnit>(
       CU.getUniqueID(), CU.getCUNode(), Asm, this, &SkeletonHolder);
   DwarfCompileUnit &NewCU = *OwnedUnit;
-  NewCU.initSection(Asm->getObjFileLowering().getDwarfInfoSection());
+  NewCU.setSection(Asm->getObjFileLowering().getDwarfInfoSection());
 
   NewCU.initStmtList();
 
@@ -1910,11 +1895,10 @@ void DwarfDebug::addDwarfTypeUnitType(DwarfCompileUnit &CU,
   Ins.first->second = Signature;
 
   if (useSplitDwarf())
-    NewTU.initSection(Asm->getObjFileLowering().getDwarfTypesDWOSection());
+    NewTU.setSection(Asm->getObjFileLowering().getDwarfTypesDWOSection());
   else {
     CU.applyStmtList(UnitDie);
-    NewTU.initSection(
-        Asm->getObjFileLowering().getDwarfTypesSection(Signature));
+    NewTU.setSection(Asm->getObjFileLowering().getDwarfTypesSection(Signature));
   }
 
   NewTU.setType(NewTU.createTypeDIE(CTy));
@@ -1977,4 +1961,8 @@ void DwarfDebug::addAccelType(StringRef Name, const DIE &Die, char Flags) {
   if (!useDwarfAccelTables())
     return;
   AccelTypes.AddName(InfoHolder.getStringPool().getEntry(*Asm, Name), &Die);
+}
+
+uint16_t DwarfDebug::getDwarfVersion() const {
+  return Asm->OutStreamer->getContext().getDwarfVersion();
 }

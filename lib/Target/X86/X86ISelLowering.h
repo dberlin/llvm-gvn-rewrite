@@ -303,12 +303,6 @@ namespace llvm {
       // Vector FP round.
       VFPROUND, VFPROUND_RND, VFPROUNDS_RND,
 
-      // Vector double to signed/unsigned integer (truncated).
-      CVTTPD2DQ, CVTTPD2UDQ,
-
-      // Vector signed/unsigned integer to double.
-      CVTDQ2PD, CVTUDQ2PD,
-
       // Convert a vector to mask, set bits base on MSB.
       CVT2MASK,
 
@@ -494,6 +488,13 @@ namespace llvm {
       FMADDSUB_RND,
       FMSUBADD_RND,
 
+      // Scalar intrinsic FMA with rounding mode.
+      // Two versions, passthru bits on op1 or op3.
+      FMADDS1_RND, FMADDS3_RND,
+      FNMADDS1_RND, FNMADDS3_RND,
+      FMSUBS1_RND, FMSUBS3_RND,
+      FNMSUBS1_RND, FNMSUBS3_RND,
+
       // Compress and expand.
       COMPRESS,
       EXPAND,
@@ -508,9 +509,12 @@ namespace llvm {
       CVTS2SI_RND, CVTS2UI_RND,
 
       // Vector float/double to signed/unsigned integer with truncation.
-      CVTTP2SI_RND, CVTTP2UI_RND,
+      CVTTP2SI, CVTTP2UI, CVTTP2SI_RND, CVTTP2UI_RND,
       // Scalar float/double to signed/unsigned integer with truncation.
       CVTTS2SI_RND, CVTTS2UI_RND,
+
+      // Vector signed/unsigned integer to float/double.
+      CVTSI2P, CVTUI2P,
 
       // Save xmm argument registers to the stack, according to %al. An operator
       // is needed so that this can be expanded with control flow.
@@ -1118,7 +1122,7 @@ namespace llvm {
     SDValue InsertBitToMaskVector(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerINSERT_VECTOR_ELT(SDValue Op, SelectionDAG &DAG) const;
 
-    unsigned getGlobalWrapperKind() const;
+    unsigned getGlobalWrapperKind(const GlobalValue *GV = nullptr) const;
     SDValue LowerConstantPool(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerBlockAddress(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerGlobalAddress(const GlobalValue *GV, const SDLoc &dl,

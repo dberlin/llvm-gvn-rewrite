@@ -23,6 +23,7 @@
 #include "FuzzerExtFunctions.h"
 #include "FuzzerInterface.h"
 #include "FuzzerOptions.h"
+#include "FuzzerSHA1.h"
 #include "FuzzerValueBitMap.h"
 
 namespace fuzzer {
@@ -88,6 +89,9 @@ public:
 
   // Merge Corpora[1:] into Corpora[0].
   void Merge(const std::vector<std::string> &Corpora);
+  void CrashResistantMerge(const std::vector<std::string> &Args,
+                           const std::vector<std::string> &Corpora);
+  void CrashResistantMergeInternalStep(const std::string &ControlFilePath);
   // Returns a subset of 'Extra' that adds coverage to 'Initial'.
   UnitVector FindExtraUnits(const UnitVector &Initial, const UnitVector &Extra);
   MutationDispatcher &GetMD() { return MD; }
@@ -103,6 +107,8 @@ public:
   size_t GetCurrentUnitInFuzzingThead(const uint8_t **Data) const;
   void TryDetectingAMemoryLeak(const uint8_t *Data, size_t Size,
                                bool DuringInitialCorpusExecution);
+
+  void HandleMalloc(size_t Size);
 
 private:
   void AlarmCallback();

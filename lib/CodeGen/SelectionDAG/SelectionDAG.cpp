@@ -1147,12 +1147,9 @@ SDValue SelectionDAG::getConstant(const ConstantInt &Val, const SDLoc &DL,
     // This situation occurs in MIPS MSA.
 
     SmallVector<SDValue, 8> Ops;
-    for (unsigned i = 0; i < VT.getVectorNumElements(); ++i)
+    for (unsigned i = 0, e = VT.getVectorNumElements(); i != e; ++i)
       Ops.insert(Ops.end(), EltParts.begin(), EltParts.end());
-
-    SDValue Result = getNode(ISD::BITCAST, DL, VT,
-                             getNode(ISD::BUILD_VECTOR, DL, ViaVecVT, Ops));
-    return Result;
+    return getNode(ISD::BITCAST, DL, VT, getBuildVector(ViaVecVT, DL, Ops));
   }
 
   assert(Elt->getBitWidth() == EltVT.getSizeInBits() &&
@@ -2039,7 +2036,8 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
   if (!DemandedElts)
     return;  // No demanded elts, better to assume we don't know anything.
 
-  switch (Op.getOpcode()) {
+  unsigned Opcode = Op.getOpcode();
+  switch (Opcode) {
   case ISD::Constant:
     // We know all of the bits for a constant!
     KnownOne = cast<ConstantSDNode>(Op)->getAPIntValue();
@@ -2082,16 +2080,16 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
     const ShuffleVectorSDNode *SVN = cast<ShuffleVectorSDNode>(Op);
     assert(NumElts == SVN->getMask().size() && "Unexpected vector size");
     for (unsigned i = 0; i != NumElts; ++i) {
+      if (!DemandedElts[i])
+        continue;
+
       int M = SVN->getMaskElt(i);
       if (M < 0) {
         // For UNDEF elements, we don't know anything about the common state of
         // the shuffle result.
-        // FIXME: Is this too pessimistic?
         KnownZero = KnownOne = APInt(BitWidth, 0);
         break;
       }
-      if (!DemandedElts[i])
-        continue;
 
       if ((unsigned)M < NumElts)
         DemandedLHS.setBit((unsigned)M % NumElts);
@@ -2145,6 +2143,50 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
     } else {
       computeKnownBits(Src, KnownZero, KnownOne, Depth + 1);
     }
+    break;
+  }
+  case ISD::BITCAST: {
+    SDValue N0 = Op.getOperand(0);
+    unsigned SubBitWidth = N0.getScalarValueSizeInBits();
+
+    // Ignore bitcasts from floating point.
+    if (!N0.getValueType().isInteger())
+      break;
+
+    // Fast handling of 'identity' bitcasts.
+    if (BitWidth == SubBitWidth) {
+      computeKnownBits(N0, KnownZero, KnownOne, DemandedElts, Depth + 1);
+      break;
+    }
+
+    // Support big-endian targets when it becomes useful.
+    bool IsLE = getDataLayout().isLittleEndian();
+    if (!IsLE)
+      break;
+
+    // Bitcast 'small element' vector to 'large element' scalar/vector.
+    if ((BitWidth % SubBitWidth) == 0) {
+      assert(N0.getValueType().isVector() && "Expected bitcast from vector");
+
+      // Collect known bits for the (larger) output by collecting the known
+      // bits from each set of sub elements and shift these into place.
+      // We need to separately call computeKnownBits for each set of
+      // sub elements as the knownbits for each is likely to be different.
+      unsigned SubScale = BitWidth / SubBitWidth;
+      APInt SubDemandedElts(NumElts * SubScale, 0);
+      for (unsigned i = 0; i != NumElts; ++i)
+        if (DemandedElts[i])
+          SubDemandedElts.setBit(i * SubScale);
+
+      for (unsigned i = 0; i != SubScale; ++i) {
+        computeKnownBits(N0, KnownZero2, KnownOne2, SubDemandedElts.shl(i),
+                         Depth + 1);
+        KnownOne |= KnownOne2.zext(BitWidth).shl(SubBitWidth * i);
+        KnownZero |= KnownZero2.zext(BitWidth).shl(SubBitWidth * i);
+      }
+    }
+
+    // TODO - support ((SubBitWidth % BitWidth) == 0) when it becomes useful.
     break;
   }
   case ISD::AND:
@@ -2478,7 +2520,7 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
     KnownZeroLow = std::min(KnownZeroLow,
                             KnownZero2.countTrailingOnes());
 
-    if (Op.getOpcode() == ISD::ADD) {
+    if (Opcode == ISD::ADD) {
       KnownZero |= APInt::getLowBitsSet(BitWidth, KnownZeroLow);
       if (KnownZeroHigh > 1)
         KnownZero |= APInt::getHighBitsSet(BitWidth, KnownZeroHigh - 1);
@@ -2561,9 +2603,6 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
     break;
   }
   case ISD::EXTRACT_VECTOR_ELT: {
-    // At the moment we keep this simple and skip tracking the specific
-    // element. This way we get the lowest common denominator for all elements
-    // of the vector.
     SDValue InVec = Op.getOperand(0);
     SDValue EltNo = Op.getOperand(1);
     EVT VecVT = InVec.getValueType();
@@ -2592,6 +2631,42 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
     }
     break;
   }
+  case ISD::INSERT_VECTOR_ELT: {
+    SDValue InVec = Op.getOperand(0);
+    SDValue InVal = Op.getOperand(1);
+    SDValue EltNo = Op.getOperand(2);
+
+    ConstantSDNode *CEltNo = dyn_cast<ConstantSDNode>(EltNo);
+    if (CEltNo && CEltNo->getAPIntValue().ult(NumElts)) {
+      // If we know the element index, split the demand between the
+      // source vector and the inserted element.
+      KnownZero = KnownOne = APInt::getAllOnesValue(BitWidth);
+      unsigned EltIdx = CEltNo->getZExtValue();
+
+      // If we demand the inserted element then add its common known bits.
+      if (DemandedElts[EltIdx]) {
+        computeKnownBits(InVal, KnownZero2, KnownOne2, Depth + 1);
+        KnownOne &= KnownOne2.zextOrTrunc(KnownOne.getBitWidth());
+        KnownZero &= KnownZero2.zextOrTrunc(KnownZero.getBitWidth());;
+      }
+
+      // If we demand the source vector then add its common known bits, ensuring
+      // that we don't demand the inserted element.
+      APInt VectorElts = DemandedElts & ~(APInt::getOneBitSet(NumElts, EltIdx));
+      if (!!VectorElts) {
+        computeKnownBits(InVec, KnownZero2, KnownOne2, VectorElts, Depth + 1);
+        KnownOne &= KnownOne2;
+        KnownZero &= KnownZero2;
+      }
+    } else {
+      // Unknown element index, so ignore DemandedElts and demand them all.
+      computeKnownBits(InVec, KnownZero, KnownOne, Depth + 1);
+      computeKnownBits(InVal, KnownZero2, KnownOne2, Depth + 1);
+      KnownOne &= KnownOne2.zextOrTrunc(KnownOne.getBitWidth());
+      KnownZero &= KnownZero2.zextOrTrunc(KnownZero.getBitWidth());;
+    }
+    break;
+  }
   case ISD::BSWAP: {
     computeKnownBits(Op.getOperand(0), KnownZero2, KnownOne2, DemandedElts,
                      Depth + 1);
@@ -2605,8 +2680,10 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
   case ISD::UMAX: {
     APInt Op0Zero, Op0One;
     APInt Op1Zero, Op1One;
-    computeKnownBits(Op.getOperand(0), Op0Zero, Op0One, Depth+1);
-    computeKnownBits(Op.getOperand(1), Op1Zero, Op1One, Depth+1);
+    computeKnownBits(Op.getOperand(0), Op0Zero, Op0One, DemandedElts,
+                     Depth + 1);
+    computeKnownBits(Op.getOperand(1), Op1Zero, Op1One, DemandedElts,
+                     Depth + 1);
 
     KnownZero = Op0Zero & Op1Zero;
     KnownOne = Op0One & Op1One;
@@ -2622,7 +2699,7 @@ void SelectionDAG::computeKnownBits(SDValue Op, APInt &KnownZero,
     break;
 
   default:
-    if (Op.getOpcode() < ISD::BUILTIN_OP_END)
+    if (Opcode < ISD::BUILTIN_OP_END)
       break;
     LLVM_FALLTHROUGH;
   case ISD::INTRINSIC_WO_CHAIN:
@@ -2843,10 +2920,14 @@ unsigned SelectionDAG::ComputeNumSignBits(SDValue Op, unsigned Depth) const {
     Tmp = ComputeNumSignBits(Op.getOperand(0), Depth+1);
     if (Tmp == 1) return 1;  // Early out.
     return std::min(Tmp, Tmp2)-1;
-  case ISD::TRUNCATE:
-    // FIXME: it's tricky to do anything useful for this, but it is an important
-    // case for targets like X86.
+  case ISD::TRUNCATE: {
+    // Check if the sign bits of source go down as far as the truncated value.
+    unsigned NumSrcBits = Op.getOperand(0).getScalarValueSizeInBits();
+    unsigned NumSrcSignBits = ComputeNumSignBits(Op.getOperand(0), Depth + 1);
+    if (NumSrcSignBits > (NumSrcBits - VTBits))
+      return NumSrcSignBits - (NumSrcBits - VTBits);
     break;
+  }
   case ISD::EXTRACT_ELEMENT: {
     const int KnownSign = ComputeNumSignBits(Op.getOperand(0), Depth+1);
     const int BitWidth = Op.getValueSizeInBits();
@@ -3003,6 +3084,16 @@ bool SelectionDAG::haveNoCommonBitsSet(SDValue A, SDValue B) const {
 static SDValue FoldCONCAT_VECTORS(const SDLoc &DL, EVT VT,
                                   ArrayRef<SDValue> Ops,
                                   llvm::SelectionDAG &DAG) {
+  assert(!Ops.empty() && "Can't concatenate an empty list of vectors!");
+  assert(llvm::all_of(Ops,
+                      [Ops](SDValue Op) {
+                        return Ops[0].getValueType() == Op.getValueType();
+                      }) &&
+         "Concatenation of vectors with inconsistent value types!");
+  assert((Ops.size() * Ops[0].getValueType().getVectorNumElements()) ==
+             VT.getVectorNumElements() &&
+         "Incorrect element count in vector concatenation!");
+
   if (Ops.size() == 1)
     return Ops[0];
 
@@ -3036,7 +3127,7 @@ static SDValue FoldCONCAT_VECTORS(const SDLoc &DL, EVT VT,
                ? DAG.getZExtOrTrunc(Op, DL, SVT)
                : DAG.getSExtOrTrunc(Op, DL, SVT);
 
-  return DAG.getNode(ISD::BUILD_VECTOR, DL, VT, Elts);
+  return DAG.getBuildVector(VT, DL, Elts);
 }
 
 /// Gets or creates the specified node.
@@ -3494,25 +3585,22 @@ SDValue SelectionDAG::FoldConstantArithmetic(unsigned Opcode, const SDLoc &DL,
   EVT SVT = VT.getScalarType();
   SmallVector<SDValue, 4> Outputs;
   for (unsigned I = 0, E = BV1->getNumOperands(); I != E; ++I) {
-    ConstantSDNode *V1 = dyn_cast<ConstantSDNode>(BV1->getOperand(I));
-    ConstantSDNode *V2 = dyn_cast<ConstantSDNode>(BV2->getOperand(I));
-    if (!V1 || !V2) // Not a constant, bail.
-      return SDValue();
-
-    if (V1->isOpaque() || V2->isOpaque())
-      return SDValue();
+    SDValue V1 = BV1->getOperand(I);
+    SDValue V2 = BV2->getOperand(I);
 
     // Avoid BUILD_VECTOR nodes that perform implicit truncation.
-    // FIXME: This is valid and could be handled by truncating the APInts.
+    // FIXME: This is valid and could be handled by truncation.
     if (V1->getValueType(0) != SVT || V2->getValueType(0) != SVT)
       return SDValue();
 
     // Fold one vector element.
-    std::pair<APInt, bool> Folded = FoldValue(Opcode, V1->getAPIntValue(),
-                                              V2->getAPIntValue());
-    if (!Folded.second)
+    SDValue ScalarResult = getNode(Opcode, DL, SVT, V1, V2);
+
+    // Scalar folding only succeeded if the result is a constant or UNDEF.
+    if (!ScalarResult.isUndef() && ScalarResult.getOpcode() != ISD::Constant &&
+        ScalarResult.getOpcode() != ISD::ConstantFP)
       return SDValue();
-    Outputs.push_back(getConstant(Folded.first, DL, SVT));
+    Outputs.push_back(ScalarResult);
   }
 
   assert(VT.getVectorNumElements() == Outputs.size() &&
@@ -4144,6 +4232,13 @@ SDValue SelectionDAG::getNode(unsigned Opcode, const SDLoc &DL, EVT VT,
     break;
   case ISD::VECTOR_SHUFFLE:
     llvm_unreachable("should use getVectorShuffle constructor!");
+  case ISD::INSERT_VECTOR_ELT: {
+    ConstantSDNode *N3C = dyn_cast<ConstantSDNode>(N3);
+    // INSERT_VECTOR_ELT into out-of-bounds element is an UNDEF
+    if (N3C && N3C->getZExtValue() >= N1.getValueType().getVectorNumElements())
+      return getUNDEF(VT);
+    break;
+  }
   case ISD::INSERT_SUBVECTOR: {
     SDValue Index = N3;
     if (VT.isSimple() && N1.getValueType().isSimple()
@@ -7067,8 +7162,8 @@ SDValue SelectionDAG::UnrollVectorOp(SDNode *N, unsigned ResNE) {
   for (; i < ResNE; ++i)
     Scalars.push_back(getUNDEF(EltVT));
 
-  return getNode(ISD::BUILD_VECTOR, dl,
-                 EVT::getVectorVT(*getContext(), EltVT, ResNE), Scalars);
+  EVT VecVT = EVT::getVectorVT(*getContext(), EltVT, ResNE);
+  return getBuildVector(VecVT, dl, Scalars);
 }
 
 bool SelectionDAG::areNonVolatileConsecutiveLoads(LoadSDNode *LD,

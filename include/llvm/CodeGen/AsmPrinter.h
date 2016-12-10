@@ -149,6 +149,9 @@ public:
   DwarfDebug *getDwarfDebug() { return DD; }
   DwarfDebug *getDwarfDebug() const { return DD; }
 
+  uint16_t getDwarfVersion() const;
+  void setDwarfVersion(uint16_t Version);
+
   bool isPositionIndependent() const;
 
   /// Return true if assembly output should contain comments.
@@ -464,10 +467,6 @@ public:
 
   /// Get the value for DW_AT_APPLE_isa. Zero if no isa encoding specified.
   virtual unsigned getISAEncoding() { return 0; }
-
-  /// EmitDwarfRegOp - Emit a dwarf register operation.
-  virtual void EmitDwarfRegOp(ByteStreamer &BS,
-                              const MachineLocation &MLoc) const;
 
   //===------------------------------------------------------------------===//
   // Dwarf Lowering Routines

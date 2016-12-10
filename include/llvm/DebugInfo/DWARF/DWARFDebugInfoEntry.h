@@ -15,6 +15,7 @@
 #include "llvm/DebugInfo/DWARF/DWARFAbbreviationDeclaration.h"
 #include "llvm/DebugInfo/DWARF/DWARFDebugRangeList.h"
 #include "llvm/Support/DataTypes.h"
+#include "llvm/Support/Dwarf.h"
 
 namespace llvm {
 
@@ -52,7 +53,10 @@ public:
   bool extractFast(const DWARFUnit &U, uint32_t *OffsetPtr,
                    const DataExtractor &DebugInfoData, uint32_t UEndOffset);
 
-  uint32_t getTag() const { return AbbrevDecl ? AbbrevDecl->getTag() : 0; }
+  dwarf::Tag getTag() const {
+    return AbbrevDecl ? AbbrevDecl->getTag() : dwarf::DW_TAG_null;
+  }
+
   bool isNULL() const { return AbbrevDecl == nullptr; }
 
   /// Returns true if DIE represents a subprogram (not inlined).
@@ -100,6 +104,10 @@ public:
   uint64_t getAttributeValueAsAddress(const DWARFUnit *U, 
                                       dwarf::Attribute Attr,
                                       uint64_t FailValue) const;
+
+  int64_t getAttributeValueAsSignedConstant(const DWARFUnit *U,
+                                            dwarf::Attribute Attr,
+                                            int64_t FailValue) const;
 
   uint64_t getAttributeValueAsUnsignedConstant(const DWARFUnit *U,
                                                dwarf::Attribute Attr,

@@ -205,7 +205,9 @@ bool AVRDAGToDAGISel::SelectInlineAsmMemoryOperand(const SDValue &Op,
                                                    std::vector<SDValue> &OutOps) {
   // Yes hardcoded 'm' symbol. Just because it also has been hardcoded in
   // SelectionDAGISel (callee for this method).
-  assert(ConstraintCode == 'm' && "Unexpected asm memory constraint");
+  assert(ConstraintCode == InlineAsm::Constraint_m ||
+         ConstraintCode == InlineAsm::Constraint_Q &&
+      "Unexpected asm memory constraint");
 
   MachineRegisterInfo &RI = MF->getRegInfo();
   const AVRSubtarget &STI = MF->getSubtarget<AVRSubtarget>();
@@ -328,7 +330,8 @@ template <> bool AVRDAGToDAGISel::select<ISD::STORE>(SDNode *N) {
   SDValue BasePtr = ST->getBasePtr();
 
   // Early exit when the base pointer is a frame index node or a constant.
-  if (isa<FrameIndexSDNode>(BasePtr) || isa<ConstantSDNode>(BasePtr)) {
+  if (isa<FrameIndexSDNode>(BasePtr) || isa<ConstantSDNode>(BasePtr) ||
+      BasePtr.isUndef()) {
     return false;
   }
 
@@ -365,6 +368,8 @@ template <> bool AVRDAGToDAGISel::select<ISD::LOAD>(SDNode *N) {
     // Check if the opcode can be converted into an indexed load.
     return selectIndexedLoad(N);
   }
+
+  assert(Subtarget->hasLPM() && "cannot load from program memory on this mcu");
 
   // This is a flash memory load, move the pointer into R31R30 and emit
   // the lpm instruction.
