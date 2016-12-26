@@ -2085,7 +2085,6 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
     // Remember how many outgoing edges there are to every successor.
     SmallDenseMap<BasicBlock *, unsigned, 16> SwitchEdges;
 
-    bool MultipleEdgesOneReachable = false;
     Value *SwitchCond = SI->getCondition();
     Value *CondEvaluated = findConditionEquivalence(SwitchCond, B);
     // See if we were able to turn this switch statement into a constant.
