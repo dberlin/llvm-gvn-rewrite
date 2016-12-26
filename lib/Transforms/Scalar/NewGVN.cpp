@@ -547,10 +547,10 @@ PHIExpression *NewGVN::createPHIExpression(Instruction *I) {
     if (I->getOperand(i) != I) {
       const BasicBlockEdge BBE(B, PhiBlock);
       auto Operand = lookupOperandLeader(I->getOperand(i), I, BBE);
-      E->ops_push_back(Operand.first);
+      E->op_push_back(Operand.first);
       UsedEquiv |= Operand.second;
     } else {
-      E->ops_push_back(I->getOperand(i));
+      E->op_push_back(I->getOperand(i));
     }
   }
   E->setUsedEquivalence(UsedEquiv);
@@ -575,7 +575,7 @@ bool NewGVN::setBasicExpressionInfo(Instruction *I, BasicExpression *E,
     UsedEquiv |= Operand.second;
     if (!isa<Constant>(Operand.first))
       AllConstant = false;
-    E->ops_push_back(Operand.first);
+    E->op_push_back(Operand.first);
   }
   E->setUsedEquivalence(UsedEquiv);
   return AllConstant;
@@ -621,11 +621,11 @@ const Expression *NewGVN::createBinaryExpression(unsigned Opcode, Type *T,
   bool UsedEquiv = false;
   auto BinaryLeader = lookupOperandLeader(Arg1, nullptr, B);
   UsedEquiv |= BinaryLeader.second;
-  E->ops_push_back(BinaryLeader.first);
+  E->op_push_back(BinaryLeader.first);
 
   BinaryLeader = lookupOperandLeader(Arg2, nullptr, B);
   UsedEquiv |= BinaryLeader.second;
-  E->ops_push_back(BinaryLeader.first);
+  E->op_push_back(BinaryLeader.first);
 
   Value *V = SimplifyBinOp(Opcode, E->getOperand(0), E->getOperand(1), *DL, TLI,
                            DT, AC);
@@ -748,7 +748,7 @@ const Expression *NewGVN::createExpression(Instruction *I,
       return SimplifiedE;
   } else if (isa<GetElementPtrInst>(I)) {
     Value *V = SimplifyGEPInst(E->getType(),
-                               ArrayRef<Value *>(E->ops_begin(), E->ops_end()),
+                               ArrayRef<Value *>(E->op_begin(), E->op_end()),
                                *DL, TLI, DT, AC);
     if (const Expression *SimplifiedE = checkSimplificationResults(E, I, V))
       return SimplifiedE;
@@ -780,7 +780,7 @@ NewGVN::createAggregateValueExpression(Instruction *I, const BasicBlock *B) {
     E->allocateIntOperands(ExpressionAllocator);
 
     for (auto &Index : II->indices())
-      E->int_ops_push_back(Index);
+      E->int_op_push_back(Index);
     return E;
 
   } else if (auto *EI = dyn_cast<ExtractValueInst>(I)) {
@@ -790,7 +790,7 @@ NewGVN::createAggregateValueExpression(Instruction *I, const BasicBlock *B) {
     E->allocateIntOperands(ExpressionAllocator);
 
     for (auto &Index : EI->indices())
-      E->int_ops_push_back(Index);
+      E->int_op_push_back(Index);
     return E;
   }
   llvm_unreachable("Unhandled type of aggregate value operation");
@@ -906,7 +906,7 @@ LoadExpression *NewGVN::createLoadExpression(Type *LoadType, Value *PointerOp,
   // Give store and loads same opcode so they value number together.
   E->setOpcode(0);
   auto Operand = lookupOperandLeader(PointerOp, LI, B);
-  E->ops_push_back(Operand.first);
+  E->op_push_back(Operand.first);
   if (LI)
     E->setAlignment(LI->getAlignment());
   E->setUsedEquivalence(Operand.second);
@@ -946,7 +946,7 @@ const StoreExpression *NewGVN::createStoreExpression(StoreInst *SI,
   // Give store and loads same opcode so they value number together.
   E->setOpcode(0);
   auto Operand = lookupOperandLeader(SI->getPointerOperand(), SI, B);
-  E->ops_push_back(Operand.first);
+  E->op_push_back(Operand.first);
   E->setUsedEquivalence(Operand.second);
 
   // TODO: Value number heap versions. We may be able to discover
@@ -1409,7 +1409,7 @@ void NewGVN::valueNumberMemoryPhi(MemoryPhi *MP) {
 const Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
                                                        const BasicBlock *B) {
   PHIExpression *E = cast<PHIExpression>(createPHIExpression(I));
-  if (E->ops_empty()) {
+  if (E->op_empty()) {
     DEBUG(dbgs() << "Simplified PHI node " << *I << " to undef"
                  << "\n");
     E->deallocateOperands(ArgRecycler);
