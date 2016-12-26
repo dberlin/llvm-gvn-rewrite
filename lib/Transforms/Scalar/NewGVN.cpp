@@ -428,7 +428,7 @@ private:
   void processOutgoingEdges(TerminatorInst *, BasicBlock *);
   void propagateChangeInEdge(BasicBlock *);
   bool propagateEquality(Value *, Value *, bool, const BasicBlockEdge &);
-  bool isOnlyReachableViaThisEdge(const BasicBlockEdge &);
+  bool isOnlyReachableViaThisEdge(const BasicBlockEdge &) const;
 
   void markDominatedSingleUserEquivalences(CongruenceClass *, Value *, Value *,
                                            bool, const BasicBlockEdge &);
@@ -1656,7 +1656,7 @@ unsigned NewGVN::replaceAllDominatedUsesWith(Value *From, Value *To,
 // There is an edge from 'Src' to 'Dst'.  Return true if every path from
 // the entry block to 'Dst' passes via this edge.  In particular 'Dst'
 // must not be reachable via another edge from 'Src'.
-bool NewGVN::isOnlyReachableViaThisEdge(const BasicBlockEdge &E) {
+bool NewGVN::isOnlyReachableViaThisEdge(const BasicBlockEdge &E) const {
 
   // While in theory it is interesting to consider the case in which Dst has
   // more than one predecessor, because Dst might be part of a loop which is
