@@ -1,4 +1,4 @@
-//===- GVNExpression.h - GVN Expression classes -------*- C++ -*-===//
+//======- GVNExpression.h - GVN Expression classes -------*- C++ -*-==-------=//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -12,8 +12,10 @@
 /// classes
 ///
 //===----------------------------------------------------------------------===//
+
 #ifndef LLVM_TRANSFORMS_SCALAR_GVNEXPRESSION_H
 #define LLVM_TRANSFORMS_SCALAR_GVNEXPRESSION_H
+
 #include "llvm/ADT/Hashing.h"
 #include "llvm/IR/Constant.h"
 #include "llvm/IR/Instructions.h"
@@ -30,72 +32,73 @@ class MemoryAccess;
 namespace GVNExpression {
 
 enum ExpressionType {
-  ExpressionTypeBase,
-  ExpressionTypeConstant,
-  ExpressionTypeVariable,
-  ExpressionTypeBasicStart,
-  ExpressionTypeBasic,
-  ExpressionTypeCall,
-  ExpressionTypeAggregateValue,
-  ExpressionTypePhi,
-  ExpressionTypeLoad,
-  ExpressionTypeCoercibleLoad,
-  ExpressionTypeStore,
-  ExpressionTypeBasicEnd
+  ET_Base,
+  ET_Constant,
+  ET_Variable,
+  ET_BasicStart,
+  ET_Basic,
+  ET_Call,
+  ET_AggregateValue,
+  ET_Phi,
+  ET_Load,
+  ET_CoercibleLoad,
+  ET_Store,
+  ET_BasicEnd
 };
+
 class Expression {
-
 private:
-  void operator=(const Expression &) = delete;
-  Expression(const Expression &) = delete;
-
-protected:
   ExpressionType EType;
-  unsigned int Opcode;
+  unsigned Opcode;
   bool UsedEquivalence;
-
+  
 public:
-  unsigned int getOpcode() const { return Opcode; }
+  Expression(const Expression &) = delete;
+  Expression(ExpressionType ET = ET_Base, unsigned O = ~2U)
+      : EType(ET), Opcode(O), UsedEquivalence(false) {}
+  void operator=(const Expression &) = delete;
+  virtual ~Expression();
 
-  void setOpcode(unsigned int opcode) { Opcode = opcode; }
-
-  ExpressionType getExpressionType() const { return EType; }
-  /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const Expression *) { return true; }
-
-  Expression(unsigned int o = ~2U)
-      : EType(ExpressionTypeBase), Opcode(o), UsedEquivalence(false) {}
-  Expression(ExpressionType etype, unsigned int o = ~2U)
-      : EType(etype), Opcode(o), UsedEquivalence(false) {}
-
-  virtual ~Expression() {}
+  static unsigned getEmptyKey() { return ~0U; }
+  static unsigned getTombstoneKey() { return ~1U; }
 
   bool operator==(const Expression &Other) const {
-    if (Opcode != Other.Opcode)
+    if (getOpcode() != Other.getOpcode())
       return false;
-    if (Opcode == ~0U || Opcode == ~1U)
+    if (getOpcode() == getEmptyKey() || getOpcode() == getTombstoneKey())
       return true;
-    // Compare etype for anything but load and store
-    if (getExpressionType() != ExpressionTypeLoad &&
-        getExpressionType() != ExpressionTypeStore &&
+    // Compare the expression type for anything but load and store.
+    // For load and store we set the opcode to zero.
+    // This is needed for load coercion.
+    if (getExpressionType() != ET_Load &&
+        getExpressionType() != ET_Store &&
         getExpressionType() != Other.getExpressionType())
       return false;
 
     return equals(Other);
   }
-  bool usedEquivalence() const { return UsedEquivalence; }
+  bool getUsedEquivalence() const { return UsedEquivalence; }
   void setUsedEquivalence(bool V) { UsedEquivalence = V; }
 
-  virtual bool equals(const Expression &other) const { return true; }
+  virtual bool equals(const Expression &Other) const { return true; }
+
+  unsigned getOpcode() const { return Opcode; }
+  void setOpcode(unsigned opcode) { Opcode = opcode; }
+  ExpressionType getExpressionType() const { return EType; }
 
   virtual hash_code getHashValue() const {
-    return hash_combine(EType, Opcode, UsedEquivalence);
+  //FIXME: Verify whether usedEquivalence should be part of the hash.
+    return hash_combine(getExpressionType(), getOpcode());
   }
-  virtual void printInternal(raw_ostream &OS, bool printEType) const {
-    if (printEType)
-      OS << "etype = " << EType << ",";
-    OS << "opcode = " << Opcode << ", ";
-    OS << "UsedEquivalence = " << UsedEquivalence << ", ";
+
+  //
+  // Debugging support
+  //
+  virtual void printInternal(raw_ostream &OS, bool PrintEType) const {
+    if (PrintEType)
+      OS << "etype = " << getExpressionType() << ",";
+    OS << "opcode = " << getOpcode() << ", ";
+      OS << "UsedEquivalence = " << getUsedEquivalence() << ", ";
   }
 
   void print(raw_ostream &OS) const {
@@ -105,6 +108,7 @@ public:
   }
   void dump() const { print(dbgs()); }
 };
+
 inline raw_ostream &operator<<(raw_ostream &OS, const Expression &E) {
   E.print(OS);
   return OS;
@@ -112,65 +116,68 @@ inline raw_ostream &operator<<(raw_ostream &OS, const Expression &E) {
 
 class BasicExpression : public Expression {
 private:
-  void operator=(const BasicExpression &) = delete;
-  BasicExpression(const BasicExpression &) = delete;
-  BasicExpression() = delete;
   typedef ArrayRecycler<Value *> RecyclerType;
   typedef RecyclerType::Capacity RecyclerCapacity;
-
-protected:
   Value **Operands;
-  unsigned int MaxOperands;
-  unsigned int NumOperands;
+  unsigned MaxOperands;
+  unsigned NumOperands;
   Type *ValueType;
 
 public:
-  typedef Value **op_iterator;
-  typedef Value *const *const_ops_iterator;
+  static bool classof(const Expression *EB) {
+    ExpressionType ET = EB->getExpressionType();
+    return ET > ET_BasicStart && ET < ET_BasicEnd;
+  }
+
+  BasicExpression(unsigned NumOperands)
+      : BasicExpression(NumOperands, ET_Basic) {}
+  BasicExpression(unsigned NumOperands, ExpressionType ET)
+      : Expression(ET), Operands(nullptr), MaxOperands(NumOperands),
+        NumOperands(0), ValueType(nullptr) {}
+  virtual ~BasicExpression() override;
+  void operator=(const BasicExpression &) = delete;
+  BasicExpression(const BasicExpression &) = delete;
+  BasicExpression() = delete;
 
   /// \brief Swap two operands. Used during GVN to put commutative operands in
   /// order.
-  inline void swapOperands(unsigned First, unsigned Second) {
+  void swapOperands(unsigned First, unsigned Second) {
     std::swap(Operands[First], Operands[Second]);
   }
-  inline Value *getOperand(unsigned N) const {
+
+  Value *getOperand(unsigned N) const {
     assert(Operands && "Operands not allocated");
     assert(N < NumOperands && "Operand out of range");
     return Operands[N];
   }
 
-  inline void setOperand(unsigned N, Value *V) {
+  void setOperand(unsigned N, Value *V) {
     assert(Operands && "Operands not allocated before setting");
     assert(N < NumOperands && "Operand out of range");
     Operands[N] = V;
   }
-  inline unsigned int getNumOperands() const { return NumOperands; }
 
-  inline op_iterator ops_begin() { return Operands; }
-  inline op_iterator ops_end() { return Operands + NumOperands; }
-  inline const_ops_iterator ops_begin() const { return Operands; }
-  inline const_ops_iterator ops_end() const { return Operands + NumOperands; }
-  inline iterator_range<op_iterator> operands() {
+  unsigned getNumOperands() const { return NumOperands; }
+
+  typedef Value **op_iterator;
+  typedef Value *const *const_ops_iterator;
+  op_iterator ops_begin() { return Operands; }
+  op_iterator ops_end() { return Operands + NumOperands; }
+  const_ops_iterator ops_begin() const { return Operands; }
+  const_ops_iterator ops_end() const { return Operands + NumOperands; }
+  iterator_range<op_iterator> operands() {
     return iterator_range<op_iterator>(ops_begin(), ops_end());
   }
-
-  inline iterator_range<const_ops_iterator> operands() const {
+  iterator_range<const_ops_iterator> operands() const {
     return iterator_range<const_ops_iterator>(ops_begin(), ops_end());
   }
 
-  inline void ops_push_back(Value *Arg) {
+  void ops_push_back(Value *Arg) {
     assert(NumOperands < MaxOperands && "Tried to add too many operands");
     assert(Operands && "Operandss not allocated before pushing");
     Operands[NumOperands++] = Arg;
   }
-  inline bool ops_empty() const { return getNumOperands() == 0; }
-
-  /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const BasicExpression *) { return true; }
-  static inline bool classof(const Expression *EB) {
-    ExpressionType et = EB->getExpressionType();
-    return et > ExpressionTypeBasicStart && et < ExpressionTypeBasicEnd;
-  }
+  bool ops_empty() const { return getNumOperands() == 0; }
 
   void allocateOperands(RecyclerType &Recycler, BumpPtrAllocator &Allocator) {
     assert(!Operands && "Operands already allocated");
@@ -181,22 +188,14 @@ public:
   }
 
   void setType(Type *T) { ValueType = T; }
-
   Type *getType() const { return ValueType; }
 
-  BasicExpression(unsigned int NumOperands)
-      : BasicExpression(NumOperands, ExpressionTypeBasic) {}
-  BasicExpression(unsigned int NumOperands, ExpressionType ET)
-      : Expression(ET), Operands(nullptr), MaxOperands(NumOperands),
-        NumOperands(0), ValueType(nullptr) {}
-
-  virtual ~BasicExpression() {}
-
-  virtual bool equals(const Expression &Other) const {
-    const BasicExpression &OE = cast<BasicExpression>(Other);
-    if (Opcode != OE.Opcode)
+  virtual bool equals(const Expression &Other) const override {
+    if (getOpcode() != Other.getOpcode())
       return false;
-    if (ValueType != OE.ValueType)
+
+    const auto &OE = cast<BasicExpression>(Other);
+    if (getType() != OE.getType())
       return false;
     if (NumOperands != OE.NumOperands)
       return false;
@@ -204,8 +203,17 @@ public:
       return false;
     return true;
   }
-  virtual void printInternal(raw_ostream &OS, bool printEType) const {
-    if (printEType)
+
+  virtual hash_code getHashValue() const override {
+    return hash_combine(getExpressionType(), getOpcode(), ValueType,
+                        hash_combine_range(ops_begin(), ops_end()));
+  }
+
+  //
+  // Debugging support
+  //
+  virtual void printInternal(raw_ostream &OS, bool PrintEType) const override {
+    if (PrintEType)
       OS << "ExpressionTypeBasic, ";
 
     this->Expression::printInternal(OS, false);
@@ -217,72 +225,72 @@ public:
     }
     OS << "} ";
   }
-
-  virtual hash_code getHashValue() const {
-    return hash_combine(EType, Opcode, ValueType,
-                        hash_combine_range(ops_begin(), ops_end()));
-  }
 };
+
 class CallExpression final : public BasicExpression {
 private:
-  void operator=(const CallExpression &) = delete;
-  CallExpression(const CallExpression &) = delete;
-  CallExpression() = delete;
-
-protected:
   CallInst *Call;
   MemoryAccess *DefiningAccess;
 
 public:
-  /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const CallExpression *) { return true; }
-  static inline bool classof(const Expression *EB) {
-    return EB->getExpressionType() == ExpressionTypeCall;
+  static bool classof(const Expression *EB) {
+    return EB->getExpressionType() == ET_Call;
   }
-  CallExpression(unsigned int NumOperands, CallInst *C, MemoryAccess *DA)
-      : BasicExpression(NumOperands, ExpressionTypeCall), Call(C),
+
+  CallExpression(unsigned NumOperands, CallInst *C, MemoryAccess *DA)
+      : BasicExpression(NumOperands, ET_Call), Call(C),
         DefiningAccess(DA) {}
+  void operator=(const CallExpression &) = delete;
+  CallExpression(const CallExpression &) = delete;
+  CallExpression() = delete;
+  virtual ~CallExpression() override;
 
-  virtual ~CallExpression() {}
-
-  virtual bool equals(const Expression &Other) const {
+  virtual bool equals(const Expression &Other) const override {
     if (!this->BasicExpression::equals(Other))
       return false;
-    const CallExpression &OE = cast<CallExpression>(Other);
-    if (DefiningAccess != OE.DefiningAccess)
-      return false;
-    return true;
+    const auto &OE = cast<CallExpression>(Other);
+    return DefiningAccess == OE.DefiningAccess;
   }
 
-  virtual hash_code getHashValue() const {
+  virtual hash_code getHashValue() const override {
     return hash_combine(this->BasicExpression::getHashValue(), DefiningAccess);
   }
 
-  virtual void printInternal(raw_ostream &OS, bool printEType) const {
-    if (printEType)
+  //
+  // Debugging support
+  //
+  virtual void printInternal(raw_ostream &OS, bool PrintEType) const override {
+    if (PrintEType)
       OS << "ExpressionTypeCall, ";
     this->BasicExpression::printInternal(OS, false);
     OS << " represents call at " << Call;
   }
 };
+
 class LoadExpression : public BasicExpression {
 private:
-  void operator=(const LoadExpression &) = delete;
-  LoadExpression(const LoadExpression &) = delete;
-  LoadExpression() = delete;
-
-protected:
   LoadInst *Load;
   MemoryAccess *DefiningAccess;
   unsigned Alignment;
 
-  LoadExpression(enum ExpressionType EType, unsigned int NumOperands,
+public:
+  static bool classof(const Expression *EB) {
+    return EB->getExpressionType() >= ET_Load
+        && EB->getExpressionType() <= ET_CoercibleLoad;
+  }
+
+  LoadExpression(unsigned NumOperands, LoadInst *L, MemoryAccess *DA)
+      : LoadExpression(ET_Load, NumOperands, L, DA) {}
+  LoadExpression(enum ExpressionType EType, unsigned NumOperands,
                  LoadInst *L, MemoryAccess *DA)
       : BasicExpression(NumOperands, EType), Load(L), DefiningAccess(DA) {
     Alignment = L ? L->getAlignment() : 0;
   }
+  void operator=(const LoadExpression &) = delete;
+  LoadExpression(const LoadExpression &) = delete;
+  LoadExpression() = delete;
+  virtual ~LoadExpression() override;
 
-public:
   LoadInst *getLoadInst() const { return Load; }
   void setLoadInst(LoadInst *L) { Load = L; }
 
@@ -291,33 +299,25 @@ public:
   unsigned getAlignment() const { return Alignment; }
   void setAlignment(unsigned Align) { Alignment = Align; }
 
-  /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const LoadExpression *) { return true; }
-  static inline bool classof(const Expression *EB) {
-    return EB->getExpressionType() >= ExpressionTypeLoad &&
-           EB->getExpressionType() <= ExpressionTypeCoercibleLoad;
-  }
+  virtual bool equals(const Expression &Other) const override;
 
-  LoadExpression(unsigned int NumOperands, LoadInst *L, MemoryAccess *DA)
-      : LoadExpression(ExpressionTypeLoad, NumOperands, L, DA) {}
-
-  virtual ~LoadExpression() {}
-
-  virtual bool equals(const Expression &Other) const;
-
-  virtual hash_code getHashValue() const {
-    return hash_combine(Opcode, ValueType, DefiningAccess,
+  virtual hash_code getHashValue() const override {
+    return hash_combine(getOpcode(), getType(), DefiningAccess,
                         hash_combine_range(ops_begin(), ops_end()));
   }
 
-  virtual void printInternal(raw_ostream &OS, bool printEType) const {
-    if (printEType)
+  //
+  // Debugging support
+  //
+  virtual void printInternal(raw_ostream &OS, bool PrintEType) const override {
+    if (PrintEType)
       OS << "ExpressionTypeLoad, ";
     this->BasicExpression::printInternal(OS, false);
     OS << " represents Load at " << Load;
     OS << " with DefiningAccess " << DefiningAccess;
   }
 };
+
 class CoercibleLoadExpression final : public LoadExpression {
 private:
   void operator=(const CoercibleLoadExpression &) = delete;
@@ -336,14 +336,13 @@ public:
   void setSrc(Value *S) { Src = S; }
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const CoercibleLoadExpression *) { return true; }
   static inline bool classof(const Expression *EB) {
-    return EB->getExpressionType() == ExpressionTypeCoercibleLoad;
+    return EB->getExpressionType() == ET_CoercibleLoad;
   }
 
   CoercibleLoadExpression(unsigned int NumOperands, LoadInst *L,
                           MemoryAccess *DA, unsigned int O, Value *S)
-      : LoadExpression(ExpressionTypeCoercibleLoad, NumOperands, L, DA),
+      : LoadExpression(ET_CoercibleLoad, NumOperands, L, DA),
         Offset(O), Src(S) {}
 
   virtual ~CoercibleLoadExpression() {}
@@ -356,7 +355,7 @@ public:
       return false;
 
     const CoercibleLoadExpression &OE = cast<CoercibleLoadExpression>(Other);
-    if (ValueType != OE.ValueType)
+    if (getType() != OE.getType())
       return false;
     if (Src != OE.Src)
       return false;
@@ -366,105 +365,101 @@ public:
     return true;
   }
   virtual hash_code getHashValue() const {
-    return hash_combine(ValueType, Offset, Src);
+    return hash_combine(getType(), Offset, Src);
   }
   virtual void printInternal(raw_ostream &OS, bool printEType) const {
     if (printEType)
       OS << "ExpressionTypeCoercibleLoad, ";
     this->LoadExpression::printInternal(OS, false);
-    OS << " represents CoercibleLoad at " << Load << " with Src " << Src
+    OS << " represents CoercibleLoad at " << getLoadInst() << " with Src " << Src
        << " and offset " << Offset;
   }
 };
-
 class StoreExpression final : public BasicExpression {
 private:
-  void operator=(const StoreExpression &) = delete;
-  StoreExpression(const StoreExpression &) = delete;
-  StoreExpression() = delete;
-
-protected:
   StoreInst *Store;
   MemoryAccess *DefiningAccess;
 
 public:
+  static bool classof(const Expression *EB) {
+    return EB->getExpressionType() == ET_Store;
+  }
+
+  StoreExpression(unsigned NumOperands, StoreInst *S, MemoryAccess *DA)
+      : BasicExpression(NumOperands, ET_Store), Store(S),
+        DefiningAccess(DA) {}
+  void operator=(const StoreExpression &) = delete;
+  StoreExpression(const StoreExpression &) = delete;
+  StoreExpression() = delete;
+  virtual ~StoreExpression() override;
+
   StoreInst *getStoreInst() const { return Store; }
   MemoryAccess *getDefiningAccess() const { return DefiningAccess; }
 
-  /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const StoreExpression *) { return true; }
-  static inline bool classof(const Expression *EB) {
-    return EB->getExpressionType() == ExpressionTypeStore;
+  virtual bool equals(const Expression &Other) const override;
+
+  virtual hash_code getHashValue() const override {
+    return hash_combine(getOpcode(), getType(), DefiningAccess,
+                        hash_combine_range(ops_begin(), ops_end()));
   }
-  StoreExpression(unsigned int NumOperands, StoreInst *S, MemoryAccess *DA)
-      : BasicExpression(NumOperands, ExpressionTypeStore), Store(S),
-        DefiningAccess(DA) {}
 
-  virtual ~StoreExpression() {}
-
-  virtual bool equals(const Expression &Other) const;
-
-  virtual void printInternal(raw_ostream &OS, bool printEType) const {
-    if (printEType)
+  //
+  // Debugging support
+  //
+  virtual void printInternal(raw_ostream &OS, bool PrintEType) const override {
+    if (PrintEType)
       OS << "ExpressionTypeStore, ";
     this->BasicExpression::printInternal(OS, false);
     OS << " represents Store at " << Store;
-  }
-
-  virtual hash_code getHashValue() const {
-    return hash_combine(Opcode, ValueType, DefiningAccess,
-                        hash_combine_range(ops_begin(), ops_end()));
   }
 };
 
 class AggregateValueExpression final : public BasicExpression {
 private:
+  unsigned MaxIntOperands;
+  unsigned NumIntOperands;
+  unsigned *IntOperands;
+
+public:
+  static bool classof(const Expression *EB) {
+    return EB->getExpressionType() == ET_AggregateValue;
+  }
+
+  AggregateValueExpression(unsigned NumOperands,
+                           unsigned NumIntOperands)
+      : BasicExpression(NumOperands, ET_AggregateValue),
+        MaxIntOperands(NumIntOperands), NumIntOperands(0),
+        IntOperands(nullptr) {}
+
   void operator=(const AggregateValueExpression &) = delete;
   AggregateValueExpression(const AggregateValueExpression &) = delete;
   AggregateValueExpression() = delete;
+  virtual ~AggregateValueExpression() override;
 
-  unsigned int MaxIntOperands;
-  unsigned int NumIntOperands;
-  unsigned int *IntOperands;
+  typedef unsigned *int_arg_iterator;
+  typedef const unsigned *const_int_arg_iterator;
 
-public:
-  typedef unsigned int *int_arg_iterator;
-  typedef const unsigned int *const_int_arg_iterator;
-
-  inline int_arg_iterator int_ops_begin() { return IntOperands; }
-  inline int_arg_iterator int_ops_end() { return IntOperands + NumIntOperands; }
-  inline const_int_arg_iterator int_ops_begin() const { return IntOperands; }
-  inline const_int_arg_iterator int_ops_end() const {
+  int_arg_iterator int_ops_begin() { return IntOperands; }
+  int_arg_iterator int_ops_end() { return IntOperands + NumIntOperands; }
+  const_int_arg_iterator int_ops_begin() const { return IntOperands; }
+  const_int_arg_iterator int_ops_end() const {
     return IntOperands + NumIntOperands;
   }
-  inline unsigned int int_ops_size() const { return NumIntOperands; }
-  inline bool int_ops_empty() const { return NumIntOperands == 0; }
-  inline void int_ops_push_back(unsigned int IntOperand) {
+  unsigned int_ops_size() const { return NumIntOperands; }
+  bool int_ops_empty() const { return NumIntOperands == 0; }
+  void int_ops_push_back(unsigned IntOperand) {
     assert(NumIntOperands < MaxIntOperands &&
            "Tried to add too many int operands");
     assert(IntOperands && "Operands not allocated before pushing");
     IntOperands[NumIntOperands++] = IntOperand;
   }
 
-  /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const AggregateValueExpression *) { return true; }
-  static inline bool classof(const Expression *EB) {
-    return EB->getExpressionType() == ExpressionTypeAggregateValue;
-  }
-
-  AggregateValueExpression(unsigned int NumOperands,
-                           unsigned int NumIntOperands)
-      : BasicExpression(NumOperands, ExpressionTypeAggregateValue),
-        MaxIntOperands(NumIntOperands), NumIntOperands(0),
-        IntOperands(nullptr) {}
-
-  virtual ~AggregateValueExpression() {}
   virtual void allocateIntOperands(BumpPtrAllocator &Allocator) {
     assert(!IntOperands && "Operands already allocated");
-    IntOperands = Allocator.Allocate<unsigned int>(MaxIntOperands);
+    IntOperands = Allocator.Allocate<unsigned>(MaxIntOperands);
   }
 
-  virtual bool equals(const Expression &Other) const {
+  virtual bool equals(const Expression &Other) const override {
     if (!this->BasicExpression::equals(Other))
       return false;
     const AggregateValueExpression &OE = cast<AggregateValueExpression>(Other);
@@ -472,16 +467,19 @@ public:
       return false;
     if (!std::equal(int_ops_begin(), int_ops_end(), OE.int_ops_begin()))
       return false;
-
     return true;
   }
 
-  virtual hash_code getHashValue() const {
+  virtual hash_code getHashValue() const override {
     return hash_combine(this->BasicExpression::getHashValue(),
                         hash_combine_range(int_ops_begin(), int_ops_end()));
   }
-  virtual void printInternal(raw_ostream &OS, bool printEType) const {
-    if (printEType)
+
+  //
+  // Debugging support
+  //
+  virtual void printInternal(raw_ostream &OS, bool PrintEType) const override {
+    if (PrintEType)
       OS << "ExpressionTypeAggregateValue, ";
     this->BasicExpression::printInternal(OS, false);
     OS << ", intoperands = {";
@@ -492,18 +490,23 @@ public:
   }
 };
 
-class PHIExpression : public BasicExpression {
+class PHIExpression final : public BasicExpression {
+private:
+  BasicBlock *BB;
+
 public:
-  /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const PHIExpression *) { return true; }
-  static inline bool classof(const Expression *EB) {
-    return EB->getExpressionType() == ExpressionTypePhi;
+  static bool classof(const Expression *EB) {
+    return EB->getExpressionType() == ET_Phi;
   }
-  BasicBlock *getBB() const { return BB; }
 
-  void setBB(BasicBlock *bb) { BB = bb; }
+  PHIExpression(unsigned NumOperands, BasicBlock *B)
+      : BasicExpression(NumOperands, ET_Phi), BB(B) {}
+  void operator=(const PHIExpression &) = delete;
+  PHIExpression(const PHIExpression &) = delete;
+  PHIExpression() = delete;
+  virtual ~PHIExpression() override;
 
-  virtual bool equals(const Expression &Other) const {
+  virtual bool equals(const Expression &Other) const override {
     if (!this->BasicExpression::equals(Other))
       return false;
     const PHIExpression &OE = cast<PHIExpression>(Other);
@@ -512,103 +515,100 @@ public:
     return true;
   }
 
-  PHIExpression(unsigned int NumOperands, BasicBlock *B)
-      : BasicExpression(NumOperands, ExpressionTypePhi), BB(B) {}
-
-  virtual ~PHIExpression() {}
-
-  virtual hash_code getHashValue() const {
+  virtual hash_code getHashValue() const override {
     return hash_combine(this->BasicExpression::getHashValue(), BB);
   }
-  virtual void printInternal(raw_ostream &OS, bool printEType) const {
-    if (printEType)
+
+  //
+  // Debugging support
+  //
+  virtual void printInternal(raw_ostream &OS, bool PrintEType) const override {
+    if (PrintEType)
       OS << "ExpressionTypePhi, ";
     this->BasicExpression::printInternal(OS, false);
     OS << "bb = " << BB;
   }
-
-private:
-  void operator=(const PHIExpression &) = delete;
-  PHIExpression(const PHIExpression &) = delete;
-  PHIExpression() = delete;
-  BasicBlock *BB;
 };
-class VariableExpression : public Expression {
+
+class VariableExpression final : public Expression {
+private:
+  Value *VariableValue;
+
 public:
-  /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const VariableExpression *) { return true; }
-  static inline bool classof(const Expression *EB) {
-    return EB->getExpressionType() == ExpressionTypeVariable;
+  static bool classof(const Expression *EB) {
+    return EB->getExpressionType() == ET_Variable;
   }
+
+  VariableExpression(Value *V)
+      : Expression(ET_Variable), VariableValue(V) {}
+  void operator=(const VariableExpression &) = delete;
+  VariableExpression(const VariableExpression &) = delete;
+  VariableExpression() = delete;
 
   Value *getVariableValue() const { return VariableValue; }
   void setVariableValue(Value *V) { VariableValue = V; }
-  virtual bool equals(const Expression &Other) const {
+  virtual bool equals(const Expression &Other) const override {
     const VariableExpression &OC = cast<VariableExpression>(Other);
     if (VariableValue != OC.VariableValue)
       return false;
     return true;
   }
 
-  VariableExpression(Value *V)
-      : Expression(ExpressionTypeVariable), VariableValue(V) {}
-  virtual hash_code getHashValue() const {
-    return hash_combine(EType, VariableValue->getType(), VariableValue);
+  virtual hash_code getHashValue() const override {
+    return hash_combine(getExpressionType(), VariableValue->getType(),
+                        VariableValue);
   }
 
-  virtual void printInternal(raw_ostream &OS, bool printEType) const {
-    if (printEType)
+  //
+  // Debugging support
+  //
+  virtual void printInternal(raw_ostream &OS, bool PrintEType) const override {
+    if (PrintEType)
       OS << "ExpressionTypeVariable, ";
     this->Expression::printInternal(OS, false);
     OS << " variable = " << *VariableValue;
   }
-
-private:
-  void operator=(const VariableExpression &) = delete;
-  VariableExpression(const VariableExpression &) = delete;
-  VariableExpression() = delete;
-
-  Value *VariableValue;
 };
-class ConstantExpression : public Expression {
-public:
-  /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const ConstantExpression *) { return true; }
-  static inline bool classof(const Expression *EB) {
-    return EB->getExpressionType() == ExpressionTypeConstant;
-  }
-  Constant *getConstantValue() const { return ConstantValue; }
 
-  void setConstantValue(Constant *V) { ConstantValue = V; }
-  virtual bool equals(const Expression &Other) const {
-    const ConstantExpression &OC = cast<ConstantExpression>(Other);
-    if (ConstantValue != OC.ConstantValue)
-      return false;
-    return true;
+class ConstantExpression final : public Expression {
+private:
+  Constant *ConstantValue;
+
+public:
+  static bool classof(const Expression *EB) {
+    return EB->getExpressionType() == ET_Constant;
   }
 
   ConstantExpression()
-      : Expression(ExpressionTypeConstant), ConstantValue(NULL) {}
-
+      : Expression(ET_Constant), ConstantValue(NULL) {}
   ConstantExpression(Constant *constantValue)
-      : Expression(ExpressionTypeConstant), ConstantValue(constantValue) {}
-  virtual hash_code getHashValue() const {
-    return hash_combine(EType, ConstantValue->getType(), ConstantValue);
+      : Expression(ET_Constant), ConstantValue(constantValue) {}
+  void operator=(const ConstantExpression &) = delete;
+  ConstantExpression(const ConstantExpression &) = delete;
+
+  Constant *getConstantValue() const { return ConstantValue; }
+  void setConstantValue(Constant *V) { ConstantValue = V; }
+
+  virtual bool equals(const Expression &Other) const override {
+    const ConstantExpression &OC = cast<ConstantExpression>(Other);
+    return ConstantValue == OC.ConstantValue;
   }
-  virtual void printInternal(raw_ostream &OS, bool printEType) const {
-    if (printEType)
+
+  virtual hash_code getHashValue() const override {
+    return hash_combine(getExpressionType(), ConstantValue->getType(),
+                        ConstantValue);
+  }
+
+  //
+  // Debugging support
+  //
+  virtual void printInternal(raw_ostream &OS, bool PrintEType) const override {
+    if (PrintEType)
       OS << "ExpressionTypeConstant, ";
     this->Expression::printInternal(OS, false);
     OS << " constant = " << *ConstantValue;
   }
-
-private:
-  void operator=(const ConstantExpression &) = delete;
-  ConstantExpression(const ConstantExpression &) = delete;
-
-  Constant *ConstantValue;
 };
-
 }
 }
 
