@@ -713,9 +713,10 @@ static bool emitDebugValueComment(const MachineInstr *MI, AsmPrinter &AP) {
   OS << V->getName();
 
   const DIExpression *Expr = MI->getDebugExpression();
-  if (Expr->isFragment())
-    OS << " [fragment offset=" << Expr->getFragmentOffsetInBits()
-       << " size=" << Expr->getFragmentSizeInBits() << "]";
+  auto Fragment = Expr->getFragmentInfo();
+  if (Fragment)
+    OS << " [fragment offset=" << Fragment->OffsetInBits
+       << " size=" << Fragment->SizeInBits << "]";
   OS << " <- ";
 
   // The second operand is only an offset if it's an immediate.
@@ -758,7 +759,7 @@ static bool emitDebugValueComment(const MachineInstr *MI, AsmPrinter &AP) {
       // There is no good way to print long double.  Convert a copy to
       // double.  Ah well, it's only a comment.
       bool ignored;
-      APF.convert(APFloat::IEEEdouble, APFloat::rmNearestTiesToEven,
+      APF.convert(APFloat::IEEEdouble(), APFloat::rmNearestTiesToEven,
                   &ignored);
       OS << "(long double) " << APF.convertToDouble();
     }

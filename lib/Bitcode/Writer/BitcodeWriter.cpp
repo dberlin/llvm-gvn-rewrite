@@ -210,6 +210,9 @@ private:
                             SmallVectorImpl<uint64_t> &Record, unsigned Abbrev);
   void writeDIExpression(const DIExpression *N,
                          SmallVectorImpl<uint64_t> &Record, unsigned Abbrev);
+  void writeDIGlobalVariableExpression(const DIGlobalVariableExpression *N,
+                                       SmallVectorImpl<uint64_t> &Record,
+                                       unsigned Abbrev);
   void writeDIObjCProperty(const DIObjCProperty *N,
                            SmallVectorImpl<uint64_t> &Record, unsigned Abbrev);
   void writeDIImportedEntity(const DIImportedEntity *N,
@@ -1674,7 +1677,8 @@ void ModuleBitcodeWriter::writeDITemplateValueParameter(
 void ModuleBitcodeWriter::writeDIGlobalVariable(
     const DIGlobalVariable *N, SmallVectorImpl<uint64_t> &Record,
     unsigned Abbrev) {
-  Record.push_back(N->isDistinct());
+  const uint64_t Version = 1 << 1;
+  Record.push_back((uint64_t)N->isDistinct() | Version);
   Record.push_back(VE.getMetadataOrNullID(N->getScope()));
   Record.push_back(VE.getMetadataOrNullID(N->getRawName()));
   Record.push_back(VE.getMetadataOrNullID(N->getRawLinkageName()));
@@ -1683,7 +1687,7 @@ void ModuleBitcodeWriter::writeDIGlobalVariable(
   Record.push_back(VE.getMetadataOrNullID(N->getType()));
   Record.push_back(N->isLocalToUnit());
   Record.push_back(N->isDefinition());
-  Record.push_back(VE.getMetadataOrNullID(N->getRawExpr()));
+  Record.push_back(/* expr */ 0);
   Record.push_back(VE.getMetadataOrNullID(N->getStaticDataMemberDeclaration()));
   Record.push_back(N->getAlignInBits());
 
@@ -1732,6 +1736,17 @@ void ModuleBitcodeWriter::writeDIExpression(const DIExpression *N,
   Record.append(N->elements_begin(), N->elements_end());
 
   Stream.EmitRecord(bitc::METADATA_EXPRESSION, Record, Abbrev);
+  Record.clear();
+}
+
+void ModuleBitcodeWriter::writeDIGlobalVariableExpression(
+    const DIGlobalVariableExpression *N, SmallVectorImpl<uint64_t> &Record,
+    unsigned Abbrev) {
+  Record.push_back(N->isDistinct());
+  Record.push_back(VE.getMetadataOrNullID(N->getVariable()));
+  Record.push_back(VE.getMetadataOrNullID(N->getExpression()));
+  
+  Stream.EmitRecord(bitc::METADATA_GLOBAL_VAR_EXPR, Record, Abbrev);
   Record.clear();
 }
 
@@ -3271,25 +3286,18 @@ void ModuleBitcodeWriter::writePerModuleFunctionSummaryRecord(
   NameVals.push_back(ValueID);
 
   FunctionSummary *FS = cast<FunctionSummary>(Summary);
+  if (!FS->type_tests().empty())
+    Stream.EmitRecord(bitc::FS_TYPE_TESTS, FS->type_tests());
+
   NameVals.push_back(getEncodedGVSummaryFlags(FS->flags()));
   NameVals.push_back(FS->instCount());
   NameVals.push_back(FS->refs().size());
 
-  unsigned SizeBeforeRefs = NameVals.size();
   for (auto &RI : FS->refs())
     NameVals.push_back(VE.getValueID(RI.getValue()));
-  // Sort the refs for determinism output, the vector returned by FS->refs() has
-  // been initialized from a DenseSet.
-  std::sort(NameVals.begin() + SizeBeforeRefs, NameVals.end());
 
-  std::vector<FunctionSummary::EdgeTy> Calls = FS->calls();
-  std::sort(Calls.begin(), Calls.end(),
-            [this](const FunctionSummary::EdgeTy &L,
-                   const FunctionSummary::EdgeTy &R) {
-              return getValueId(L.first) < getValueId(R.first);
-            });
   bool HasProfileData = F.getEntryCount().hasValue();
-  for (auto &ECI : Calls) {
+  for (auto &ECI : FS->calls()) {
     NameVals.push_back(getValueId(ECI.first));
     if (HasProfileData)
       NameVals.push_back(static_cast<uint8_t>(ECI.second.Hotness));
@@ -3539,6 +3547,9 @@ void IndexBitcodeWriter::writeCombinedGlobalValueSummary() {
     }
 
     auto *FS = cast<FunctionSummary>(S);
+    if (!FS->type_tests().empty())
+      Stream.EmitRecord(bitc::FS_TYPE_TESTS, FS->type_tests());
+
     NameVals.push_back(ValueId);
     NameVals.push_back(Index.getModuleId(FS->modulePath()));
     NameVals.push_back(getEncodedGVSummaryFlags(FS->flags()));
