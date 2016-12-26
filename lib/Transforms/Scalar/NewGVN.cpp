@@ -27,6 +27,7 @@
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/PostOrderIterator.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SparseBitVector.h"
@@ -233,6 +234,12 @@ class NewGVN : public FunctionPass {
   // Value Mappings.
   DenseMap<Value *, CongruenceClass *> ValueToClass;
   DenseMap<Value *, const Expression *> ValueToExpression;
+  	  
+  // A table storing which memorydefs/phis represent a memory state provably
+  // equivalent to another memory state.
+  // We could use the congruence class machinery, but the MemoryAccess's are
+  // abstract memory states, so they can only ever be equivalent to each other,
+  // and not to constants, etc.
   DenseMap<MemoryAccess *, MemoryAccess *> MemoryAccessEquiv;
   struct ComparingExpressionInfo : public DenseMapInfo<const Expression *> {
     static unsigned getHashValue(const Expression *V) {
@@ -258,13 +265,13 @@ class NewGVN : public FunctionPass {
   struct hash_expression {
     size_t operator()(const Expression *A) const { return A->getHashValue(); }
   };
-
-  // This multimap holds equivalences that we've detected that we haven't see
+ // This multimap holds equivalences that we've detected that we haven't see
   // users in the program for, yet. If we later see a user, we will add these to
   // it's equivalences
   std::unordered_multimap<const Expression *, Equivalence, hash_expression,
                           expression_equal_to>
       PendingEquivalences;
+
   // Expression to class mapping.
   typedef DenseMap<const Expression *, CongruenceClass *> ExpressionClassMap;
   ExpressionClassMap ExpressionToClass;
@@ -302,7 +309,7 @@ class NewGVN : public FunctionPass {
   // DFS info.
   DenseMap<const BasicBlock *, std::pair<int, int>> DFSDomMap;
   DenseMap<const Value *, unsigned> InstrDFS;
-  std::vector<Instruction *> DFSToInstr;
+  std::vector<Value *> DFSToInstr;
 
   // Deletion info.
   SmallPtrSet<Instruction *, 8> InstructionsToErase;
@@ -386,6 +393,12 @@ private:
   }
   void initializeCongruenceClasses(Function &F);
 
+  // Value number an Instruction or MemoryPhi.
+  void valueNumberMemoryPhi(MemoryPhi *);
+  void valueNumberInstruction(Instruction *);
+  MemoryAccess *lookupMemoryAccessEquiv(MemoryAccess *) const;
+  bool setMemoryAccessEquivTo(MemoryAccess *From, MemoryAccess *To);
+ 
   // Symbolic evaluation.
   const Expression *checkSimplificationResults(Expression *, Instruction *,
                                                Value *);
@@ -406,8 +419,6 @@ private:
                                                  const BasicBlock *);
   const Expression *performSymbolicAggrValueEvaluation(Instruction *,
                                                        const BasicBlock *);
-  bool setMemoryAccessTo(MemoryAccess *From, MemoryAccess *To);
-  void valueNumberMemoryPhi(MemoryPhi *);
   int analyzeLoadFromClobberingStore(Type *, Value *, StoreInst *);
   int analyzeLoadFromClobberingLoad(Type *, Value *, LoadInst *);
   int analyzeLoadFromClobberingMemInst(Type *, Value *, MemIntrinsic *);
@@ -420,8 +431,8 @@ private:
   template <class T>
   Value *findDominatingEquivalent(CongruenceClass *, const User *,
                                   const T &) const;
-  MemoryAccess *lookupMemoryAccessEquiv(MemoryAccess *);
   void performCongruenceFinding(Value *, const Expression *);
+ 
 
  // Predicate and reachability handling
   void updateReachableEdge(BasicBlock *, BasicBlock *);
@@ -594,10 +605,10 @@ const BasicExpression *NewGVN::createCmpExpression(unsigned Opcode, Type *Type,
   E->setOpcode((Opcode << 8) | Predicate);
   auto Result = lookupOperandLeader(LHS, nullptr, B);
   UsedEquiv |= Result.second;
-  E->ops_push_back(Result.first);
+  E->op_push_back(Result.first);
   Result = lookupOperandLeader(RHS, nullptr, B);
   UsedEquiv |= Result.second;
-  E->ops_push_back(Result.first);
+  E->op_push_back(Result.first);
   E->setUsedEquivalence(UsedEquiv);
   return E;
 }
@@ -891,7 +902,7 @@ std::pair<Value *, bool> NewGVN::lookupOperandLeader(Value *V, const User *U,
   return std::make_pair(V, false);
 }
 
-MemoryAccess *NewGVN::lookupMemoryAccessEquiv(MemoryAccess *MA) {
+MemoryAccess *NewGVN::lookupMemoryAccessEquiv(MemoryAccess *MA) const {
   MemoryAccess *Result = MemoryAccessEquiv.lookup(MA);
   return Result ? Result : MA;
 }
@@ -927,7 +938,7 @@ const CoercibleLoadExpression *NewGVN::createCoercibleLoadExpression(
   // Give store and loads same opcode so they value number together
   E->setOpcode(0);
   auto Operand = lookupOperandLeader(PtrOperand, Original, B);
-  E->ops_push_back(Operand.first);
+  E->op_push_back(Operand.first);
   E->setUsedEquivalence(Operand.second);
   // TODO: Value number heap versions. We may be able to discover
   // things alias analysis can't on it's own (IE that a store and a
@@ -1127,7 +1138,7 @@ const Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I,
   if (CC &&
       CC->RepLeader ==
           lookupOperandLeader(SI->getValueOperand(), SI, B).first) {
-    setMemoryAccessTo(StoreAccess, StoreRHS);
+    setMemoryAccessEquivTo(StoreAccess, StoreRHS);
     return OldStore;
   }
   return createStoreExpression(SI, StoreAccess, B);
@@ -1330,7 +1341,6 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
       }
     }
   }
-
   const Expression *E =
       createLoadExpression(LI->getType(), LI->getPointerOperand(), LI,
                            lookupMemoryAccessEquiv(DefiningAccess), B);
@@ -1349,12 +1359,14 @@ const Expression *NewGVN::performSymbolicCallEvaluation(Instruction *I,
   else
     return nullptr;
 }
+
+
 // Update the memory access equivalence table to say that From is equal to To,
 // and return true if this is different from what already existed in the table.
-bool NewGVN::setMemoryAccessTo(MemoryAccess *From, MemoryAccess *To) {
+bool NewGVN::setMemoryAccessEquivTo(MemoryAccess *From, MemoryAccess *To) {
   auto LookupResult = MemoryAccessEquiv.insert({From, nullptr});
   bool Changed = false;
-  // If it's already in the table, see if the value changed
+  // If it's already in the table, see if the value changed.
   if (LookupResult.second) {
     if (To && LookupResult.first->second != To) {
       // It wasn't equivalent before, and now it is.
@@ -1366,45 +1378,12 @@ bool NewGVN::setMemoryAccessTo(MemoryAccess *From, MemoryAccess *To) {
       Changed = true;
     }
   } else if (To) {
-    // It wasn't in the table, but is equivalent to something
+    // It wasn't in the table, but is equivalent to something.
     LookupResult.first->second = To;
     Changed = true;
   }
   return Changed;
 }
-
-// valueNumberMemoryPhi - Evaluate MemoryPhi nodes symbolically
-void NewGVN::valueNumberMemoryPhi(MemoryPhi *MP) {
-  // If all the arguments are the same, the MemoryPhi has the same value as the
-  // argument.
-  MemoryAccess *AllSameValue = nullptr;
-  // See if all arguments are the same, ignoring unreachable arguments
-  for (unsigned i = 0, e = MP->getNumOperands(); i < e; ++i) {
-    BasicBlock *B = MP->getIncomingBlock(i);
-    if (!ReachableBlocks.count(B))
-      continue;
-    MemoryAccess *Operand =
-        lookupMemoryAccessEquiv(cast<MemoryAccess>(MP->getOperand(i)));
-    if (AllSameValue && AllSameValue != Operand) {
-      // Phi node does not have equal arguments, this phi node value numbers to
-      // itself.
-      AllSameValue = nullptr;
-      break;
-    } else if (!AllSameValue) {
-      AllSameValue = Operand;
-    }
-  }
-#ifdef DEBUG
-  if (AllSameValue)
-    dbgs() << "Memory Phi value numbered to " << *AllSameValue << "\n";
-  else
-    dbgs() << "Memory Phi value numbered to itself\n";
-#endif
-
-  if (setMemoryAccessTo(MP, AllSameValue))
-    markMemoryUsersTouched(MP);
-}
-
 // Evaluate PHI nodes symbolically, and create an expression result.
 const Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
                                                        const BasicBlock *B) {
@@ -1444,7 +1423,7 @@ const Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
                  << "\n");
     E->deallocateOperands(ArgRecycler);
     ExpressionAllocator.Deallocate(E);
-    if (Constant *C = dyn_cast<Constant>(AllSameValue))
+    if (auto *C = dyn_cast<Constant>(AllSameValue))
       return createConstantExpression(C, E->getUsedEquivalence());
     return createVariableExpression(AllSameValue, E->getUsedEquivalence());
   }
@@ -2085,6 +2064,7 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
     // Remember how many outgoing edges there are to every successor.
     SmallDenseMap<BasicBlock *, unsigned, 16> SwitchEdges;
 
+    bool MultipleEdgesOneReachable = false;
     Value *SwitchCond = SI->getCondition();
     Value *CondEvaluated = findConditionEquivalence(SwitchCond, B);
     // See if we were able to turn this switch statement into a constant.
@@ -2282,12 +2262,18 @@ void NewGVN::cleanupTables() {
   CoercionForwarding.clear();
   DominatedInstRange.clear();
   PendingEquivalences.clear();
+  MemoryAccessEquiv.clear();
   PredCache.clear();
 }
 
 std::pair<unsigned, unsigned> NewGVN::assignDFSNumbers(BasicBlock *B,
                                                        unsigned Start) {
   unsigned End = Start;
+  if (MemoryAccess *MemPhi = MSSA->getMemoryAccess(B)) {
+    InstrDFS[MemPhi] = End++;
+    DFSToInstr.emplace_back(MemPhi);
+  }
+
   for (auto &I : *B) {
     InstrDFS[&I] = End++;
     DFSToInstr.emplace_back(&I);
@@ -2309,6 +2295,64 @@ void NewGVN::updateProcessedCount(Value *V) {
            "Seem to have processed the same Value a lot\n");
   }
 #endif
+}
+// Evaluate MemoryPhi nodes symbolically, just like PHI nodes
+void NewGVN::valueNumberMemoryPhi(MemoryPhi *MP) {
+  // If all the arguments are the same, the MemoryPhi has the same value as the
+  // argument.
+  // Filter out unreachable blocks from our operands.
+  auto Filtered = make_filter_range(MP->operands(), [&](const Use &U) {
+    return ReachableBlocks.count(MP->getIncomingBlock(U));
+  });
+
+  assert(Filtered.begin() != Filtered.end() &&
+         "We should not be processing a MemoryPhi in a completely "
+         "unreachable block");
+
+  // Transform the remaining operands into operand leaders.
+  // FIXME: mapped_iterator should have a range version.
+  auto LookupFunc = [&](const Use &U) {
+    return lookupMemoryAccessEquiv(cast<MemoryAccess>(U));
+  };
+  auto MappedBegin = map_iterator(Filtered.begin(), LookupFunc);
+  auto MappedEnd = map_iterator(Filtered.end(), LookupFunc);
+
+  // and now check if all the elements are equal.
+  // Sadly, we can't use std::equals since these are random access iterators.
+  MemoryAccess *AllSameValue = *MappedBegin;
+  ++MappedBegin;
+  bool AllEqual = std::all_of(
+      MappedBegin, MappedEnd,
+      [&AllSameValue](const MemoryAccess *V) { return V == AllSameValue; });
+
+  if (AllEqual)
+    DEBUG(dbgs() << "Memory Phi value numbered to " << *AllSameValue << "\n");
+  else
+    DEBUG(dbgs() << "Memory Phi value numbered to itself\n");
+
+  if (setMemoryAccessEquivTo(MP, AllEqual ? AllSameValue : nullptr))
+    markMemoryUsersTouched(MP);
+}
+
+// Value number a single instruction, symbolically evaluating, performing
+// congruence finding, and updating mappings.
+void NewGVN::valueNumberInstruction(Instruction *I) {
+  DEBUG(dbgs() << "Processing instruction " << *I << "\n");
+  if (I->use_empty() && !I->getType()->isVoidTy()) {
+    DEBUG(dbgs() << "Skipping unused instruction\n");
+    if (isInstructionTriviallyDead(I, TLI))
+      markInstructionForDeletion(I);
+    return;
+  }
+  if (!I->isTerminator()) {
+    const Expression *Symbolized = performSymbolicEvaluation(I, I->getParent());
+	   if (Symbolized && Symbolized->getUsedEquivalence())
+          InvolvedInEquivalence.set(InstrDFS[I]);
+    
+    performCongruenceFinding(I, Symbolized);
+  } else {
+    processOutgoingEdges(dyn_cast<TerminatorInst>(I), I->getParent());
+  }
 }
 
 // This is the main transformation entry point. 
@@ -2374,8 +2418,15 @@ bool NewGVN::runGVN(Function &F, DominatorTree *_DT, AssumptionCache *_AC,
     // Walk through all the instructions in all the blocks in RPO.
     for (int InstrNum = TouchedInstructions.find_first(); InstrNum != -1;
          InstrNum = TouchedInstructions.find_next(InstrNum)) {
-      Instruction *I = DFSToInstr[InstrNum];
-      BasicBlock *CurrBlock = I->getParent();
+      Value *V = DFSToInstr[InstrNum];
+      BasicBlock *CurrBlock = nullptr;
+
+      if (Instruction *I = dyn_cast<Instruction>(V))
+        CurrBlock = I->getParent();
+      else if (MemoryPhi *MP = dyn_cast<MemoryPhi>(V))
+        CurrBlock = MP->getBlock();
+      else
+        llvm_unreachable("DFSToInstr gave us an unknown type of instruction");
 
       // If we hit a new block, do reachability processing.
       if (CurrBlock != LastBlock) {
@@ -2393,24 +2444,16 @@ bool NewGVN::runGVN(Function &F, DominatorTree *_DT, AssumptionCache *_AC,
         }
         updateProcessedCount(CurrBlock);
       }
-      DEBUG(dbgs() << "Processing instruction " << *I << "\n");
-      if (I->use_empty() && !I->getType()->isVoidTy()) {
-        DEBUG(dbgs() << "Skipping unused instruction\n");
-        if (isInstructionTriviallyDead(I, TLI))
-          markInstructionForDeletion(I);
-        TouchedInstructions.reset(InstrNum);
-        continue;
-      }
-      updateProcessedCount(I);
 
-      if (!I->isTerminator()) {
-        const Expression *Symbolized = performSymbolicEvaluation(I, CurrBlock);
-        if (Symbolized && Symbolized->getUsedEquivalence())
-          InvolvedInEquivalence.set(InstrDFS[I]);
-        performCongruenceFinding(I, Symbolized);
+      if (MemoryPhi *MP = dyn_cast<MemoryPhi>(V)) {
+        DEBUG(dbgs() << "Processing MemoryPhi " << *MP << "\n");
+        valueNumberMemoryPhi(MP);
+      } else if (Instruction *I = dyn_cast<Instruction>(V)) {
+        valueNumberInstruction(I);
       } else {
-        processOutgoingEdges(dyn_cast<TerminatorInst>(I), CurrBlock);
+        llvm_unreachable("Should have been a MemoryPhi or Instruction");
       }
+      updateProcessedCount(V);
       // Reset after processing (because we may mark ourselves as touched when
       // we propagate equalities).
       TouchedInstructions.reset(InstrNum);
