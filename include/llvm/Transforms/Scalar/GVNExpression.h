@@ -51,7 +51,7 @@ private:
   ExpressionType EType;
   unsigned Opcode;
   bool UsedEquivalence;
-  
+
 public:
   Expression(const Expression &) = delete;
   Expression(ExpressionType ET = ET_Base, unsigned O = ~2U)
@@ -86,7 +86,7 @@ public:
   ExpressionType getExpressionType() const { return EType; }
 
   virtual hash_code getHashValue() const {
-  //FIXME: Verify whether usedEquivalence should be part of the hash.
+    // FIXME: Verify whether usedEquivalence should be part of the hash.
     return hash_combine(getExpressionType(), getOpcode());
   }
 
@@ -97,7 +97,7 @@ public:
     if (PrintEType)
       OS << "etype = " << getExpressionType() << ",";
     OS << "opcode = " << getOpcode() << ", ";
-      OS << "UsedEquivalence = " << getUsedEquivalence() << ", ";
+    OS << "UsedEquivalence = " << getUsedEquivalence() << ", ";
   }
 
   void print(raw_ostream &OS) const {
@@ -286,8 +286,8 @@ private:
 
 public:
   static bool classof(const Expression *EB) {
-    return EB->getExpressionType() >= ET_Load
-        && EB->getExpressionType() <= ET_CoercibleLoad;
+    return EB->getExpressionType() >= ET_Load &&
+           EB->getExpressionType() <= ET_CoercibleLoad;
   }
 
   LoadExpression(unsigned NumOperands, LoadInst *L, MemoryAccess *DA)
@@ -353,8 +353,8 @@ public:
 
   CoercibleLoadExpression(unsigned int NumOperands, LoadInst *L,
                           MemoryAccess *DA, unsigned int O, Value *S)
-      : LoadExpression(ET_CoercibleLoad, NumOperands, L, DA),
-        Offset(O), Src(S) {}
+      : LoadExpression(ET_CoercibleLoad, NumOperands, L, DA), Offset(O),
+        Src(S) {}
 
   virtual ~CoercibleLoadExpression() {}
   virtual bool equals(const Expression &Other) const {
@@ -382,8 +382,8 @@ public:
     if (printEType)
       OS << "ExpressionTypeCoercibleLoad, ";
     this->LoadExpression::printInternal(OS, false);
-    OS << " represents CoercibleLoad at " << getLoadInst() << " with Src " << Src
-       << " and offset " << Offset;
+    OS << " represents CoercibleLoad at " << getLoadInst() << " with Src "
+       << Src << " and offset " << Offset;
   }
 };
 class StoreExpression final : public BasicExpression {
