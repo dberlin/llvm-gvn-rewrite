@@ -1374,19 +1374,35 @@ bool NewGVN::runGVN(Function &F, DominatorTree *_DT, AssumptionCache *_AC,
   // visited first or second, given a block with multiple successors.
   // If we visit in the wrong order, we will end up performing N times as many
   // iterations.
+  DenseMap<const DomTreeNode *, unsigned> RPOOrdering;
   ReversePostOrderTraversal<Function *> RPOT(&F);
+  unsigned Counter=0;
   for (auto &B : RPOT) {
-    VisitedBlocks.insert(B);
+    auto *Node = DT->getNode(B);
+    assert(Node && "RPO and Dominator tree should have same reachability");
+    RPOOrdering[Node] = ++Counter;
+  }
+  //Sort dominator tree children arrays into RPO.
+  for (auto &B : RPOT) {
+    auto *Node = DT->getNode(B);
+    if (std::distance(Node->begin(), Node->end()) > 1)
+      std::sort(Node->begin(), Node->end(), [&RPOOrdering](const DomTreeNode *A, const DomTreeNode *B){
+          return RPOOrdering[A] < RPOOrdering[B];
+        });
+  }
+  auto DFI = df_begin(DT->getRootNode());
+  for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
+    BasicBlock *B = DFI->getBlock();
     const auto &BlockRange = assignDFSNumbers(B, ICount);
     BlockInstRange.insert({B, BlockRange});
     ICount += BlockRange.second - BlockRange.first;
   }
-
+  
   // Handle forward unreachable blocks and figure out which blocks
   // have single preds.
   for (auto &B : F) {
     // Assign numbers to unreachable blocks.
-    if (!VisitedBlocks.count(&B)) {
+    if (!DFI.nodeVisited(DT->getNode(&B))) {
       const auto &BlockRange = assignDFSNumbers(&B, ICount);
       BlockInstRange.insert({&B, BlockRange});
       ICount += BlockRange.second - BlockRange.first;
@@ -1408,8 +1424,10 @@ bool NewGVN::runGVN(Function &F, DominatorTree *_DT, AssumptionCache *_AC,
   initializeCongruenceClasses(F);
 
   // We start out in the entry block.
+  unsigned int Iterations = 0;
   BasicBlock *LastBlock = &F.getEntryBlock();
   while (TouchedInstructions.any()) {
+    ++Iterations;
     // Walk through all the instructions in all the blocks in RPO.
     for (int InstrNum = TouchedInstructions.find_first(); InstrNum != -1;
          InstrNum = TouchedInstructions.find_next(InstrNum)) {
@@ -1454,7 +1472,9 @@ bool NewGVN::runGVN(Function &F, DominatorTree *_DT, AssumptionCache *_AC,
       TouchedInstructions.reset(InstrNum);
     }
   }
-
+  errs() << "Number of iterations is  " << Iterations << " for ";
+  F.printAsOperand(errs());
+  errs() << "\n";
   Changed |= eliminateInstructions(F);
 
   // Delete all instructions marked for deletion.
