@@ -16,8 +16,10 @@
 #include "AArch64CallLowering.h"
 #include "AArch64ISelLowering.h"
 
-#include "llvm/CodeGen/GlobalISel/MachineIRBuilder.h"
 #include "llvm/CodeGen/Analysis.h"
+#include "llvm/CodeGen/GlobalISel/MachineIRBuilder.h"
+#include "llvm/CodeGen/GlobalISel/RegisterBankInfo.h"
+#include "llvm/CodeGen/GlobalISel/Utils.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/Target/TargetRegisterInfo.h"
@@ -30,34 +32,6 @@ using namespace llvm;
 
 AArch64CallLowering::AArch64CallLowering(const AArch64TargetLowering &TLI)
   : CallLowering(&TLI) {
-}
-
-unsigned CallLowering::ValueHandler::extendRegister(unsigned ValReg,
-                                                    CCValAssign &VA) {
-  LLT LocTy{VA.getLocVT()};
-  switch (VA.getLocInfo()) {
-  default: break;
-  case CCValAssign::Full:
-  case CCValAssign::BCvt:
-    // FIXME: bitconverting between vector types may or may not be a
-    // nop in big-endian situations.
-    return ValReg;
-  case CCValAssign::AExt:
-    assert(!VA.getLocVT().isVector() && "unexpected vector extend");
-    // Otherwise, it's a nop.
-    return ValReg;
-  case CCValAssign::SExt: {
-    unsigned NewReg = MRI.createGenericVirtualRegister(LocTy);
-    MIRBuilder.buildSExt(NewReg, ValReg);
-    return NewReg;
-  }
-  case CCValAssign::ZExt: {
-    unsigned NewReg = MRI.createGenericVirtualRegister(LocTy);
-    MIRBuilder.buildZExt(NewReg, ValReg);
-    return NewReg;
-  }
-  }
-  llvm_unreachable("unable to extend register");
 }
 
 struct IncomingArgHandler : public CallLowering::ValueHandler {
@@ -304,6 +278,15 @@ bool AArch64CallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
 
   // Now we can add the actual call instruction to the correct basic block.
   MIRBuilder.insertInstr(MIB);
+
+  // If Callee is a reg, since it is used by a target specific
+  // instruction, it must have a register class matching the
+  // constraint of that instruction.
+  if (Callee.isReg())
+    MIB->getOperand(0).setReg(constrainOperandRegClass(
+        MF, *TRI, MRI, *MF.getSubtarget().getInstrInfo(),
+        *MF.getSubtarget().getRegBankInfo(), *MIB, MIB->getDesc(),
+        Callee.getReg(), 0));
 
   // Finally we can copy the returned value back into its virtual-register. In
   // symmetry with the arugments, the physical register must be an

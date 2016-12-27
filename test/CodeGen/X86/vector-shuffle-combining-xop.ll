@@ -75,12 +75,16 @@ define <4 x float> @combine_vpermil2ps_identity(<4 x float> %a0, <4 x float> %a1
 define <4 x float> @combine_vpermil2ps_1z74(<4 x float> %a0, <4 x float> %a1) {
 ; X32-LABEL: combine_vpermil2ps_1z74:
 ; X32:       # BB#0:
-; X32-NEXT:    vpermil2ps {{.*#+}} xmm0 = xmm0[1],zero,xmm1[3,0]
+; X32-NEXT:    vshufps {{.*#+}} xmm0 = xmm0[1,1],xmm1[3,0]
+; X32-NEXT:    vxorps %xmm1, %xmm1, %xmm1
+; X32-NEXT:    vblendps {{.*#+}} xmm0 = xmm0[0],xmm1[1],xmm0[2,3]
 ; X32-NEXT:    retl
 ;
 ; X64-LABEL: combine_vpermil2ps_1z74:
 ; X64:       # BB#0:
-; X64-NEXT:    vpermil2ps {{.*#+}} xmm0 = xmm0[1],zero,xmm1[3,0]
+; X64-NEXT:    vshufps {{.*#+}} xmm0 = xmm0[1,1],xmm1[3,0]
+; X64-NEXT:    vxorps %xmm1, %xmm1, %xmm1
+; X64-NEXT:    vblendps {{.*#+}} xmm0 = xmm0[0],xmm1[1],xmm0[2,3]
 ; X64-NEXT:    retq
   %res0 = call <4 x float> @llvm.x86.xop.vpermil2ps(<4 x float> %a0, <4 x float> %a1, <4 x i32> <i32 1, i32 1, i32 7, i32 4>, i8 0)
   %res1 = shufflevector <4 x float> %res0, <4 x float> zeroinitializer, <4 x i32> <i32 0, i32 7, i32 2, i32 3>
@@ -145,6 +149,34 @@ define <4 x float> @combine_vpermil2ps_blend_with_zero(<4 x float> %a0, <4 x flo
 ; X64-NEXT:    retq
   %res0 = call <4 x float> @llvm.x86.xop.vpermil2ps(<4 x float> %a0, <4 x float> %a1, <4 x i32> <i32 8, i32 1, i32 2, i32 3>, i8 2)
   ret <4 x float> %res0
+}
+
+define <2 x double> @combine_vpermil2pd_as_shufpd(<2 x double> %a0, <2 x double> %a1) {
+; X32-LABEL: combine_vpermil2pd_as_shufpd:
+; X32:       # BB#0:
+; X32-NEXT:    vshufpd {{.*#+}} xmm0 = xmm0[1],xmm1[0]
+; X32-NEXT:    retl
+;
+; X64-LABEL: combine_vpermil2pd_as_shufpd:
+; X64:       # BB#0:
+; X64-NEXT:    vshufpd {{.*#+}} xmm0 = xmm0[1],xmm1[0]
+; X64-NEXT:    retq
+  %res0 = call <2 x double> @llvm.x86.xop.vpermil2pd(<2 x double> %a0, <2 x double> %a1, <2 x i64> <i64 2, i64 4>, i8 0)
+  ret <2 x double> %res0
+}
+
+define <4 x double> @combine_vpermil2pd256_as_shufpd(<4 x double> %a0, <4 x double> %a1) {
+; X32-LABEL: combine_vpermil2pd256_as_shufpd:
+; X32:       # BB#0:
+; X32-NEXT:    vshufpd {{.*#+}} ymm0 = ymm0[0],ymm1[0],ymm0[3],ymm1[3]
+; X32-NEXT:    retl
+;
+; X64-LABEL: combine_vpermil2pd256_as_shufpd:
+; X64:       # BB#0:
+; X64-NEXT:    vshufpd {{.*#+}} ymm0 = ymm0[0],ymm1[0],ymm0[3],ymm1[3]
+; X64-NEXT:    retq
+  %res0 = call <4 x double> @llvm.x86.xop.vpermil2pd.256(<4 x double> %a0, <4 x double> %a1, <4 x i64> <i64 0, i64 4, i64 2, i64 7>, i8 0)
+  ret <4 x double> %res0
 }
 
 define <16 x i8> @combine_vpperm_identity(<16 x i8> %a0, <16 x i8> %a1) {
@@ -369,7 +401,7 @@ define <4 x float> @PR31296(i8* %in) {
 ; X32-LABEL: PR31296:
 ; X32:       # BB#0: # %entry
 ; X32-NEXT:    movl {{[0-9]+}}(%esp), %eax
-; X32-NEXT:    vmovd {{.*#+}} xmm0 = mem[0],zero,zero,zero
+; X32-NEXT:    vmovss {{.*#+}} xmm0 = mem[0],zero,zero,zero
 ; X32-NEXT:    vmovaps {{.*#+}} xmm1 = <0,1,u,u>
 ; X32-NEXT:    vpermil2ps {{.*#+}} xmm0 = xmm0[0],xmm1[0,0,1]
 ; X32-NEXT:    retl

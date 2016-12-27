@@ -213,6 +213,8 @@ enum GlobalValueSummarySymtabCodes {
   FS_COMBINED_ORIGINAL_NAME = 9,
   // VERSION of the summary, bumped when adding flags for instance.
   FS_VERSION = 10,
+  // The list of llvm.type.test type identifiers used by the following function.
+  FS_TYPE_TESTS = 11,
 };
 
 enum MetadataCodes {
@@ -231,7 +233,7 @@ enum MetadataCodes {
   METADATA_SUBRANGE = 13,        // [distinct, count, lo]
   METADATA_ENUMERATOR = 14,      // [distinct, value, name]
   METADATA_BASIC_TYPE = 15,      // [distinct, tag, name, size, align, enc]
-  METADATA_FILE = 16,            // [distinct, filename, directory]
+  METADATA_FILE = 16,            // [distinct, filename, directory, checksumkind, checksum]
   METADATA_DERIVED_TYPE = 17,    // [distinct, ...]
   METADATA_COMPOSITE_TYPE = 18,  // [distinct, ...]
   METADATA_SUBROUTINE_TYPE = 19, // [distinct, flags, types, cc]
@@ -252,6 +254,7 @@ enum MetadataCodes {
   METADATA_MACRO_FILE = 34,      // [distinct, macinfo, line, file, ...]
   METADATA_STRINGS = 35,         // [count, offset] blob([lengths][chars])
   METADATA_GLOBAL_DECL_ATTACHMENT = 36, // [valueid, n x [id, mdnode]]
+  METADATA_GLOBAL_VAR_EXPR = 37, // [distinct, var, expr]
 };
 
 // The constants block (CONSTANTS_BLOCK_ID) describes emission for each

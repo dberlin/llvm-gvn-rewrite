@@ -742,13 +742,16 @@ Constant *CastGEPIndices(Type *SrcElemTy, ArrayRef<Constant *> Ops,
     if ((i == 1 ||
          !isa<StructType>(GetElementPtrInst::getIndexedType(
              SrcElemTy, Ops.slice(1, i - 1)))) &&
-        Ops[i]->getType() != (i == 1 ? IntPtrTy : IntPtrScalarTy)) {
+        Ops[i]->getType()->getScalarType() != IntPtrScalarTy) {
       Any = true;
+      Type *NewType = Ops[i]->getType()->isVectorTy()
+                          ? IntPtrTy
+                          : IntPtrTy->getScalarType();
       NewIdxs.push_back(ConstantExpr::getCast(CastInst::getCastOpcode(Ops[i],
                                                                       true,
-                                                                      IntPtrTy,
+                                                                      NewType,
                                                                       true),
-                                              Ops[i], IntPtrTy));
+                                              Ops[i], NewType));
     } else
       NewIdxs.push_back(Ops[i]);
   }
@@ -1428,6 +1431,8 @@ bool llvm::canConstantFoldCallTo(const Function *F) {
            Name == "log10f";
   case 'p':
     return Name == "pow" || Name == "powf";
+  case 'r':
+    return Name == "round" || Name == "roundf";
   case 's':
     return Name == "sin" || Name == "sinh" || Name == "sqrt" ||
            Name == "sinf" || Name == "sinhf" || Name == "sqrtf";
@@ -1442,7 +1447,7 @@ Constant *GetConstantFoldFPValue(double V, Type *Ty) {
   if (Ty->isHalfTy()) {
     APFloat APF(V);
     bool unused;
-    APF.convert(APFloat::IEEEhalf, APFloat::rmNearestTiesToEven, &unused);
+    APF.convert(APFloat::IEEEhalf(), APFloat::rmNearestTiesToEven, &unused);
     return ConstantFP::get(Ty->getContext(), APF);
   }
   if (Ty->isFloatTy())
@@ -1533,7 +1538,7 @@ double getValueAsDouble(ConstantFP *Op) {
 
   bool unused;
   APFloat APF = Op->getValueAPF();
-  APF.convert(APFloat::IEEEdouble, APFloat::rmNearestTiesToEven, &unused);
+  APF.convert(APFloat::IEEEdouble(), APFloat::rmNearestTiesToEven, &unused);
   return APF.convertToDouble();
 }
 
@@ -1551,7 +1556,7 @@ Constant *ConstantFoldScalarCall(StringRef Name, unsigned IntrinsicID, Type *Ty,
         APFloat Val(Op->getValueAPF());
 
         bool lost = false;
-        Val.convert(APFloat::IEEEhalf, APFloat::rmNearestTiesToEven, &lost);
+        Val.convert(APFloat::IEEEhalf(), APFloat::rmNearestTiesToEven, &lost);
 
         return ConstantInt::get(Ty->getContext(), Val.bitcastToAPInt());
       }
@@ -1692,6 +1697,10 @@ Constant *ConstantFoldScalarCall(StringRef Name, unsigned IntrinsicID, Type *Ty,
           }
         }
         break;
+      case 'r':
+        if ((Name == "round" && TLI->has(LibFunc::round)) ||
+            (Name == "roundf" && TLI->has(LibFunc::roundf)))
+          return ConstantFoldFP(round, V, Ty);
       case 's':
         if ((Name == "sin" && TLI->has(LibFunc::sin)) ||
             (Name == "sinf" && TLI->has(LibFunc::sinf)))
@@ -1726,7 +1735,7 @@ Constant *ConstantFoldScalarCall(StringRef Name, unsigned IntrinsicID, Type *Ty,
       case Intrinsic::bitreverse:
         return ConstantInt::get(Ty->getContext(), Op->getValue().reverseBits());
       case Intrinsic::convert_from_fp16: {
-        APFloat Val(APFloat::IEEEhalf, Op->getValue());
+        APFloat Val(APFloat::IEEEhalf(), Op->getValue());
 
         bool lost = false;
         APFloat::opStatus status = Val.convert(
