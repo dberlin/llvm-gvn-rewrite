@@ -38,6 +38,8 @@ void llvm::initializeTransformUtils(PassRegistry &Registry) {
   initializeMemorySSAWrapperPassPass(Registry);
   initializeMemorySSAPrinterLegacyPassPass(Registry);
   initializeStripGCRelocatesPass(Registry);
+  initializePredicateInfoWrapperPassPass(Registry);
+  initializePredicateInfoPrinterLegacyPassPass(Registry);
 }
 
 /// LLVMInitializeTransformUtils - C binding for initializeTransformUtilsPasses.

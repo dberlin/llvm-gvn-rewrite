@@ -12684,6 +12684,43 @@ sufficient overall improvement in code quality. For this reason,
 that the optimizer can otherwise deduce or facts that are of little use to the
 optimizer.
 
+.. _int_predicateinfo:
+
+'``llvm.predicateinfo``' Intrinsic
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Syntax:
+"""""""
+
+::
+
+      declare type @llvm.predicateinfo(type %operand) returned(1) readnone
+
+Arguments:
+""""""""""
+
+The first argument is an operand to which predicate info is attached.
+
+Overview:
+""""""""""
+
+The ``llvm.predicateinfo`` intrinsic is used to attach information to
+operations used in comparisons, as well as to the results of those
+comparisons.  It is a copy operation used to build Extended SSA form,
+and so is placed at the beginning of blocks dominated by the true or
+false edges of branches, as well as blocks that are post-dominated by
+assume operations.
+
+For operations used in branch comparisons, the information attached to
+the intrinsic includes which edge direction the current block is
+dominated by (true or false), as well as the original comparison. For
+assumes, the information attached includes a pointer to the assume
+instruction.
+
+The PredicateInfo analysis can be used to retrieve the attached
+information.  The intrinsic has no code-generation effect, and always
+returns the first argument from the perspective of the optimizer.
+
 .. _type.test:
 
 '``llvm.type.test``' Intrinsic

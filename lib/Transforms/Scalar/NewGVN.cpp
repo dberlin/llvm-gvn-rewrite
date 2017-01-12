@@ -86,13 +86,13 @@
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/MemorySSA.h"
+#include "llvm/Transforms/Utils/PredicateInfo.h"
 #include <unordered_map>
 #include <utility>
 #include <vector>
 using namespace llvm;
 using namespace PatternMatch;
 using namespace llvm::GVNExpression;
-
 #define DEBUG_TYPE "newgvn"
 
 STATISTIC(NumGVNInstrDeleted, "Number of instructions deleted");
@@ -213,6 +213,7 @@ class NewGVN : public FunctionPass {
   AliasAnalysis *AA;
   MemorySSA *MSSA;
   MemorySSAWalker *MSSAWalker;
+  PredicateInfo *PredInfo;
   BumpPtrAllocator ExpressionAllocator;
   ArrayRecycler<Value *> ArgRecycler;
 
@@ -284,7 +285,8 @@ public:
 
   bool runOnFunction(Function &F) override;
   bool runGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
-              TargetLibraryInfo *TLI, AliasAnalysis *AA, MemorySSA *MSSA);
+              TargetLibraryInfo *TLI, AliasAnalysis *AA, MemorySSA *MSSA,
+              PredicateInfo *PredInfo);
 
 private:
   void getAnalysisUsage(AnalysisUsage &AU) const override {
@@ -293,7 +295,7 @@ private:
     AU.addRequired<TargetLibraryInfoWrapperPass>();
     AU.addRequired<MemorySSAWrapperPass>();
     AU.addRequired<AAResultsWrapperPass>();
-
+    AU.addRequired<PredicateInfoWrapperPass>();
     AU.addPreserved<DominatorTreeWrapperPass>();
     AU.addPreserved<GlobalsAAWrapperPass>();
   }
@@ -352,7 +354,10 @@ private:
                                                  const BasicBlock *);
   const Expression *performSymbolicAggrValueEvaluation(Instruction *,
                                                        const BasicBlock *);
-
+  const Expression *performSymbolicCmpEvaluation(Instruction *I,
+                                                 const BasicBlock *B);
+  const Expression *performSymbolicPredicateInfoEvaluation(Instruction *,
+                                                           const BasicBlock *);
   // Congruence finding.
   // Templated to allow them to work both on BB's and BB-edges.
   template <class T>
@@ -368,7 +373,7 @@ private:
   void updateReachableEdge(BasicBlock *, BasicBlock *);
   void processOutgoingEdges(TerminatorInst *, BasicBlock *);
   bool isOnlyReachableViaThisEdge(const BasicBlockEdge &) const;
-  Value *findConditionEquivalence(Value *, BasicBlock *) const;
+  Value *findConditionEquivalence(Value *, const BasicBlock *) const;
 
   // Elimination.
   struct ValueDFS;
@@ -440,6 +445,7 @@ static std::string getBlockName(const BasicBlock *B) {
 
 INITIALIZE_PASS_BEGIN(NewGVN, "newgvn", "Global Value Numbering", false, false)
 INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
+INITIALIZE_PASS_DEPENDENCY(PredicateInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(MemorySSAWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
@@ -863,13 +869,86 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I,
   return E;
 }
 
+const Expression *
+NewGVN::performSymbolicPredicateInfoEvaluation(Instruction *I,
+                                               const BasicBlock *B) {
+  if (auto *PI = PredInfo->getPredicateInfoFor(I)) {
+    DEBUG(dbgs() << "Found predicate info from instruction !\n");
+    auto *CopyOf = I->getOperand(0);
+    auto *Cmp = PI->Comparison;
+    // If this is an assume predicate and a copy of the comparison, it must be
+    // true.
+    if (isa<PredicateAssume>(PI) && CopyOf == Cmp)
+      return createConstantExpression(ConstantInt::getTrue(Cmp->getType()));
+
+    Value *FirstOp = lookupOperandLeader(Cmp->getOperand(0), I, B);
+    Value *SecondOp = lookupOperandLeader(Cmp->getOperand(1), I, B);
+    // Sort the ops
+    CmpInst::Predicate Predicate = Cmp->getPredicate();
+    // FIXME: We should really be ranking them here
+    if (FirstOp > SecondOp ||
+        (isa<Argument>(SecondOp) || isa<Constant>(SecondOp))) {
+      std::swap(FirstOp, SecondOp);
+      Predicate = CmpInst::getSwappedPredicate(Predicate);
+    }
+
+    if (isa<PredicateAssume>(PI)) {
+      // If the comparison is true when the operands are equal, then we know the
+      // operands are equal, because assumes must always be true.
+      if (CmpInst::isTrueWhenEqual(Predicate))
+        if (auto *C = dyn_cast<Constant>(FirstOp))
+          return createConstantExpression(C);
+      return createVariableExpression(FirstOp);
+    } else if (const auto *PBranch = dyn_cast<PredicateBranch>(PI)) {
+      if (CopyOf == Cmp) {
+        if (CmpInst::isTrueWhenEqual(Predicate)) {
+          if (PBranch->TrueEdge)
+            return createConstantExpression(
+                ConstantInt::getTrue(Cmp->getType()));
+          else
+            return createConstantExpression(
+                ConstantInt::getFalse(Cmp->getType()));
+        } else if (CmpInst::isFalseWhenEqual(Predicate)) {
+          if (!PBranch->TrueEdge)
+            return createConstantExpression(
+                ConstantInt::getTrue(Cmp->getType()));
+          else
+            return createConstantExpression(
+                ConstantInt::getFalse(Cmp->getType()));
+        }
+      } else if ((PBranch->TrueEdge && CmpInst::isTrueWhenEqual(Predicate)) ||
+                 (!PBranch->TrueEdge && CmpInst::isFalseWhenEqual(Predicate))) {
+        if (auto *C = dyn_cast<Constant>(FirstOp))
+          return createConstantExpression(C);
+        return createVariableExpression(FirstOp);
+      }
+    }
+  }
+  return nullptr;
+}
+
 // Evaluate read only and pure calls, and create an expression result.
 const Expression *NewGVN::performSymbolicCallEvaluation(Instruction *I,
                                                         const BasicBlock *B) {
   auto *CI = cast<CallInst>(I);
-  if (AA->doesNotAccessMemory(CI))
+  if (auto *II = dyn_cast<IntrinsicInst>(I)) {
+    // Things with the returned attribute are copies of arguments
+    if (auto *ReturnedValue = II->getReturnedArgOperand()) {
+      if (II->getIntrinsicID() == Intrinsic::predicateinfo) {
+        const Expression *Result = performSymbolicPredicateInfoEvaluation(I, B);
+        if (Result)
+          return Result;
+      }
+      if (auto *C = dyn_cast<Constant>(ReturnedValue))
+        return createConstantExpression(C);
+      return createVariableExpression(ReturnedValue);
+    }
+
+  } else if (AA->doesNotAccessMemory(CI)) {
     return createCallExpression(CI, nullptr, B);
-  if (AA->onlyReadsMemory(CI)) {
+  }
+
+  else if (AA->onlyReadsMemory(CI)) {
     MemoryAccess *DefiningAccess = MSSAWalker->getClobberingMemoryAccess(CI);
     return createCallExpression(CI, lookupMemoryAccessEquiv(DefiningAccess), B);
   }
@@ -914,6 +993,11 @@ bool NewGVN::setMemoryAccessEquivTo(MemoryAccess *From, CongruenceClass *To) {
 // Evaluate PHI nodes symbolically, and create an expression result.
 const Expression *NewGVN::performSymbolicPHIEvaluation(Instruction *I,
                                                        const BasicBlock *B) {
+
+  const Expression *Result = performSymbolicPredicateInfoEvaluation(I, B);
+  if (Result)
+    return Result;
+
   auto *E = cast<PHIExpression>(createPHIExpression(I));
   // We match the semantics of SimplifyPhiNode from InstructionSimplify here.
 
@@ -1012,6 +1096,73 @@ NewGVN::performSymbolicAggrValueEvaluation(Instruction *I,
 
   return createAggregateValueExpression(I, B);
 }
+const Expression *NewGVN::performSymbolicCmpEvaluation(Instruction *I,
+                                                       const BasicBlock *B) {
+  CmpInst *CI = dyn_cast<CmpInst>(I);
+  // See if our operands are equal to those of a previous predicate, and if so,
+  // if it implies true or false.
+  auto Op0 = lookupOperandLeader(CI->getOperand(0), I, B);
+  auto Op1 = lookupOperandLeader(CI->getOperand(1), I, B);
+  // Avoid processing the same info twice
+  const PredicateBase *LastPredInfo = nullptr;
+
+  // See if we know something about the comparison itself, like it is the target
+  // of an assume.
+  auto *CmpPI = PredInfo->getPredicateInfoFor(I);
+  if (dyn_cast_or_null<PredicateAssume>(CmpPI))
+    return createConstantExpression(ConstantInt::getTrue(CI->getType()));
+
+  // See if we know something just from the operands themselves
+  if (Op0 == Op1) {
+    if (CI->isTrueWhenEqual())
+      return createConstantExpression(ConstantInt::getTrue(CI->getType()));
+    else if (CI->isFalseWhenEqual())
+      return createConstantExpression(ConstantInt::getFalse(CI->getType()));
+  }
+
+  // See if our operands have predicate info, so that we may be able to derive
+  // something from a previous comparison.
+  for (const auto &Op : CI->operands()) {
+    auto *PI = PredInfo->getPredicateInfoFor(Op);
+    if (const auto *PBranch = dyn_cast_or_null<PredicateBranch>(PI)) {
+      if (PI == LastPredInfo)
+        continue;
+      LastPredInfo = PI;
+      // TODO: Along the false edge, we may know more things too, like icmp of
+      // same operands is false.
+      //
+      auto *BranchCond = PBranch->Comparison;
+      if (lookupOperandLeader(BranchCond->getOperand(0), I, B) == Op0 &&
+          lookupOperandLeader(BranchCond->getOperand(1), I, B) == Op1) {
+        if (PBranch->TrueEdge) {
+          // If we know the previous predicate is true and we are in the true
+          // edge then we may be implied true or false.
+          if (CI->isImpliedTrueByMatchingCmp(BranchCond->getPredicate()))
+            return createConstantExpression(
+                ConstantInt::getTrue(CI->getType()));
+          if (CI->isImpliedFalseByMatchingCmp(BranchCond->getPredicate()))
+            return createConstantExpression(
+                ConstantInt::getFalse(CI->getType()));
+        } else {
+          // Just handle the ne and eq cases, where if we have the same
+          // operands, we may know something.
+          if (BranchCond->getPredicate() == CI->getPredicate()) {
+            // Same predicate, same ops,we know it was false, so this is false.
+            return createConstantExpression(
+                ConstantInt::getFalse(CI->getType()));
+          } else if (BranchCond->getPredicate() == CI->getInversePredicate()) {
+            // Inverse predicate, we know the other was false, so this is true.
+            // FIXME: Double check this
+            return createConstantExpression(
+                ConstantInt::getTrue(CI->getType()));
+          }
+        }
+      }
+    }
+  }
+  // Create expression will take care of simplifyCmpInst
+  return createExpression(I, B);
+}
 
 // Substitute and symbolize the value before value numbering.
 const Expression *NewGVN::performSymbolicEvaluation(Value *V,
@@ -1046,6 +1197,10 @@ const Expression *NewGVN::performSymbolicEvaluation(Value *V,
     case Instruction::BitCast: {
       E = createExpression(I, B);
     } break;
+    case Instruction::ICmp:
+    case Instruction::FCmp: {
+      E = performSymbolicCmpEvaluation(I, B);
+    } break;
 
     case Instruction::Add:
     case Instruction::FAdd:
@@ -1065,8 +1220,6 @@ const Expression *NewGVN::performSymbolicEvaluation(Value *V,
     case Instruction::And:
     case Instruction::Or:
     case Instruction::Xor:
-    case Instruction::ICmp:
-    case Instruction::FCmp:
     case Instruction::Trunc:
     case Instruction::ZExt:
     case Instruction::SExt:
@@ -1364,7 +1517,8 @@ void NewGVN::updateReachableEdge(BasicBlock *From, BasicBlock *To) {
 
 // Given a predicate condition (from a switch, cmp, or whatever) and a block,
 // see if we know some constant value for it already.
-Value *NewGVN::findConditionEquivalence(Value *Cond, BasicBlock *B) const {
+Value *NewGVN::findConditionEquivalence(Value *Cond,
+                                        const BasicBlock *B) const {
   auto Result = lookupOperandLeader(Cond, nullptr, B);
   if (isa<Constant>(Result))
     return Result;
@@ -1721,13 +1875,14 @@ void NewGVN::verifyMemoryCongruency() const {
 // This is the main transformation entry point.
 bool NewGVN::runGVN(Function &F, DominatorTree *_DT, AssumptionCache *_AC,
                     TargetLibraryInfo *_TLI, AliasAnalysis *_AA,
-                    MemorySSA *_MSSA) {
+                    MemorySSA *_MSSA, PredicateInfo *_PredInfo) {
   bool Changed = false;
   DT = _DT;
   AC = _AC;
   TLI = _TLI;
   AA = _AA;
   MSSA = _MSSA;
+  PredInfo = _PredInfo;
   DL = &F.getParent()->getDataLayout();
   MSSAWalker = MSSA->getWalker();
 
@@ -1802,6 +1957,9 @@ bool NewGVN::runGVN(Function &F, DominatorTree *_DT, AssumptionCache *_AC,
   while (TouchedInstructions.any()) {
     ++Iterations;
     // Walk through all the instructions in all the blocks in RPO.
+    // TODO: As we hit a new block, we should push and pop equalities into a
+    // table lookupOperandLeader can use, to catch things PredicateInfo
+    // might miss, like edge-only equivalences.
     for (int InstrNum = TouchedInstructions.find_first(); InstrNum != -1;
          InstrNum = TouchedInstructions.find_next(InstrNum)) {
 
@@ -1890,7 +2048,8 @@ bool NewGVN::runOnFunction(Function &F) {
                 &getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F),
                 &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI(),
                 &getAnalysis<AAResultsWrapperPass>().getAAResults(),
-                &getAnalysis<MemorySSAWrapperPass>().getMSSA());
+                &getAnalysis<MemorySSAWrapperPass>().getMSSA(),
+                &getAnalysis<PredicateInfoWrapperPass>().getPredInfo());
 }
 
 PreservedAnalyses NewGVNPass::run(Function &F, AnalysisManager<Function> &AM) {
@@ -1904,7 +2063,8 @@ PreservedAnalyses NewGVNPass::run(Function &F, AnalysisManager<Function> &AM) {
   auto &TLI = AM.getResult<TargetLibraryAnalysis>(F);
   auto &AA = AM.getResult<AAManager>(F);
   auto &MSSA = AM.getResult<MemorySSAAnalysis>(F).getMSSA();
-  bool Changed = Impl.runGVN(F, &DT, &AC, &TLI, &AA, &MSSA);
+  auto &PredInfo = AM.getResult<PredicateInfoAnalysis>(F).getPredInfo();
+  bool Changed = Impl.runGVN(F, &DT, &AC, &TLI, &AA, &MSSA, &PredInfo);
   if (!Changed)
     return PreservedAnalyses::all();
   PreservedAnalyses PA;
