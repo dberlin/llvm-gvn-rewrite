@@ -58,24 +58,6 @@ static cl::opt<bool> VerifyPredicateInfo(
     "verify-predicateinfo", cl::init(false), cl::Hidden,
     cl::desc("Verify PredicateInfo in legacy printer pass."));
 namespace llvm {
-/// \brief An assembly annotator class to print PredicateInfo information in
-/// comments.
-class PredicateInfoAnnotatedWriter : public AssemblyAnnotationWriter {
-  friend class PredicateInfo;
-  const PredicateInfo *PredInfo;
-
-public:
-  PredicateInfoAnnotatedWriter(const PredicateInfo *M) : PredInfo(M) {}
-
-  virtual void emitBasicBlockStartAnnot(const BasicBlock *BB,
-                                        formatted_raw_ostream &OS) {}
-
-  virtual void emitInstructionAnnot(const Instruction *I,
-                                    formatted_raw_ostream &OS) {}
-};
-}
-
-namespace llvm {
 
 void ComputeLiveInBlocks(BasicBlock *DefBlock,
                          SmallPtrSetImpl<BasicBlock *> &UsingBlocks,
@@ -164,9 +146,31 @@ struct PredicateInfo::SplitInfo {
   BasicBlock *BranchBB = nullptr;
   BasicBlock *SplitBB = nullptr;
   CmpInst *Comparison = nullptr;
-  SplitInfo(BasicBlock *BranchBB, BasicBlock *SplitBB, CmpInst *Comparison)
-      : BranchBB(BranchBB), SplitBB(SplitBB), Comparison(Comparison) {}
+  bool TakenEdge = false;
+  SplitInfo(BasicBlock *BranchBB, BasicBlock *SplitBB, CmpInst *Comparison,
+            bool TakenEdge)
+      : BranchBB(BranchBB), SplitBB(SplitBB), Comparison(Comparison),
+        TakenEdge(TakenEdge) {}
   SplitInfo() {}
+};
+
+/// \brief An assembly annotator class to print PredicateInfo information in
+/// comments.
+class PredicateInfoAnnotatedWriter : public AssemblyAnnotationWriter {
+  friend class PredicateInfo;
+  const PredicateInfo *PredInfo;
+
+public:
+  PredicateInfoAnnotatedWriter(const PredicateInfo *M) : PredInfo(M) {}
+
+  virtual void emitBasicBlockStartAnnot(const BasicBlock *BB,
+                                        formatted_raw_ostream &OS) {}
+
+  virtual void emitInstructionAnnot(const Instruction *I,
+                                    formatted_raw_ostream &OS) {
+    if (const auto *PI = PredInfo->getPredicateInfoFor(I))
+      OS << "; Has predicate info { TakenEdge:" << PI->TakenEdge << " }\n";
+  }
 };
 
 void PredicateInfo::convertUsesToDFSOrdered(
@@ -308,8 +312,10 @@ void PredicateInfo::buildPredicateInfo() {
           OpsToRename.insert(Op);
           auto &OperandInfo = getOrCreateValueInfo(Op);
           for (auto *Succ : SuccsToProcess) {
+            bool TakenEdge = (Succ == FirstBB);
             OperandInfo.PossibleSplitBlocks.insert(Succ);
-            OperandInfo.SplitInfos.insert({Succ, {BranchBB, Succ, Comparison}});
+            OperandInfo.SplitInfos.insert(
+                {Succ, {BranchBB, Succ, Comparison, TakenEdge}});
           }
         }
       }
@@ -403,7 +409,7 @@ void PredicateInfo::renameUses(SmallPtrSetImpl<Value *> &OpsToRename) {
             &SI.SplitBB->front());
         PHI->addIncoming(Op, SI.BranchBB);
         OriginalToNewMap[{Op, SI.SplitBB}] = PHI;
-        PredicateMap.insert({PHI, SI.Comparison});
+        PredicateMap.insert({PHI, &SI});
         Result.Def = PHI;
       }
 

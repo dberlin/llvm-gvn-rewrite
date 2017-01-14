@@ -114,27 +114,6 @@ class raw_ostream;
 /// \brief Encapsulates PredicateInfo, including all data associated with memory
 /// accesses.
 class PredicateInfo {
-public:
-  PredicateInfo(Function &, DominatorTree *);
-  ~PredicateInfo();
-
-  void dump() const;
-  void print(raw_ostream &) const;
-
-  /// \brief Verify that PredicateInfo is self consistent (IE definitions
-  /// dominate
-  /// all uses, uses appear in the right places).  This is used by unit tests.
-  void verifyPredicateInfo() const;
-
-  CmpInst *getPredicateFor(const Value *V) const {
-    return PredicateMap.lookup(V);
-  }
-
-protected:
-  // Used by PredicateInfo annotater, dumpers, and wrapper pass
-  friend class PredicateInfoAnnotatedWriter;
-  friend class PredicateInfoPrinterLegacyPass;
-
 private:
   struct ValueDFS;
   struct SplitInfo;
@@ -150,6 +129,28 @@ private:
     DenseMap<BasicBlock *, SplitInfo> SplitInfos;
   };
 
+public:
+  PredicateInfo(Function &, DominatorTree *);
+  ~PredicateInfo();
+
+  void dump() const;
+  void print(raw_ostream &) const;
+
+  /// \brief Verify that PredicateInfo is self consistent (IE definitions
+  /// dominate
+  /// all uses, uses appear in the right places).  This is used by unit tests.
+  void verifyPredicateInfo() const;
+
+  const SplitInfo *getPredicateInfoFor(const Value *V) const {
+    return PredicateMap.lookup(V);
+  }
+
+protected:
+  // Used by PredicateInfo annotater, dumpers, and wrapper pass
+  friend class PredicateInfoAnnotatedWriter;
+  friend class PredicateInfoPrinterLegacyPass;
+
+private:
   void buildPredicateInfo();
   void renameUses(SmallPtrSetImpl<Value *> &);
   void convertUsesToDFSOrdered(Value *, SmallVectorImpl<ValueDFS> &);
@@ -157,7 +158,7 @@ private:
   const ValueInfo &getValueInfo(Value *) const;
   Function &F;
   DominatorTree *DT;
-  DenseMap<const Value *, CmpInst *> PredicateMap;
+  DenseMap<const Value *, const SplitInfo *> PredicateMap;
   DenseMap<std::pair<Value *, BasicBlock *>, Value *> OriginalToNewMap;
   SmallVector<ValueInfo, 32> ValueInfos;
   DenseMap<Value *, unsigned int> ValueInfoNums;
