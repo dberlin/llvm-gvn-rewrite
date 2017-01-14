@@ -126,20 +126,41 @@ public:
   /// all uses, uses appear in the right places).  This is used by unit tests.
   void verifyPredicateInfo() const;
 
+  CmpInst *getPredicateFor(const Value *V) const {
+    return PredicateMap.lookup(V);
+  }
+
 protected:
   // Used by PredicateInfo annotater, dumpers, and wrapper pass
   friend class PredicateInfoAnnotatedWriter;
   friend class PredicateInfoPrinterLegacyPass;
 
 private:
+  struct ValueDFS;
+  struct SplitInfo;
+  class ValueDFSStack;
+  // Used to store information about each value we might rename.
+  struct ValueInfo {
+
+    // Places we may want to split, we later use liveness to determine whether
+    // we actually split there or not.
+    SmallPtrSet<BasicBlock *, 8> PossibleSplitBlocks;
+    // Information about each possible split, indexed by the basic block of the
+    // possible copy.
+    DenseMap<BasicBlock *, SplitInfo> SplitInfos;
+  };
+
   void buildPredicateInfo();
+  void renameUses(SmallPtrSetImpl<Value *> &);
+  void convertUsesToDFSOrdered(Value *, SmallVectorImpl<ValueDFS> &);
+  ValueInfo &getOrCreateValueInfo(Value *);
+  const ValueInfo &getValueInfo(Value *) const;
   Function &F;
   DominatorTree *DT;
-
-  // Domination mappings
-
-  // PredicateInfo building info
-  unsigned NextID;
+  DenseMap<const Value *, CmpInst *> PredicateMap;
+  DenseMap<std::pair<Value *, BasicBlock *>, Value *> OriginalToNewMap;
+  SmallVector<ValueInfo, 32> ValueInfos;
+  DenseMap<Value *, unsigned int> ValueInfoNums;
 };
 
 // This pass does eager building and then printing of PredicateInfo. It is used
