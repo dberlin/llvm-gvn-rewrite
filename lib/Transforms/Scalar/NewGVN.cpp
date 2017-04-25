@@ -112,8 +112,6 @@ STATISTIC(NumGVNLeaderChanges, "Number of leader changes");
 STATISTIC(NumGVNSortedLeaderChanges, "Number of sorted leader changes");
 STATISTIC(NumGVNAvoidedSortedLeaderChanges,
           "Number of avoided sorted leader changes");
-STATISTIC(NumGVNNotMostDominatingLeader,
-          "Number of times a member dominated it's new classes' leader");
 STATISTIC(NumGVNDeadStores, "Number of redundant/dead stores eliminated");
 DEBUG_COUNTER(VNCounter, "newgvn-vn",
               "Controls which instructions are value numbered")
@@ -2047,28 +2045,6 @@ void NewGVN::moveValueToNewCongruenceClass(Instruction *I, const Expression *E,
         isa<UndefValue>(NewClass->getLeader())) {
       DEBUG(dbgs() << "Found constant value for class, changing leader!\n");
       NewClass->setLeader(CE->getConstantValue());
-      NewClass->resetNextLeader();
-      markValueLeaderChangeTouched(NewClass);
-    }
-  }
-
-  // It's possible, though unlikely, for us to discover equivalences such
-  // that the current leader does not dominate the old one.
-  // This statistic tracks how often this happens.
-  // We assert on phi nodes when this happens, currently, for debugging, because
-  // we want to make sure we name phi node cycles properly.
-  if (isa<Instruction>(NewClass->getLeader()) && NewClass->getLeader() &&
-      I != NewClass->getLeader()) {
-    auto *IBB = I->getParent();
-    auto *NCBB = cast<Instruction>(NewClass->getLeader())->getParent();
-    bool Dominated =
-        IBB == NCBB && InstrToDFSNum(I) < InstrToDFSNum(NewClass->getLeader());
-    Dominated = Dominated || DT->properlyDominates(IBB, NCBB);
-    if (Dominated) {
-      ++NumGVNNotMostDominatingLeader;
-      DEBUG(dbgs()
-            << "Changing leader of class to most dominating instruction!\n");
-      NewClass->setLeader(I);
       NewClass->resetNextLeader();
       markValueLeaderChangeTouched(NewClass);
     }
