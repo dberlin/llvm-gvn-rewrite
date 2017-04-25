@@ -1920,6 +1920,18 @@ void NewGVN::moveValueToNewCongruenceClass(Instruction *I, const Expression *E,
                                            CongruenceClass *NewClass) {
   if (I == OldClass->getNextLeader().first)
     OldClass->resetNextLeader();
+  OldClass->erase(I);
+  NewClass->insert(I);
+
+  if (auto *CE = dyn_cast<ConstantExpression>(E)) {
+    if (!isa<Constant>(NewClass->getLeader()) ||
+        isa<UndefValue>(NewClass->getLeader())) {
+      DEBUG(dbgs() << "Found constant value for class, changing leader!\n");
+      NewClass->setLeader(CE->getConstantValue());
+      NewClass->resetNextLeader();
+      markValueLeaderChangeTouched(NewClass);
+    }
+  }
 
   // It's possible, though unlikely, for us to discover equivalences such
   // that the current leader does not dominate the old one.
@@ -1935,17 +1947,19 @@ void NewGVN::moveValueToNewCongruenceClass(Instruction *I, const Expression *E,
     Dominated = Dominated || DT->properlyDominates(IBB, NCBB);
     if (Dominated) {
       ++NumGVNNotMostDominatingLeader;
-      assert(
-          !isa<PHINode>(I) &&
-          "New class for instruction should not be dominated by instruction");
+#if 1
+      DEBUG(dbgs()
+            << "Changing leader of class to most dominating instruction!\n");
+      NewClass->setLeader(I);
+      NewClass->resetNextLeader();
+      markValueLeaderChangeTouched(NewClass);
+#endif
     }
   }
 
   if (NewClass->getLeader() != I)
     NewClass->addPossibleNextLeader({I, InstrToDFSNum(I)});
 
-  OldClass->erase(I);
-  NewClass->insert(I);
   // Handle our special casing of stores.
   if (auto *SI = dyn_cast<StoreInst>(I)) {
     OldClass->decStoreCount();
@@ -2040,7 +2054,32 @@ void NewGVN::moveValueToNewCongruenceClass(Instruction *I, const Expression *E,
 
 // Perform congruence finding on a given value numbering expression.
 void NewGVN::performCongruenceFinding(Instruction *I, const Expression *E) {
-  ValueToExpression[I] = E;
+  // If it was a constant, and it changed constants, don't let it.
+  // InstructionSimplify will give different and inconsistent answers for things
+  // based on undef depending on how you ask and until all of those bugs go
+  // away, we need to work around it.  Anything else you see happen here is a
+  // bug.
+  auto *OldExpression = ValueToExpression.lookup(I);
+  if (OldExpression && isa<ConstantExpression>(E) &&
+      isa<ConstantExpression>(OldExpression)) {
+    auto *OldCE = cast<ConstantExpression>(OldExpression);
+    auto *NewCE = cast<ConstantExpression>(E);
+    // We allow changes from undef to real values (rank 1 to rank 0)
+    // Anything else is not allowed.
+    if (OldCE->getConstantValue() != NewCE->getConstantValue() &&
+        getRank(OldCE->getConstantValue()) ==
+            getRank(NewCE->getConstantValue())) {
+      DEBUG(dbgs() << "Discovered " << *I
+                   << " reduces to at least two constant values: "
+                   << *OldCE->getConstantValue() << " and "
+                   << *NewCE->getConstantValue() << "\n");
+      DEBUG(dbgs() << "We are choosing " << *OldCE->getConstantValue() << "\n");
+      E = OldCE;
+    }
+  }
+  if (OldExpression != E)
+    ValueToExpression[I] = E;
+
   // This is guaranteed to return something, since it will at least find
   // TOP.
 
@@ -3341,11 +3380,12 @@ bool NewGVN::eliminateInstructions(Function &F) {
 // we will simplify an operation with all constants so that it doesn't matter
 // what order they appear in.
 unsigned int NewGVN::getRank(const Value *V) const {
-  // Prefer undef to anything else
+  // Prefer constants to undef to anything else
+  // Undef is a constant, have to check it first.
   if (isa<UndefValue>(V))
-    return 0;
-  if (isa<Constant>(V))
     return 1;
+  if (isa<Constant>(V))
+    return 0;
   else if (auto *A = dyn_cast<Argument>(V))
     return 2 + A->getArgNo();
 
