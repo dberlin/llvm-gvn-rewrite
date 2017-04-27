@@ -3409,22 +3409,41 @@ bool NewGVN::eliminateInstructions(Function &F) {
   // Since we are going to walk the domtree anyway, and we can't guarantee the
   // DFS numbers are updated, we compute some ourselves.
   DT->updateDFSNumbers();
-
-  for (auto &B : F) {
-    if (!ReachableBlocks.count(&B)) {
-      for (const auto S : successors(&B)) {
-        for (auto II = S->begin(); isa<PHINode>(II); ++II) {
-          auto &Phi = cast<PHINode>(*II);
-          DEBUG(dbgs() << "Replacing incoming value of " << *II << " for block "
-                       << getBlockName(&B)
-                       << " with undef due to it being unreachable\n");
-          for (auto &Operand : Phi.incoming_values())
-            if (Phi.getIncomingBlock(Operand) == &B)
-              Operand.set(UndefValue::get(Phi.getType()));
+  auto ReplaceUnreachablePHIArgs = [&](PHINode &PHI, BasicBlock *BB){
+    for (auto &Operand : PHI.incoming_values())
+      if (!ReachableEdges.count({PHI.getIncomingBlock(Operand), BB})) {
+        DEBUG(dbgs() << "Replacing incoming value of " << PHI
+              << " for block " << getBlockName(PHI.getIncomingBlock(Operand))
+              << " with undef due to it being unreachable\n");
+        Operand.set(UndefValue::get(PHI.getType()));
+      }
+  };
+  SmallPtrSet<BasicBlock *, 8> BlocksWithPhis;
+  for (auto &B : F)
+    if ((!B.empty() && isa<PHINode>(*B.begin())) ||
+        (PHIOfOpsPHIs.find(&B) != PHIOfOpsPHIs.end()))
+      BlocksWithPhis.insert(&B);
+  DenseMap<const BasicBlock *, unsigned> ReachablePredCount;
+  for (auto KV : ReachableEdges)
+    ReachablePredCount[KV.getEnd()]++;
+  for (auto *BB : BlocksWithPhis)
+    // TODO: It would be faster to use getNumIncomingBlocks() on a phi node in the
+    // block and subtract the pred count, but it's more complicated
+    if (ReachablePredCount.lookup(BB) !=
+        std::distance(pred_begin(BB), pred_end(BB))) {
+      for (auto II = BB->begin(); isa<PHINode>(II); ++II) {
+        auto &PHI = cast<PHINode>(*II);
+        ReplaceUnreachablePHIArgs(PHI, BB);
+      }
+      auto PHIResult = PHIOfOpsPHIs.find(BB);
+      if (PHIResult != PHIOfOpsPHIs.end()) {
+        auto &PHIs = PHIResult->second;
+        for (auto I : PHIs) {
+          auto *PHI = dyn_cast<PHINode>(I);
+          ReplaceUnreachablePHIArgs(*PHI, BB);
         }
       }
     }
-  }
 
   // Map to store the use counts
   DenseMap<const Value *, unsigned int> UseCounts;
