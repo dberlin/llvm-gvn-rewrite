@@ -2328,8 +2328,7 @@ void NewGVN::addPhiOfOps(PHINode *Op, BasicBlock *BB,
 }
 
 static bool okayForPHIOfOps(const Instruction *I) {
-  return isa<BinaryOperator>(I) || isa<SelectInst>(I) || isa<CmpInst>(I) ||
-         isa<LoadInst>(I);
+  return isa<BinaryOperator>(I) || isa<SelectInst>(I) || isa<CmpInst>(I);
 }
 
 // When we see an instruction that is an op of phis, generate the equivalent phi
