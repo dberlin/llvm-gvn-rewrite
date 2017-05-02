@@ -443,6 +443,7 @@ class NewGVN {
   // are known equivalent to.
   DenseMap<const Value *, PHINode *> RealToTemp;
   DenseMap<const Value *, Value *> TempToReal;
+  DenseMap<const Value *, SmallPtrSet<Value *, 2>> AdditionalUsers;
   // Map from basic block to the temporary operations we created
   DenseMap<const BasicBlock *, SmallVector<Instruction *, 8>> PHIOfOpsPHIs;
   // Map from temporary operation to MemoryAccess.
@@ -649,6 +650,7 @@ private:
   void markPredicateUsersTouched(Instruction *);
   void markValueLeaderChangeTouched(CongruenceClass *CC);
   void markMemoryLeaderChangeTouched(CongruenceClass *CC);
+  void addAdditionalUsers(Value *To, Value *User);
   void addPredicateUsers(const PredicateBase *, Instruction *);
   void addMemoryUsers(const MemoryAccess *To, MemoryAccess *U);
 
@@ -1460,11 +1462,14 @@ bool NewGVN::setMemoryClass(const MemoryAccess *From,
   return Changed;
 }
 
-// Determine if a phi is cycle-free.  That means the values in the phi don't
-// depend on any expressions that can change value as a result of the phi.
-// For example, a non-cycle free phi would be  v = phi(0, v+1).
+// Determine if a instruction is cycle-free.  That means the values in the
+// instruction don't
+// depend on any expressions that can change value as a result of the
+// instruction.
+// For example, a non-cycle free instruction would be  v = phi(0, v+1).
 bool NewGVN::isCycleFree(const Instruction *I) {
-  // In order to compute cycle-freeness, we do SCC finding on the phi, and see
+  // In order to compute cycle-freeness, we do SCC finding on the instruction,
+  // and see
   // what kind of SCC it ends up in.  If it is a singleton, it is cycle-free.
   // If it is not in a singleton, it is only cycle free if the other members are
   // all phi nodes (as they do not compute anything, they are copies).  TODO:
@@ -1816,8 +1821,12 @@ NewGVN::performSymbolicEvaluation(Value *V, SmallPtrSetImpl<Value *> &Visited) {
     default:
       return nullptr;
     }
+    // For now, we require the instruction be cycle free because we don't
+    // *always* create a phi of ops for instructions that could be done as phi
+    // of ops, we only do it if we think it is useful.  If we did do it all the
+    // time, we could remove the cycle free check.
     if (E && !isa<ConstantExpression>(E) && !isa<VariableExpression>(E) &&
-        PHINodeUses.count(I)) {
+        PHINodeUses.count(I) && isCycleFree(I)) {
       // FIXME: Backedge argument
       auto *PHIE = makePossiblePhiOfOps(I, false, Visited);
       if (PHIE)
@@ -1827,11 +1836,21 @@ NewGVN::performSymbolicEvaluation(Value *V, SmallPtrSetImpl<Value *> &Visited) {
   return E;
 }
 
+void NewGVN::addAdditionalUsers(Value *To, Value *User) {
+  AdditionalUsers[To].insert(User);
+}
+
 void NewGVN::markUsersTouched(Value *V) {
   // Now mark the users as touched.
   for (auto *User : V->users()) {
     assert(isa<Instruction>(User) && "Use of value not within an instruction?");
     TouchedInstructions.set(InstrToDFSNum(User));
+  }
+  const auto Result = AdditionalUsers.find(V);
+  if (Result != AdditionalUsers.end()) {
+    for (auto *User : Result->second)
+      TouchedInstructions.set(InstrToDFSNum(User));
+    //    AdditionalUsers.erase(Result);
   }
 }
 
@@ -2104,21 +2123,19 @@ void NewGVN::moveValueToNewCongruenceClass(Instruction *I, const Expression *E,
 void NewGVN::performCongruenceFinding(Instruction *I, const Expression *E) {
   ValueToExpression[I] = E;
 
+  assert(!TempToReal.lookup(I) &&
+         "Should not congruence find fake instructions");
   // This is guaranteed to return something, since it will at least find
   // TOP.
-
   CongruenceClass *IClass = ValueToClass[I];
   assert(IClass && "Should have found a IClass");
   // Dead classes should have been eliminated from the mapping.
   assert(!IClass->isDead() && "Found a dead class");
 
   CongruenceClass *EClass = nullptr;
-  if (auto *TTR = TempToReal.lookup(I)) {
-    EClass = ValueToClass.lookup(TTR);
-  } else if (const auto *VE = dyn_cast<VariableExpression>(E)) {
+  if (const auto *VE = dyn_cast<VariableExpression>(E)) {
     EClass = ValueToClass.lookup(VE->getVariableValue());
-  }
-  if (!EClass) {
+  } else {
     auto lookupResult = ExpressionToClass.insert({E, nullptr});
 
     // If it's not in the value table, create a new congruence class.
@@ -2168,11 +2185,8 @@ void NewGVN::performCongruenceFinding(Instruction *I, const Expression *E) {
   if (ClassChanged || LeaderChanged) {
     DEBUG(dbgs() << "New class " << EClass->getID() << " for expression " << *E
                  << "\n");
-    if (ClassChanged) {
+    if (ClassChanged)
       moveValueToNewCongruenceClass(I, E, IClass, EClass);
-      if (auto *RTV = RealToTemp.lookup(I))
-        TouchedInstructions.set(InstrToDFSNum(RTV));
-    }
 
     markUsersTouched(I);
     if (MemoryAccess *MA = getMemoryAccess(I))
@@ -2394,8 +2408,10 @@ NewGVN::makePossiblePhiOfOps(Instruction *I, bool HasBackedge,
         if (MemAccess)
           Iter = TempToMemory.insert({ValueOp, MemAccess}).first;
 
-        for (auto &Op : ValueOp->operands())
+        for (auto &Op : ValueOp->operands()) {
           Op = Op->DoPHITranslation(PHIBlock, PredBB);
+          addAdditionalUsers(Op, I);
+        }
         const Expression *E = performSymbolicEvaluation(ValueOp, Visited);
         delete ValueOp;
 
@@ -2403,6 +2419,7 @@ NewGVN::makePossiblePhiOfOps(Instruction *I, bool HasBackedge,
           TempToMemory.erase(Iter);
         if (!E)
           return nullptr;
+
         FoundVal = findPhiOfOpsLeader(E, PredBB);
         if (!FoundVal)
           return nullptr;
@@ -2543,6 +2560,7 @@ void NewGVN::cleanupTables() {
   ValueToExpression.clear();
   RealToTemp.clear();
   TempToReal.clear();
+  AdditionalUsers.clear();
   TempToBlock.clear();
   TempToMemory.clear();
   PHIOfOpsPHIs.clear();
