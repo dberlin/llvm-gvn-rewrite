@@ -478,13 +478,10 @@ public:
 class PHIExpression final : public BasicExpression {
 private:
   BasicBlock *BB;
-  // True if all the operands of this phi expression actually exist in the
-  // program, as opposed to having been temporarily created by GVN.
-  bool AllRealOps;
 
 public:
   PHIExpression(unsigned NumOperands, BasicBlock *B)
-      : BasicExpression(NumOperands, ET_Phi), BB(B), AllRealOps(false) {}
+      : BasicExpression(NumOperands, ET_Phi), BB(B) {}
   PHIExpression() = delete;
   PHIExpression(const PHIExpression &) = delete;
   PHIExpression &operator=(const PHIExpression &) = delete;
@@ -493,9 +490,6 @@ public:
   static bool classof(const Expression *EB) {
     return EB->getExpressionType() == ET_Phi;
   }
-
-  bool isAllRealOps() const { return AllRealOps; }
-  void setAllRealOps(bool B) { AllRealOps = B; }
 
   bool equals(const Expression &Other) const override {
     if (!this->BasicExpression::equals(Other))
