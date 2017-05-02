@@ -447,16 +447,6 @@ class NewGVN {
   DenseMap<const BasicBlock *, SmallVector<Instruction *, 8>> PHIOfOpsPHIs;
   // Map from temporary operation to MemoryAccess.
   DenseMap<const Instruction *, MemoryUseOrDef *> TempToMemory;
-  // Map from temporary operation to defining MemoryAccess.  Because the definig
-  // access may be unoptimized, and may change in the case of a MemoryUse when
-  // we call getClobberingMemoryAccess, we need to track what the original
-  // defining access was so we can add the temp instruction as a use.
-  // To save time and space, we only do this for unoptimized accesses.
-  DenseMap<const MemoryAccess *, MemoryAccess *> TempToDefiningAccess;
-  // Map from memoryaccess to set of temporary instructions with that
-  // memoryaccess, since they won't appear as Users.
-  DenseMap<const MemoryAccess *, SmallPtrSet<Instruction *, 8>>
-      MemoryToTempUsers;
   // Set of all temporary instructions we created.
   DenseSet<Instruction *> AllTempInstructions;
 
@@ -589,8 +579,7 @@ private:
   void initializeCongruenceClasses(Function &F);
   const Expression *makePossiblePhiOfOps(Instruction *, bool,
                                          SmallPtrSetImpl<Value *> &);
-  void addPhiOfOps(PHINode *Op, BasicBlock *BB, MemoryUseOrDef *MemAccess,
-                   Instruction *ExistingValue);
+  void addPhiOfOps(PHINode *Op, BasicBlock *BB, Instruction *ExistingValue);
 
   // Value number an Instruction or MemoryPhi.
   void valueNumberMemoryPhi(MemoryPhi *);
@@ -741,15 +730,6 @@ static std::string getBlockName(const BasicBlock *B) {
   return DOTGraphTraits<const Function *>::getSimpleNodeLabel(B, nullptr);
 }
 #endif
-
-// Get the defining MemoryAccess for a MemoryAccess, fake or real.  This is
-// because getClobberingMEmoryAccess may reset the defining access of a
-// MemoryUse.  When it does this, we will not have a way to know to add the temp
-// instructions as a user unless we have stored the original DefiningAccess
-MemoryAccess *NewGVN::getDefiningAccess(const MemoryAccess *MA) const {
-  auto *Result = TempToDefiningAccess.lookup(MA);
-  return Result ? Result : cast<MemoryUseOrDef>(MA)->getDefiningAccess();
-}
 
 // Get a MemoryAccess for an instruction, fake or real.
 MemoryUseOrDef *NewGVN::getMemoryAccess(const Instruction *I) const {
@@ -1150,11 +1130,11 @@ const Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I) {
   auto *SI = cast<StoreInst>(I);
   auto *StoreAccess = getMemoryAccess(SI);
   // Get the expression, if any, for the RHS of the MemoryDef.
-  const MemoryAccess *StoreRHS = getDefiningAccess(StoreAccess);
+  const MemoryAccess *StoreRHS = StoreAccess->getDefiningAccess();
   if (EnableStoreRefinement)
     StoreRHS = MSSAWalker->getClobberingMemoryAccess(StoreAccess);
   // If we bypassed the use-def chains, make sure we add a use.
-  if (StoreRHS != getDefiningAccess(StoreAccess))
+  if (StoreRHS != StoreAccess->getDefiningAccess())
     addMemoryUsers(StoreRHS, StoreAccess);
 
   StoreRHS = lookupMemoryLeader(StoreRHS);
@@ -1185,7 +1165,7 @@ const Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I) {
             dyn_cast<LoadInst>(lookupOperandLeader(SI->getValueOperand()))) {
       if ((lookupOperandLeader(LI->getPointerOperand()) ==
            lookupOperandLeader(SI->getPointerOperand())) &&
-          (lookupMemoryLeader(getDefiningAccess(getMemoryAccess(LI))) ==
+          (lookupMemoryLeader(getMemoryAccess(LI)->getDefiningAccess()) ==
            StoreRHS))
         return createVariableExpression(LI);
     }
@@ -1290,13 +1270,8 @@ const Expression *NewGVN::performSymbolicLoadEvaluation(Instruction *I) {
   if (isa<UndefValue>(LoadAddressLeader))
     return createConstantExpression(UndefValue::get(LI->getType()));
   MemoryAccess *OriginalAccess = getMemoryAccess(I);
-  auto *OldDefiningAccess = getDefiningAccess(OriginalAccess);
   MemoryAccess *DefiningAccess =
       MSSAWalker->getClobberingMemoryAccess(OriginalAccess);
-  // If the defining access changed, and it's a temporary instruction, update
-  // the memory users list.
-  if (OldDefiningAccess != DefiningAccess && AllTempInstructions.count(I))
-    MemoryToTempUsers[DefiningAccess].insert(I);
 
   if (!MSSA->isLiveOnEntryDef(DefiningAccess)) {
     if (auto *MD = dyn_cast<MemoryDef>(DefiningAccess)) {
@@ -1841,7 +1816,7 @@ NewGVN::performSymbolicEvaluation(Value *V, SmallPtrSetImpl<Value *> &Visited) {
     default:
       return nullptr;
     }
-    if (!isa<ConstantExpression>(E) && !isa<VariableExpression>(E) &&
+    if (E && !isa<ConstantExpression>(E) && !isa<VariableExpression>(E) &&
         PHINodeUses.count(I)) {
       // FIXME: Backedge argument
       auto *PHIE = makePossiblePhiOfOps(I, false, Visited);
@@ -1874,11 +1849,6 @@ void NewGVN::markMemoryUsersTouched(const MemoryAccess *MA) {
     return;
   for (auto U : MA->users())
     TouchedInstructions.set(MemoryToDFSNum(U));
-  const auto TempResult = MemoryToTempUsers.find(MA);
-  if (TempResult != MemoryToTempUsers.end())
-    for (auto *User : TempResult->second)
-      TouchedInstructions.set(InstrToDFSNum(User));
-
   const auto Result = MemoryToUsers.find(MA);
   if (Result != MemoryToUsers.end()) {
     for (auto *User : Result->second)
@@ -2343,7 +2313,7 @@ void NewGVN::processOutgoingEdges(TerminatorInst *TI, BasicBlock *B) {
   }
 }
 
-void NewGVN::addPhiOfOps(PHINode *Op, BasicBlock *BB, MemoryUseOrDef *MemAccess,
+void NewGVN::addPhiOfOps(PHINode *Op, BasicBlock *BB,
                          Instruction *ExistingValue) {
   InstrDFS[Op] = InstrToDFSNum(ExistingValue);
   // InstrDFS[Op] = MaxDFSNum++;
@@ -2351,18 +2321,15 @@ void NewGVN::addPhiOfOps(PHINode *Op, BasicBlock *BB, MemoryUseOrDef *MemAccess,
   AllTempInstructions.insert(Op);
   PHIOfOpsPHIs[BB].push_back(Op);
   TempToBlock[Op] = BB;
-  if (MemAccess) {
-    TempToMemory[Op] = MemAccess;
-    // If it's not already optimized, it could be reset by
-    // getClobberingMemoryAccess.
-    if (!MemAccess->isOptimized())
-      TempToDefiningAccess[MemAccess] = MemAccess->getDefiningAccess();
-    MemoryToTempUsers[MemAccess->getDefiningAccess()].insert(Op);
-  }
   if (ExistingValue) {
     RealToTemp[ExistingValue] = Op;
     TempToReal[Op] = ExistingValue;
   }
+}
+
+static bool okayForPHIOfOps(const Instruction *I) {
+  return isa<BinaryOperator>(I) || isa<SelectInst>(I) || isa<CmpInst>(I) ||
+         isa<LoadInst>(I);
 }
 
 // When we see an instruction that is an op of phis, generate the equivalent phi
@@ -2370,7 +2337,7 @@ void NewGVN::addPhiOfOps(PHINode *Op, BasicBlock *BB, MemoryUseOrDef *MemAccess,
 const Expression *
 NewGVN::makePossiblePhiOfOps(Instruction *I, bool HasBackedge,
                              SmallPtrSetImpl<Value *> &Visited) {
-  if (!isa<BinaryOperator>(I) && !isa<LoadInst>(I) && !isa<CmpInst>(I))
+  if (!okayForPHIOfOps(I))
     return nullptr;
 
   if (!Visited.insert(I).second)
@@ -2402,7 +2369,7 @@ NewGVN::makePossiblePhiOfOps(Instruction *I, bool HasBackedge,
   // If the memory operation is defined by a memory operation this block that
   // isn't a MemoryPhi, transforming the pointer backwards through a scalar phi
   // can't help, as it would still be killed by that memory operation.
-  if (MemAccess && !isa<MemoryPhi>(MemAccess) &&
+  if (MemAccess && !isa<MemoryPhi>(MemAccess->getDefiningAccess()) &&
       MemAccess->getDefiningAccess()->getBlock() == I->getParent())
     return nullptr;
 
@@ -2419,27 +2386,43 @@ NewGVN::makePossiblePhiOfOps(Instruction *I, bool HasBackedge,
     SmallVector<std::pair<Value *, BasicBlock *>, 4> Ops;
     auto *PHIBlock = getBlockForValue(OpPHI);
     for (auto PredBB : OpPHI->blocks()) {
-      Instruction *ValueOp = I->clone();
+      Value *FoundVal = nullptr;
+      // We could just skip unreachable edges entirely but it's tricky to do
+      // with existing phi nodes.
+      if (ReachableEdges.count({PredBB, PHIBlock})) {
+        Instruction *ValueOp = I->clone();
+        auto Iter = TempToMemory.end();
+        if (MemAccess)
+          Iter = TempToMemory.insert({ValueOp, MemAccess}).first;
 
-      for (auto &Op : ValueOp->operands())
-        Op = Op->DoPHITranslation(PHIBlock, PredBB);
-      const Expression *E = performSymbolicEvaluation(ValueOp, Visited);
-      delete ValueOp;
-      if (!E)
-        return nullptr;
+        for (auto &Op : ValueOp->operands())
+          Op = Op->DoPHITranslation(PHIBlock, PredBB);
+        const Expression *E = performSymbolicEvaluation(ValueOp, Visited);
+        delete ValueOp;
 
-      auto *FoundVal = findPhiOfOpsLeader(E, PredBB);
-      if (!FoundVal)
-        return nullptr;
+        if (MemAccess)
+          TempToMemory.erase(Iter);
+        if (!E)
+          return nullptr;
+        FoundVal = findPhiOfOpsLeader(E, PredBB);
+        if (!FoundVal)
+          return nullptr;
+      } else {
+        DEBUG(dbgs() << "Skipping phi of ops operand for incoming block "
+                     << getBlockName(PredBB)
+                     << " because the block is unreachable\n");
+        FoundVal = UndefValue::get(I->getType());
+      }
+
       Ops.push_back({FoundVal, PredBB});
-      DEBUG(dbgs() << "Found   phi of ops operand " << *FoundVal << " in "
+      DEBUG(dbgs() << "Found phi of ops operand " << *FoundVal << " in "
                    << getBlockName(PredBB) << "\n");
     }
     auto *ValuePHI = RealToTemp.lookup(I);
     bool NewPHI = false;
     if (!ValuePHI) {
       ValuePHI = PHINode::Create(I->getType(), OpPHI->getNumOperands());
-      addPhiOfOps(ValuePHI, PHIBlock, nullptr, I);
+      addPhiOfOps(ValuePHI, PHIBlock, I);
       NewPHI = true;
     }
     if (NewPHI) {
@@ -2462,10 +2445,6 @@ NewGVN::makePossiblePhiOfOps(Instruction *I, bool HasBackedge,
     return performSymbolicEvaluation(ValuePHI, Visited);
   }
   return nullptr;
-}
-
-static bool okayForPHIOfOps(const Instruction *I) {
-  return isa<BinaryOperator>(I) || isa<SelectInst>(I) || isa<CmpInst>(I);
 }
 
 // The algorithm initially places the values of the routine in the TOP
@@ -2567,7 +2546,6 @@ void NewGVN::cleanupTables() {
   TempToReal.clear();
   TempToBlock.clear();
   TempToMemory.clear();
-  MemoryToTempUsers.clear();
   PHIOfOpsPHIs.clear();
   ReachableBlocks.clear();
   ReachableEdges.clear();
