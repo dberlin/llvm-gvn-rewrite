@@ -1821,12 +1821,9 @@ NewGVN::performSymbolicEvaluation(Value *V, SmallPtrSetImpl<Value *> &Visited) {
     default:
       return nullptr;
     }
-    // For now, we require the instruction be cycle free because we don't
-    // *always* create a phi of ops for instructions that could be done as phi
-    // of ops, we only do it if we think it is useful.  If we did do it all the
-    // time, we could remove the cycle free check.
+
     if (E && !isa<ConstantExpression>(E) && !isa<VariableExpression>(E) &&
-        PHINodeUses.count(I) && isCycleFree(I)) {
+        PHINodeUses.count(I)) {
       // FIXME: Backedge argument
       auto *PHIE = makePossiblePhiOfOps(I, false, Visited);
       if (PHIE)
@@ -1878,6 +1875,10 @@ void NewGVN::markMemoryUsersTouched(const MemoryAccess *MA) {
 
 // Add I to the set of users of a given predicate.
 void NewGVN::addPredicateUsers(const PredicateBase *PB, Instruction *I) {
+  // This is a slight hack.  When doing phi of ops, we set the instruction
+  // numbers to be the right one, and then this ensures we don't add any deleted
+  // operands to the predicate user list.
+  I = cast<Instruction>(InstrFromDFSNum(InstrToDFSNum(I)));
   if (auto *PBranch = dyn_cast<PredicateBranch>(PB))
     PredicateToUsers[PBranch->Condition].insert(I);
   else if (auto *PAssume = dyn_cast<PredicateBranch>(PB))
@@ -2355,7 +2356,14 @@ NewGVN::makePossiblePhiOfOps(Instruction *I, bool HasBackedge,
 
   if (!Visited.insert(I).second)
     return nullptr;
+  // For now, we require the instruction be cycle free because we don't
+  // *always* create a phi of ops for instructions that could be done as phi
+  // of ops, we only do it if we think it is useful.  If we did do it all the
+  // time, we could remove the cycle free check.
+  if (!isCycleFree(I))
+    return nullptr;
 
+  unsigned IDFSNum = InstrToDFSNum(I);
   // Pretty much all of the instructions we can convert to phi of ops over a
   // backedge that are adds, are really induction variables, and those are
   // pretty much pointless to convert.  This is very coarse-grained for a
@@ -2412,7 +2420,9 @@ NewGVN::makePossiblePhiOfOps(Instruction *I, bool HasBackedge,
           Op = Op->DoPHITranslation(PHIBlock, PredBB);
           addAdditionalUsers(Op, I);
         }
+        InstrDFS.insert({ValueOp, IDFSNum});
         const Expression *E = performSymbolicEvaluation(ValueOp, Visited);
+        InstrDFS.erase(ValueOp);
         delete ValueOp;
 
         if (MemAccess)
